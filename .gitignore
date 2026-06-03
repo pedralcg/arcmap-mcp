@@ -1,0 +1,26 @@
+# Secretos / entorno
+.env
+
+# Diseño viejo (batch por subproceso) — referencia local, no se publica.
+legacy/
+
+# Backlog interno de pendientes — local, no se publica.
+PENDIENTE.local.md
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editores / IDE
+.vscode/
+.idea/
+*.swp
+
+# Los logs de auditoría viven fuera del repo (C:\MCP_Logs por defecto).

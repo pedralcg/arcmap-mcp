@@ -1,0 +1,2 @@
+# Host MCP — Python 3 (64 bits). NO instalar en el Python 2.7 de ArcMap.
+mcp>=1.2.0
