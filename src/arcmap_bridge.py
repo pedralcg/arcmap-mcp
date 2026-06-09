@@ -26,6 +26,7 @@ import os
 import sys
 import json
 import errno
+import atexit
 import socket
 import ctypes
 import base64
@@ -42,7 +43,13 @@ PORT = int(os.environ.get("ARCMAP_BRIDGE_PORT", "27179"))
 
 # Estado global del puente.
 _server = {"sock": None, "clients": None, "running": False,
-           "timerproc": None, "timer_id": None, "busy": False}
+           "timerproc": None, "timer_id": None, "busy": False,
+           "atexit_registrado": False}
+
+# Los thunks TIMERPROC de ctypes NO se liberan jamás: si quedara un WM_TIMER
+# pendiente en la cola tras KillTimer, DispatchMessage saltaría al thunk; si
+# está liberado es corrupción de heap (0xc0000374) y ArcMap revienta al cerrar.
+_thunks_vivos = []
 
 # --- Win32 SetTimer (timer en el hilo principal de ArcMap) ----------------- #
 user32 = ctypes.windll.user32
@@ -1563,14 +1570,26 @@ def start():
     cb = TIMERPROC(_tick)
     tid = user32.SetTimer(None, 0, 100, cb)
     _server["timerproc"] = cb          # mantener viva la referencia (no GC)
+    _thunks_vivos.append(cb)           # y NUNCA liberarla (ver nota arriba)
     _server["timer_id"] = tid
     if not tid:
         print("[arcmap-bridge] AVISO: SetTimer devolvió 0 (el sondeo no arrancará).")
+    # CRÍTICO: matar el timer cuando ArcMap finalice el Python embebido. Si el
+    # usuario cierra ArcMap sin pulsar Detener, el timer seguiría disparando
+    # durante el teardown y, una vez finalizado el intérprete, el callback
+    # apunta a memoria liberada -> heap corruption (0xc0000374) AL CERRAR
+    # ArcMap (crash silencioso que además puede corromper Normal.mxt).
+    if not _server["atexit_registrado"]:
+        atexit.register(stop)
+        _server["atexit_registrado"] = True
     print("[arcmap-bridge] activo en %s:%s (SetTimer id=%s, hilo principal)" % (HOST, PORT, tid))
     print("[arcmap-bridge] deja ArcMap abierto. Para parar: stop()")
 
 
 def stop():
+    # Idempotente y a prueba de teardown: también se ejecuta vía atexit cuando
+    # ArcMap cierra (stdout puede no existir ya; nada aquí debe lanzar).
+    ya_parado = not _server.get("running") and not _server.get("timer_id")
     _server["running"] = False
     tid = _server.get("timer_id")
     if tid:
@@ -1579,7 +1598,7 @@ def stop():
         except Exception:
             pass
     _server["timer_id"] = None
-    _server["timerproc"] = None
+    _server["timerproc"] = None      # la referencia perdura en _thunks_vivos
     for item in list(_server.get("clients") or []):
         _close_client(item)
     try:
@@ -1587,7 +1606,11 @@ def stop():
     except Exception:
         pass
     _server["sock"] = None
-    print("[arcmap-bridge] detenido")
+    if not ya_parado:
+        try:
+            print("[arcmap-bridge] detenido")
+        except Exception:
+            pass
 
 
 # Arranque automático solo si se ejecuta directamente (execfile en la ventana
