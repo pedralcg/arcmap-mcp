@@ -42,7 +42,7 @@ PORT = int(os.environ.get("ARCMAP_BRIDGE_PORT", "27179"))
 
 # Estado global del puente.
 _server = {"sock": None, "clients": None, "running": False,
-           "timerproc": None, "timer_id": None}
+           "timerproc": None, "timer_id": None, "busy": False}
 
 # --- Win32 SetTimer (timer en el hilo principal de ArcMap) ----------------- #
 user32 = ctypes.windll.user32
@@ -238,10 +238,15 @@ def h_list_ddp(params):
         return {"habilitado": False}
     campo = ddp.pageNameField.name if ddp.pageNameField else None
     capa_idx = ddp.indexLayer.name if ddp.indexLayer else None
+    maximo = int(params.get("max_valores", 500))
     valores = []
+    truncado = False
     if campo and ddp.indexLayer is not None:
         try:
             for row in arcpy.da.SearchCursor(ddp.indexLayer, [campo]):
+                if len(valores) >= maximo:
+                    truncado = True
+                    break
                 valores.append(row[0])
         except Exception:
             valores = []
@@ -249,7 +254,8 @@ def h_list_ddp(params):
            "num_paginas": ddp.pageCount,
            "campo_nombre": campo,
            "capa_indice": capa_idx,
-           "valores": valores}
+           "valores": valores,
+           "valores_truncados": truncado}
     del mxd
     return out
 
@@ -802,23 +808,29 @@ def h_run_geoprocessing(params):
     # Resolver args string que coincidan con una capa de la TOC al objeto Layer:
     # en el hilo de fondo del puente arcpy NO resuelve nombres de capa por sí solo
     # (ERROR 000732). Pasar el Layer honra ademas su definition query/seleccion.
-    try:
-        mxd = MAP.MapDocument("CURRENT")
-        df = mxd.activeDataFrame
-        resueltos = []
-        for a in args:
-            lyr = None
-            if isinstance(a, (str, unicode)):
-                try:
-                    candidatos = MAP.ListLayers(mxd, a, df)
-                    if candidatos:
-                        lyr = candidatos[0]
-                except Exception:
-                    lyr = None
-            resueltos.append(lyr if lyr is not None else a)
-        args = resueltos
-    except Exception:
-        pass  # sin mapa vivo o sin coincidencias: usar args tal cual
+    # Guard: NO se resuelven strings con pinta de ruta o de SQL (un nombre de
+    # campo o keyword que coincida con una capa se sustituiria en silencio).
+    # resolver_capas=False desactiva la resolucion por completo.
+    _NO_RESOLVER = u"\\/:*?\"<>|='"
+    if params.get("resolver_capas", True):
+        try:
+            mxd = MAP.MapDocument("CURRENT")
+            df = mxd.activeDataFrame
+            resueltos = []
+            for a in args:
+                lyr = None
+                if isinstance(a, (str, unicode)) and \
+                        not any(ch in a for ch in _NO_RESOLVER):
+                    try:
+                        candidatos = MAP.ListLayers(mxd, a, df)
+                        if candidatos:
+                            lyr = candidatos[0]
+                    except Exception:
+                        lyr = None
+                resueltos.append(lyr if lyr is not None else a)
+            args = resueltos
+        except Exception:
+            pass  # sin mapa vivo o sin coincidencias: usar args tal cual
     result = func(*args)
     salidas = []
     try:
@@ -1461,26 +1473,35 @@ def _pump():
     # 2) servir clientes con datos
     for item in list(_server["clients"]):
         conn = item[0]
-        try:
-            data = conn.recv(8192)
-        except socket.error as e:
-            code = e.args[0] if e.args else None
-            if code in _WOULDBLOCK:
-                continue
-            _close_client(item)
+        # Drenar TODO lo disponible en este tick: leer solo 8 KB por tick
+        # hacía que un comando grande tardara ~100 ms por cada 8 KB en llegar.
+        cerrado = False
+        recibido = False
+        while True:
+            try:
+                data = conn.recv(65536)
+            except socket.error as e:
+                code = e.args[0] if e.args else None
+                if code not in _WOULDBLOCK:
+                    _close_client(item)
+                    cerrado = True
+                break
+            if not data:
+                _close_client(item)
+                cerrado = True
+                break
+            item[1] += data
+            recibido = True
+        if cerrado or not recibido:
             continue
-        if not data:
-            _close_client(item)
-            continue
-        item[1] += data
         try:
             command = json.loads(item[1].decode("utf-8"))
         except ValueError:
-            continue  # JSON incompleto, esperar al siguiente tick
+            continue  # JSON incompleto (o multibyte cortado), esperar al siguiente tick
         item[1] = b""
         response = _dispatch(command)            # <-- arcpy en el hilo principal
         try:
-            conn.setblocking(True)
+            conn.settimeout(30)                  # un cliente muerto no congela ArcMap
             conn.sendall(json.dumps(response, ensure_ascii=False,
                                     default=_u).encode("utf-8"))
         except Exception:
@@ -1490,6 +1511,12 @@ def _pump():
 
 def _tick(hwnd, msg, id_event, dw_time):
     # Nunca dejar que una excepción rompa el message loop de ArcMap.
+    # Guard de reentrada: un geoproceso largo dentro de _dispatch bombea
+    # mensajes de Windows (diálogo de progreso), que re-entregan WM_TIMER y
+    # ejecutarían un SEGUNDO comando arcpy a mitad del primero.
+    if _server.get("busy"):
+        return
+    _server["busy"] = True
     try:
         _pump()
     except Exception:
@@ -1497,6 +1524,8 @@ def _tick(hwnd, msg, id_event, dw_time):
             sys.stderr.write(traceback.format_exc())
         except Exception:
             pass
+    finally:
+        _server["busy"] = False
 
 
 # --------------------------------------------------------------------------- #
@@ -1508,7 +1537,14 @@ def start():
         print("[arcmap-bridge] ya activo en %s:%s (stop() para reiniciar)" % (HOST, PORT))
         return
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # En Windows SO_REUSEADDR permite que un SEGUNDO proceso se ate al mismo
+    # puerto y robe conexiones de forma no determinista (p. ej. dos ArcMap con
+    # el puente arrancado). SO_EXCLUSIVEADDRUSE hace que el segundo bind falle
+    # con error claro. En otros SO el atributo no existe: se omite.
+    try:
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    except AttributeError:
+        pass
     try:
         srv.bind((HOST, PORT))
         srv.listen(5)

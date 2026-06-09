@@ -57,10 +57,14 @@ class ArcMapClient:
             }
         try:
             s.sendall(msg)
+            # El puente envía UNA respuesta y cierra la conexión: leer hasta EOF
+            # y parsear UNA sola vez. Parsear por chunk era O(n²) con payloads
+            # grandes (screenshots base64) y un chunk cortado a mitad de un
+            # carácter multibyte lanzaba UnicodeDecodeError sin capturar.
             buf = b""
             while True:
                 try:
-                    chunk = s.recv(8192)
+                    chunk = s.recv(65536)
                 except socket.timeout:
                     return {"ok": False, "error": (
                         "Timeout esperando a ArcMap (%ss). Si es un geoproceso pesado, "
@@ -68,11 +72,13 @@ class ArcMapClient:
                 if not chunk:
                     break
                 buf += chunk
-                try:
-                    return json.loads(buf.decode("utf-8"))
-                except json.JSONDecodeError:
-                    continue
-            return {"ok": False, "error": "ArcMap cerró la conexión sin respuesta válida."}
+            if not buf:
+                return {"ok": False, "error": "ArcMap cerró la conexión sin respuesta válida."}
+            try:
+                return json.loads(buf.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return {"ok": False, "error":
+                        "Respuesta ilegible del puente (%d bytes)." % len(buf)}
         finally:
             s.close()
 
@@ -140,15 +146,17 @@ def execute_arcpy(code: str) -> dict:
 # --------------------------------------------------------------------------- #
 
 @mcp.tool()
-def list_ddp() -> dict:
+def list_ddp(max_valores: int = 500) -> dict:
     """
     Inspecciona las Data Driven Pages (atlas) del documento abierto.
 
     Devuelve si están habilitadas, número de páginas, campo y capa índice, y la
     lista de valores del campo índice (los "nombres" de cada plano). No cambia la
     página actual. Útil como primer paso antes de exportar una serie.
+    `max_valores` acota la lista de valores devuelta (500 por defecto); si se
+    trunca, la respuesta lo indica con `valores_truncados=true`.
     """
-    return _client.send("list_ddp")
+    return _client.send("list_ddp", {"max_valores": max_valores})
 
 
 @mcp.tool()
@@ -398,16 +406,26 @@ def repair_data_source(capa: str, ruta_antigua: str, ruta_nueva: str,
 
 
 @mcp.tool()
-def run_geoprocessing(tool: str, params: list = None) -> dict:
+def run_geoprocessing(tool: str, params: list = None,
+                      resolver_capas: bool = True) -> dict:
     """
     Ejecuta un geoproceso por nombre NOMINAL sin escribir código (paridad con el MCP de
     ArcGIS Pro). `tool` admite forma punteada por toolbox (`management.CopyFeatures`,
     `analysis.Buffer`, `sa.Slope`...) o el alias clásico (`Buffer_analysis`). `params`
     es la lista de argumentos posicionales del geoproceso. Devuelve salidas y mensajes.
+
+    Con `resolver_capas=True` (defecto), los strings de `params` que coincidan con el
+    nombre de una capa de la TOC se sustituyen por el objeto Layer (honra su definition
+    query y selección); los strings con pinta de ruta o de SQL nunca se sustituyen.
+    Pasa `resolver_capas=False` si algún parámetro textual (un nombre de campo, una
+    keyword) colisiona con el nombre de una capa.
+
     Nota: un geoproceso largo congela la GUI de ArcMap (hilo único, limitación conocida);
     se usa un timeout amplio (ARCMAP_GP_TIMEOUT) para no cortar la espera.
     """
-    return _client.send("run_geoprocessing", {"tool": tool, "params": params or []},
+    return _client.send("run_geoprocessing",
+                        {"tool": tool, "params": params or [],
+                         "resolver_capas": resolver_capas},
                         timeout=GP_TIMEOUT)
 
 

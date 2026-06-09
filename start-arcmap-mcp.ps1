@@ -61,7 +61,9 @@ function Resolve-Python {
     Write-Section "Preparando entorno Python 3 (venv local en $venvDir)"
     $py = (Get-Command py -ErrorAction SilentlyContinue) ?? (Get-Command python -ErrorAction SilentlyContinue)
     if (-not $py) { throw "No encuentro Python 3 en PATH. Instalalo o ajusta el script." }
-    & $py.Source -3 -m venv $venvDir
+    # El flag -3 solo existe en el launcher py.exe, no en python.exe
+    if ($py.Name -eq "py.exe") { & $py.Source -3 -m venv $venvDir }
+    else { & $py.Source -m venv $venvDir }
     & $venvPy -m pip install --quiet --upgrade pip
     & $venvPy -m pip install --quiet -r (Join-Path $RepoDir "requirements.txt")
     Write-Host "Entorno listo." -ForegroundColor Green
