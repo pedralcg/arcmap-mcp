@@ -4,7 +4,8 @@
 
 .DESCRIPTION
     El "tunel" es el socket entre el servidor MCP externo (Py3) y el puente que
-    corre DENTRO de ArcMap (arcmap_bridge.py, Py2.7). Este script:
+    corre DENTRO de ArcMap (el add-in .NET, barra de herramientas arcmap-mcp).
+    Este script:
       1. Prepara el entorno Py3 (.venv + dependencias) si falta.
       2. Sondea el puente (127.0.0.1:27179) y, si no esta, espera con reintentos
          mostrando las instrucciones para arrancarlo dentro de ArcMap.
@@ -43,11 +44,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 $RepoDir = $PSScriptRoot
-$SrcDir  = Join-Path $RepoDir "src"   # arcmap_bridge.py + arcmap_mcp_server.py viven en src/
+$SrcDir  = Join-Path $RepoDir "src"   # arcmap_mcp_server.py vive en src/
 if (-not $BridgeHost) { $BridgeHost = "127.0.0.1" }
 if ($Port -le 0) { $Port = if ($env:ARCMAP_BRIDGE_PORT) { [int]$env:ARCMAP_BRIDGE_PORT } else { 27179 } }
-
-$BridgeScript = Join-Path $SrcDir "arcmap_bridge.py"
 
 function Write-Section($txt) { Write-Host "`n=== $txt ===" -ForegroundColor Cyan }
 
@@ -102,12 +101,11 @@ function Show-BridgeInstructions {
   El puente NO esta activo en ${BridgeHost}:${Port}.
   Para levantarlo (dentro de ArcMap 10.5):
     1. Abre tu .mxd en ArcMap.
-    2. Geoprocessing > Python  (la ventana de Python).
-    3. Pega esta UNICA linea y Enter:
+    2. Localiza la barra de herramientas "arcmap-mcp"
+       (si no se ve: Customize > Toolbars > arcmap-mcp).
+    3. Pulsa el boton "Iniciar MCP".
 
-       execfile(r"$BridgeScript")
-
-    (Debe responder: [arcmap-bridge] escuchando en ...)
+    (El boton "Estado MCP" debe mostrar ACTIVO en ${BridgeHost}:${Port})
 "@ -ForegroundColor Yellow
 }
 

@@ -13,7 +13,8 @@ Uso (Python 3, solo stdlib; vale cualquier python del PATH):
 Los parametros van como pares clave=valor (evita el infierno de comillas de
 PowerShell). Tambien se acepta un unico argumento JSON si empieza por '{'.
 
-Requiere que el puente este levantado dentro de ArcMap (boton Start MCP o execfile).
+Requiere que el puente este levantado dentro de ArcMap (boton Iniciar de la
+barra arcmap-mcp).
 """
 import sys
 import json
@@ -42,7 +43,7 @@ try:
     s.connect((HOST, PORT))
 except Exception as e:
     print("NO HAY PUENTE en %s:%s -> %s" % (HOST, PORT, e))
-    print("Abre ArcMap y pulsa Start MCP (o ejecuta arcmap_bridge.py).")
+    print("Abre ArcMap y pulsa Iniciar en la barra arcmap-mcp.")
     sys.exit(1)
 
 s.sendall(json.dumps({"type": cmd, "params": params}).encode("utf-8"))

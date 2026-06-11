@@ -7,6 +7,13 @@ legacy/
 # Backlog interno de pendientes — local, no se publica.
 PENDIENTE.local.md
 
+# Automatización local de desarrollo (defaults de la máquina del autor).
+addin/tools/
+
+# Artefactos de build .NET (el .esriaddin empaquetado sí se versiona en dist/).
+addin/ArcmapMcp.AddIn/bin/
+addin/ArcmapMcp.AddIn/obj/
+
 # Python
 __pycache__/
 *.pyc
