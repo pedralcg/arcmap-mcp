@@ -4,7 +4,7 @@ arcmap_mcp_server.py  ──  Servidor MCP EXTERNO (Python 3, 64 bits) + FastMCP
 
 Es la pieza que registras en Claude Code / OpenCode. Habla por stdio con el
 cliente IA y reenvía cada herramienta, por socket TCP local, al puente que
-corre dentro de ArcMap (arcmap_bridge.py, Python 2.7).
+corre dentro de ArcMap (el add-in .NET, barra de herramientas arcmap-mcp).
 
     Claude Code ──stdio──► este servidor ──socket 127.0.0.1:27179──► ArcMap vivo
 
@@ -51,8 +51,8 @@ class ArcMapClient:
             return {
                 "ok": False,
                 "error": (
-                    "No hay puente en %s:%s. Abre ArcMap, ejecuta arcmap_bridge.py "
-                    "en la ventana de Python y reintenta." % (self.host, self.port)
+                    "No hay puente en %s:%s. Abre ArcMap y pulsa 'Iniciar' en la "
+                    "barra arcmap-mcp; luego reintenta." % (self.host, self.port)
                 ),
             }
         try:
@@ -115,6 +115,16 @@ def zoom_to_layer(nombre: str) -> dict:
 def export_pdf(salida: str, dpi: int = 300) -> dict:
     """Exporta el layout actual de ArcMap a un PDF en la ruta `salida`."""
     return _client.send("export_pdf", {"salida": salida, "dpi": dpi})
+
+
+@mcp.tool()
+def export_jpg(salida: str, dpi: int = 230) -> dict:
+    """
+    Exporta el layout actual de ArcMap a un JPG en la ruta `salida` (`dpi` 230 por
+    defecto, calidad JPEG 95). Útil para adjuntar planos por correo o incrustarlos
+    en documentos sin el peso de un PDF.
+    """
+    return _client.send("export_jpg", {"salida": salida, "dpi": dpi})
 
 
 @mcp.tool()
