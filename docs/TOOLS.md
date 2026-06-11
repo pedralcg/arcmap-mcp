@@ -1,15 +1,22 @@
 # Catálogo de herramientas — arcmap-mcp
 
 > **Filosofía híbrida.** `execute_arcpy` (código arbitrario) es la base universal:
-> cualquier cosa de ArcMap 10.x se puede hacer con él. Los **wrappers** de esta lista
-> existen solo para lo **repetitivo y de alto valor** —sobre todo las series de planos
-> (Data Driven Pages)—, no para replicar toda la API de arcpy.
->
-> Patrón de implementación: handler `h_<tool>(params)` en `arcmap_bridge.py`
-> (Py2.7, `arcpy.mapping as MAP`) + entrada en `HANDLERS` + `@mcp.tool()` en
-> `arcmap_mcp_server.py` (Py3) que hace `_client.send("<tool>", {...})`.
+> cualquier análisis de ArcMap 10.x se puede expresar con él. Los **wrappers** de esta
+> lista existen solo para lo **repetitivo y de alto valor** —sobre todo las series de
+> planos (Data Driven Pages)—, no para replicar toda la API.
 
-**47 herramientas**, todas probadas por llamada cableada real sobre ArcMap 10.5.
+**48 herramientas**, todas probadas por llamada cableada real sobre ArcMap 10.5.
+
+## Cómo se ejecuta cada herramienta (importa para lo que puedes esperar)
+
+El add-in .NET tiene **tres modos de ejecución**, y cada herramienta usa el que le
+corresponde:
+
+| Modo | Qué herramientas | Consecuencias |
+|---|---|---|
+| **Nativo en sesión viva** (ArcObjects, hilo STA) | capas, selección, layout, exports, navegación, `run_geoprocessing`, `calculate_geometry` | Opera sobre el documento **vivo**: los cambios se ven al instante. Ocupa la interfaz mientras dura (exports cancelables con **ESC**). |
+| **Out-of-process sobre snapshot** (arcpy en Python 2.7 aparte) | `execute_arcpy`, `list_ddp`, `export_ddp`, `goto_ddp_page`, `raster_index`, `hydrology`, `contours`, `topographic_profile`, `least_cost_path` | Trabaja sobre una **copia temporal del .mxd** con el estado actual: lee el documento real, pero **sus cambios al documento no afectan a la sesión viva**. Las salidas a disco sí son reales, y los resultados de análisis se añaden al mapa al terminar. **No congela la interfaz.** Coste fijo de unos segundos por llamada (snapshot + arranque de Python). |
+| **Solo lectura de datos** (cursores/Describe) | consultas, listados de workspace | Sin efectos secundarios. |
 
 ---
 
@@ -17,95 +24,123 @@
 
 | Tool | Qué hace |
 |---|---|
-| `ping` | Versión/build de ArcGIS; confirma que el puente está vivo |
-| `get_arcmap_info` | `.mxd`, data frames, df activo, escala |
-| `list_layers` | Capas del df (nombre, visibilidad, fuente, def. query) |
+| `ping` | Versión del add-in y de ArcGIS; confirma que el puente está vivo |
+| `get_arcmap_info` | `.mxd`, data frames, df activo, escala, vista activa |
+| `list_layers` | Capas del df (nombre, visibilidad, fuente, def. query), incluidos grupos |
 | `zoom_to_layer` | Encuadra a una capa y refresca el canvas |
 | `export_pdf` | Exporta el layout a PDF |
 | `refresh` | Refresca vista activa + TOC |
-| `execute_arcpy` | **Código arbitrario** (arcpy, mxd, df, RESULT) — la base de la filosofía híbrida |
+| `execute_arcpy` | **Código arcpy arbitrario** — la base de la filosofía híbrida (ver matiz abajo) |
+
+> **Matiz de `execute_arcpy`:** corre **fuera del proceso de ArcMap**, sobre un
+> snapshot del documento (`mxd`/`df` apuntan a la copia). Perfecto para análisis,
+> consultas complejas y exports; **no sirve para mutar la sesión viva** (para eso
+> están las tools nativas `set_*`, `add_layer`, …). A cambio, un script largo no
+> congela ArcMap. Devuelve `RESULT`, stdout y avisos.
 
 ---
 
 ## Series de planos (Data Driven Pages)
 
-| Tool | Qué hace | arcpy.mapping 10.x |
+| Tool | Qué hace | Modo |
 |---|---|---|
-| `list_ddp` | ¿Hay Data Driven Pages?, nº páginas, campo índice, valores | `mxd.dataDrivenPages` (`.pageCount`, `.pageNameField`) |
-| `export_ddp` | Exporta el atlas a PDF: todas / rango / lista de valores; multipágina o 1 PDF por página | `ddp.exportToPDF(out, "ALL"/"RANGE"/"CURRENT")` |
-| `list_layout_elements` | Lista elementos del layout (texto, leyenda, imagen) con nombre/tipo | `MAP.ListLayoutElements(mxd, "TEXT_ELEMENT")` |
-| `set_text_element` | Cambia el texto de un elemento (título, fecha, nº expediente) | `elem.text = ...` |
-| `goto_ddp_page` | Sitúa el atlas en una página (por nº o valor de índice) y refresca | `ddp.currentPageID = ...` |
-| `set_definition_query` | Fija/limpia la def. query de una capa (planos temáticos por filtro) | `lyr.definitionQuery = ...` |
-| `set_layer_visibility` | Enciende/apaga capa o grupo | `lyr.visible = True/False` |
-| `export_view_png` | Exporta la vista activa (o el layout completo con `modo="layout"`) a PNG | `MAP.ExportToPNG(mxd, out, df)` |
+| `list_ddp` | ¿Hay Data Driven Pages?, nº páginas, campo índice, valores | snapshot |
+| `export_ddp` | Exporta el atlas a PDF: todas / rango / lista de valores; multipágina o 1 PDF por página | snapshot |
+| `goto_ddp_page` | Encuadra la vista al extent de una página (por nº o valor de índice) | snapshot + nativo |
+| `list_layout_elements` | Lista elementos del layout (texto, leyenda, imagen) con nombre/tipo | nativo |
+| `set_text_element` | Cambia el texto de un elemento (título, fecha, nº plano) | nativo |
+| `set_definition_query` | Fija/limpia la def. query de una capa (planos temáticos por filtro) | nativo |
+| `set_layer_visibility` | Enciende/apaga capa o grupo (la leyenda del layout se actualiza) | nativo |
+| `export_view_png` | Exporta la vista activa (o el layout con `modo="layout"`) a PNG | nativo |
+| `export_jpg` | Exporta el layout a JPG (dpi 230 por defecto — series de planos ligeras) | nativo |
+
+> **Matiz de `goto_ddp_page`:** el atlas vivo de la sesión **no pagina** (la API de
+> Data Driven Pages solo existe en arcpy, que corre sobre el snapshot). La tool lee el
+> extent de la página pedida en el snapshot y **encuadra la vista viva a ese extent**:
+> el resultado es un encuadre aproximado, no un cambio de página real del atlas. Los
+> elementos dinámicos del layout (título de página, flechas) no cambian — para series
+> de planos usa `set_text_element` + `set_definition_query`/`set_layer_visibility`,
+> o exporta directamente con `export_ddp`.
+>
+> **Atlas grandes:** `export_ddp` con `paginas="ALL"` sobre cientos de páginas puede
+> superar el timeout estándar de 60 s — exporta por lista de valores o por rango.
+>
+> **Truco QA de `set_text_element`:** llamar con `buscar=""` devuelve en el error la
+> lista de todos los textos del layout — útil para localizar el elemento a tocar.
 
 ---
 
 ## Capas y datos
 
-| Tool | Qué hace | arcpy |
-|---|---|---|
-| `select_by_attribute` | Selección por SQL sobre una capa | `arcpy.SelectLayerByAttribute_management` |
-| `clear_selection` | Limpia la selección | `...SelectLayerByAttribute(lyr,"CLEAR_SELECTION")` |
-| `get_unique_values` | Valores únicos de un campo (iterar planos por categoría) | `da.SearchCursor` |
-| `count_features` | Conteo (total o con `where`) | `arcpy.GetCount_management` |
-| `list_fields` | Campos de capa/tabla (nombre, tipo) | `arcpy.ListFields` |
-| `get_layer_info` | Detalle de una capa: campos, tipo geom, extent, CRS, count | `arcpy.Describe` + `ListFields` |
-| `get_layer_features` | Lee FILAS de atributos (respeta def. query/selección) | `arcpy.da.SearchCursor` |
-| `add_layer` | Añade capa desde shp/fgdb/raster al df | `MAP.Layer(...)` + `MAP.AddLayer` |
-| `remove_layer` | Quita capa por nombre | `MAP.RemoveLayer` |
-| `apply_symbology_from_layer` | Aplica un `.lyr` (estilos canónicos) a una capa | `MAP.ApplySymbologyFromLayer` |
-| `set_scale` | Fija la escala del df activo | `df.scale = ...` |
+Todas **nativas sobre la sesión viva** (los cambios se ven al instante; las consultas
+respetan definition query y selección, igual que la tabla de atributos).
+
+| Tool | Qué hace |
+|---|---|
+| `select_by_attribute` | Selección por SQL sobre una capa (NEW/ADD/REMOVE/SUBSET) |
+| `clear_selection` | Limpia la selección |
+| `get_unique_values` | Valores únicos de un campo (iterar planos por categoría) |
+| `count_features` | Conteo (total o con `where`; honra def. query y selección) |
+| `list_fields` | Campos de capa/tabla (nombre, tipo) |
+| `get_layer_info` | Detalle de una capa: campos, tipo geom, extent, CRS, count |
+| `get_layer_features` | Lee FILAS de atributos (respeta def. query/selección) |
+| `add_layer` | Añade capa desde shp/fgdb/raster al df |
+| `remove_layer` | Quita capa por nombre |
+| `apply_symbology_from_layer` | Aplica un `.lyr` (estilos canónicos) a una capa |
+| `set_scale` | Fija la escala del df activo |
 
 ---
 
 ## Geoprocesamiento y mantenimiento
 
-| Tool | Qué hace | arcpy |
+| Tool | Qué hace | Modo |
 |---|---|---|
-| `run_geoprocessing` | Geoproceso nominal por nombre + params (sin escribir código) | `getattr(arcpy, mod).tool(*args)` |
-| `save_mxd` | Guarda el .mxd en su ruta actual | `mxd.save()` |
-| `save_mxd_as` | Guarda una copia en otra ruta | `mxd.saveACopy()` |
-| `list_broken_data_sources` | Lista capas/tablas con ruta rota (muy común en ArcMap) | `MAP.ListBrokenDataSources` |
-| `repair_data_source` | Reapunta el workspace de una capa | `lyr.findAndReplaceWorkspacePath` |
+| `run_geoprocessing` | Geoproceso por nombre punteado (`analysis.Buffer`, `management.GetCount`, `sa.Slope`…) + params, sin escribir código. Resuelve nombres de capa de la TOC (honra def. query/selección) | **nativo** — ocupa la interfaz mientras dura |
+| `save_mxd` | Guarda el .mxd en su ruta actual | nativo |
+| `save_mxd_as` | Guarda una copia en otra ruta | nativo |
+| `list_broken_data_sources` | Capas y tablas standalone con ruta rota (muy común en ArcMap) | nativo |
+| `repair_data_source` | Reapunta la fuente de una capa (verifica releyendo la fuente) | nativo |
 
 ---
 
 ## Visualización y catálogo
 
-| Tool | Qué hace | arcpy |
-|---|---|---|
-| `get_canvas_screenshot` | Captura la vista/layout y la devuelve como **IMAGEN INLINE** — el agente la ve al instante | `ExportToPNG` → base64 → FastMCP `Image` |
-| `list_data_frames` / `set_active_df` | Lista/cambia el data frame activo | `MAP.ListDataFrames` |
-| `set_extent` | Encuadra a coords o al extent de una capa/selección | `df.extent = ...` |
-| `describe_data` | Describe un dataset en disco (CRS, tipo, campos) | `arcpy.Describe` |
-| `get_workspace` / `set_workspace` | Lee/fija `arcpy.env.workspace` | `arcpy.env` |
-| `list_feature_classes` | Feature classes del workspace (incl. datasets) | `arcpy.ListFeatureClasses` |
-| `list_tables` | Tablas del workspace | `arcpy.ListTables` |
-| `list_rasters` | Rásters del workspace | `arcpy.ListRasters` |
+| Tool | Qué hace |
+|---|---|
+| `get_canvas_screenshot` | Captura la vista/layout y la devuelve como **IMAGEN INLINE** — el agente la ve al instante; cancelable con ESC |
+| `list_data_frames` / `set_active_df` | Lista/cambia el data frame activo |
+| `set_extent` | Encuadra a coords o al extent de una capa/selección |
+| `describe_data` | Describe un dataset en disco (CRS, tipo, campos) |
+| `get_workspace` / `set_workspace` | Lee/fija el workspace por defecto de los listados (estado del add-in; se restablece al reiniciar ArcMap) |
+| `list_feature_classes` | Feature classes del workspace (incl. datasets) |
+| `list_tables` | Tablas del workspace |
+| `list_rasters` | Rásters del workspace |
 
-> **Nota:** los marcadores espaciales (bookmarks) no tienen tool porque `arcpy.mapping`
-> de ArcMap 10.x no expone su API (sí lo hace `arcpy.mp` de ArcGIS Pro). Requeriría
-> ArcObjects/comtypes; queda fuera de alcance.
+> La captura exporta con garantías la **vista activa**; si pides la otra (datos ↔
+> layout), el add-in conmuta de vista temporalmente y lo avisa en la respuesta.
 
 ---
 
 ## Análisis ambiental y teledetección
 
-> Requieren **Spatial Analyst** o **3D Analyst** y operan sobre datos **en disco**. Son
-> geoprocesos pesados: usan un timeout amplio (`ARCMAP_GP_TIMEOUT`, 30 min) y mientras
-> corren **congelan la GUI** de ArcMap (hilo único — ver *Límites conocidos* en el README).
+> Requieren **Spatial Analyst** o **3D Analyst** y operan sobre datos **en disco**.
+> Corren **fuera del proceso de ArcMap** (modo snapshot): pueden tardar minutos pero
+> **no congelan la interfaz**. Usan el timeout amplio (`ARCMAP_GP_TIMEOUT`, 30 min).
 > Por defecto añaden el resultado al data frame activo (`anadir_al_mapa=True`).
 
-| Tool | Qué hace | Extensión | arcpy |
-|---|---|---|---|
-| `raster_index` | **Índice espectral con nombre** (NDVI, GNDVI, NDRE, NDWI, MNDWI, NDMI, NBR, SAVI, EVI) desde bandas | Spatial | `arcpy.sa` (álgebra de ráster) |
-| `hydrology` | `cuenca` (Fill→FlowDir→FlowAcc→Watershed/Basin) · `red_drenaje` · `inundacion` | Spatial | `arcpy.sa` Hydrology |
-| `contours` | Curvas de nivel desde MDT (export DXF opcional) | 3D | `arcpy.ddd.Contour` |
-| `topographic_profile` | Perfil topográfico: línea 2D → línea 3D sobre superficie | 3D | `arcpy.ddd.InterpolateShape` |
-| `least_cost_path` | Ruta de mínimo coste (origen→destino sobre ráster de fricción) | Spatial | `arcpy.sa` CostDistance + CostPath |
-| `calculate_geometry` | Área/perímetro/longitud/coords/centroide a campos (in place) | — | `arcpy.AddGeometryAttributes_management` |
+| Tool | Qué hace | Extensión |
+|---|---|---|
+| `raster_index` | **Índice espectral con nombre** (NDVI, GNDVI, NDRE, NDWI, MNDWI, NDMI, NBR, SAVI, EVI) desde bandas | Spatial |
+| `hydrology` | `cuenca` (Fill→FlowDir→FlowAcc→Watershed/Basin) · `red_drenaje` · `inundacion` | Spatial |
+| `contours` | Curvas de nivel desde MDT (export DXF opcional) | 3D |
+| `topographic_profile` | Perfil topográfico: línea 2D → línea 3D sobre superficie | 3D |
+| `least_cost_path` | Ruta de mínimo coste (origen→destino sobre ráster de fricción) | Spatial |
+| `calculate_geometry` | Área/perímetro/longitud/coords/centroide a campos (in place) | — |
+
+> **Matiz de `calculate_geometry`:** es la excepción del grupo — corre **nativa, en
+> el proceso de ArcMap**. Añadir campos a una fuente que está cargada en la TOC desde
+> un proceso externo falla por bloqueo de esquema (schema lock); al ir por dentro no
+> hay bloqueo y además honra la definition query y la selección de la capa.
 
 ### Índices espectrales de `raster_index`
 
@@ -143,5 +178,7 @@ Fórmulas y roles de banda que pide cada índice:
 
 ---
 
-> **¿Cuándo añadir un wrapper nuevo?** Si la operación se va a repetir y/o es propensa a
-> errores de Py2.7 escrita a mano → merece wrapper. Si es puntual → queda en `execute_arcpy`.
+> **¿Cuándo añadir un wrapper nuevo?** Si la operación se va a repetir y/o es propensa
+> a errores escrita a mano en `execute_arcpy` → merece wrapper. Si es puntual → queda
+> en `execute_arcpy`. (Los marcadores espaciales/bookmarks, p. ej., no tienen tool
+> aún: técnicamente posible vía ArcObjects, se añadirá si el caso de uso se repite.)
