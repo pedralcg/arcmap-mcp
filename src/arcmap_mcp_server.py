@@ -134,21 +134,43 @@ def refresh() -> dict:
 
 
 @mcp.tool()
-def execute_arcpy(code: str) -> dict:
+def execute_arcpy(code: str, usar_documento: bool | None = None,
+                  serializar_sesion: bool = False) -> dict:
     """
-    Ejecuta código arcpy ARBITRARIO dentro del ArcMap vivo (Python 2.7).
+    Ejecuta código arcpy ARBITRARIO fuera del proceso de ArcMap (Python 2.7).
 
-    El código dispone de estas variables ya preparadas:
+    El código dispone siempre de:
       - arcpy            : el módulo arcpy
       - MAP / mapping    : arcpy.mapping
-      - mxd              : MapDocument("CURRENT")  (el documento abierto)
-      - df               : el data frame activo
-    Debe ser Python 2.7 válido (sin f-strings) y asignar el resultado a `RESULT`.
+    y debe ser Python 2.7 válido (sin f-strings), asignando el resultado a `RESULT`.
 
-    Ejemplo de `code`:
-        RESULT = [l.name for l in MAP.ListLayers(mxd)]
+    Si el código usa el DOCUMENTO, se le añaden además:
+      - mxd              : una COPIA del documento abierto (no la sesión viva)
+      - df               : su data frame activo
+
+    Esa copia se toma del .mxd GUARDADO EN DISCO, que es instantáneo y no molesta a
+    ArcMap. La contrapartida: los cambios que la sesión aún no haya guardado no
+    aparecen. Guarda el documento (`save_mxd`) o pasa `serializar_sesion=True` para
+    que ArcMap serialice la sesión tal cual está — cuidado, eso ocupa ArcMap durante
+    la operación y en documentos muy pesados puede llegar a tumbarlo.
+
+    Solo se copia el documento cuando hace falta: se decide mirando si el código
+    menciona `mxd`, `df` o `mapping`. `usar_documento` fuerza esa decisión: `False`
+    no copia nunca (más rápido, pero `mxd` y `df` no existirán), `True` copia
+    siempre. Déjalo sin indicar para que se decida solo.
+
+    Ejemplos:
+        RESULT = [l.name for l in MAP.ListLayers(mxd)]        # copia el documento
+        arcpy.gp.Reclassify_sa(r"C:\\slope.tif", "Value",
+                               "0 12 1;12 24 2;24 48 3", r"C:\\slope_rec.tif")
+        RESULT = "hecho"                                      # no lo copia
     """
-    return _client.send("execute_code", {"code": code})
+    params: dict = {"code": code}
+    if usar_documento is not None:
+        params["usar_documento"] = usar_documento
+    if serializar_sesion:
+        params["serializar_sesion"] = True
+    return _client.send("execute_code", params, timeout=GP_TIMEOUT)
 
 
 # --------------------------------------------------------------------------- #
@@ -359,6 +381,42 @@ def apply_symbology_from_layer(capa: str, lyr_file: str) -> dict:
     del mapa. `lyr_file` es la ruta al .lyr de origen.
     """
     return _client.send("apply_symbology_from_layer", {"capa": capa, "lyr_file": lyr_file})
+
+
+@mcp.tool()
+def set_graduated_symbology(capa: str, campo: str, num_clases: int = 5,
+                            metodo: str = "natural_breaks",
+                            color_desde: list = None, color_hasta: list = None,
+                            tamano: float = None) -> dict:
+    """
+    Simboliza una capa VIVA con colores graduados (class breaks) por un campo
+    NUMÉRICO, directamente sobre la sesión de ArcMap (persiste; se guarda con
+    save_mxd). Cubre el caso que execute_arcpy no puede —opera sobre una copia del
+    documento y descarta el renderer— y sin necesitar un .lyr plantilla como
+    apply_symbology_from_layer.
+
+    - `campo`: campo numérico a clasificar (ej. "Elevation").
+    - `num_clases`: nº de clases (2-32, defecto 5). El método puede reducirlo si no
+      hay variación suficiente.
+    - `metodo`: natural_breaks (defecto) | quantile | equal_interval |
+      geometrical_interval | standard_deviation.
+    - `color_desde` / `color_hasta`: RGB [r,g,b] 0-255 de los extremos de la rampa
+      (defecto amarillo claro -> rojo oscuro).
+    - `tamano`: grosor de línea / tamaño de punto / grosor de borde de polígono en
+      puntos (defecto según geometría).
+
+    El histograma usa TODOS los valores del campo en la fuente (ignora definition
+    query y selección); para clasificar un subconjunto, fíjalo con una definition
+    query permanente antes.
+    """
+    params = {"capa": capa, "campo": campo, "num_clases": num_clases, "metodo": metodo}
+    if color_desde is not None:
+        params["color_desde"] = color_desde
+    if color_hasta is not None:
+        params["color_hasta"] = color_hasta
+    if tamano is not None:
+        params["tamano"] = tamano
+    return _client.send("set_graduated_symbology", params)
 
 
 @mcp.tool()

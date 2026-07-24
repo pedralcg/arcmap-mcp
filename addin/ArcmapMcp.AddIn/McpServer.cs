@@ -196,6 +196,7 @@ namespace ArcmapMcp.AddIn
                 { "add_layer",                  Handlers.LayerHandlers.AddLayer },
                 { "remove_layer",               Handlers.LayerHandlers.RemoveLayer },
                 { "apply_symbology_from_layer", Handlers.LayerHandlers.ApplySymbologyFromLayer },
+                { "set_graduated_symbology",    Handlers.LayerHandlers.SetGraduatedSymbology },
                 { "describe_data",              Handlers.WorkspaceHandlers.DescribeData },
                 { "list_data_frames",           Handlers.DataFrameHandlers.ListDataFrames },
                 { "set_active_df",              Handlers.DataFrameHandlers.SetActiveDf },
@@ -239,6 +240,7 @@ namespace ArcmapMcp.AddIn
             string type = (string)request["type"];
             JObject parameters = request["params"] as JObject ?? new JObject();
             Log.Info("Comando recibido: " + type);
+            Estadisticas.RegistrarComando(type);
 
             Func<JObject, JObject> handler;
             if (type != null && _handlersFondo.TryGetValue(type, out handler))

@@ -101,7 +101,76 @@ La filosofía es **híbrida**: `execute_arcpy` es la base universal (cualquier a
 de ArcMap 10.x se puede expresar con él) y los wrappers existen solo para lo
 repetitivo y de alto valor.
 
-## Puesta en marcha
+## Instalación
+
+### Antes de empezar
+
+| Necesitas | Notas |
+|---|---|
+| **ArcMap 10.5** | Validado en 10.5. En 10.6–10.8 debería funcionar, pero **no está probado**: ver [Versiones de ArcMap](#versiones-de-arcmap). |
+| **Python 3.10 o superior** | Para el servidor MCP. **Puede que ya lo tengas**: el instalador busca también el que viene con QGIS y con ArcGIS Pro, aunque no estén en el PATH. Si no encuentra ninguno, se ofrece a instalarlo con `winget`, o lo descargas de [python.org](https://www.python.org/downloads/windows/). |
+| **Python 2.7 de ArcGIS** | **No hay que instalarlo**: viene con ArcMap (`C:\Python27\ArcGIS10.x`). Lo usan el análisis arcpy y las Data Driven Pages. |
+| **Un cliente MCP** | Claude Desktop, Claude Code, Gemini CLI, Antigravity u OpenCode. |
+| **Conexión a internet** | Solo durante la instalación, para descargar las dependencias del servidor. |
+
+### 1. Descargar
+
+**Sin git** (recomendado si no lo usas): en la página del repositorio, botón verde
+**Code ▸ Download ZIP**. Antes de extraerlo, **clic derecho en el ZIP ▸ Propiedades ▸
+marcar «Desbloquear» ▸ Aceptar**: Windows marca lo que viene de internet y ese marcado
+puede impedir que ArcMap cargue el add-in. Extrae después la carpeta donde quieras, por
+ejemplo `C:\mcp\arcmap-mcp`.
+
+**Con git:**
+
+```powershell
+git clone https://github.com/pedralcg/arcmap-mcp.git C:\mcp\arcmap-mcp
+```
+
+### 2. Instalar
+
+**Cierra ArcMap** y haz **doble clic en `INSTALAR.bat`**. Eso es todo: prepara el
+entorno del servidor, instala el add-in dentro de ArcMap y registra el servidor en los
+clientes IA que encuentre en tu equipo.
+
+Si prefieres la terminal, es el mismo trabajo:
+
+```powershell
+cd C:\mcp\arcmap-mcp
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+> El `-ExecutionPolicy Bypass` hace falta porque Windows no ejecuta scripts `.ps1` con
+> su configuración de fábrica. `INSTALAR.bat` ya lo lleva puesto.
+
+Por defecto configura **todos los clientes IA detectados**. Para elegir:
+`-Clientes claude-desktop` (o `claude-code`, `gemini`, `antigravity`, `opencode`,
+`todos`, `ninguno`). Es idempotente: repítelo tras cada actualización.
+
+### 3. Arrancar y verificar
+
+Abre ArcMap: en la barra **arcmap-mcp** pon el desplegable en **«Autoarranque: Sí»** y
+el puente se levantará solo en esta sesión y en todas las siguientes. Después:
+
+```powershell
+.\install.ps1 -SoloVerificar    # comprueba la instalación y hace un ping real al puente
+```
+
+Reinicia por completo tu cliente IA (el registro de servidores MCP se lee al arrancar) y
+pídele la herramienta `ping`. Para desinstalarlo todo: `.\install.ps1 -Desinstalar`.
+
+### Versiones de ArcMap
+
+El add-in se compila contra ArcMap **10.5** y ahí está validado en uso real. ArcMap
+carga normalmente add-ins compilados para versiones iguales o anteriores a la instalada,
+así que en 10.6–10.8 debería funcionar, pero **nadie lo ha probado todavía**: si lo
+haces, cuéntalo en una *issue*. Para 10.4 o anterior habría que recompilar cambiando el
+`<Target>` de `Config.xml`.
+
+### Instalación manual
+
+Si el instalador no encaja en tu equipo, los pasos equivalentes a mano son los de abajo
+(detalle completo, incluida la configuración de cada cliente, en `docs/INSTALL.md`).
 
 ### 1. Instalar el add-in en ArcMap
 
@@ -111,7 +180,12 @@ Si al abrir ArcMap no aparece la barra **arcmap-mcp** (el instalador de Esri a v
 falla en silencio), instalación manual: extrae/copia el contenido del `.esriaddin`
 (es un ZIP) a
 `%USERPROFILE%\Documents\ArcGIS\AddIns\Desktop10.5\{51f4ce63-6bcf-49b2-ae3a-ba2c79ea3e1a}\`
-y reabre ArcMap. La barra trae 4 botones: **Iniciar / Detener / Estado / Acerca de**.
+y reabre ArcMap. La barra trae 6 botones: **Iniciar / Detener / Estado / Autoarranque /
+Reportar / Acerca de**. **Reportar** abre un issue de GitHub o un email pre-rellenados
+con el diagnóstico de la sesión (sin datos de proyecto); el log, que sí puede contener
+nombres de capas y rutas, no se adjunta solo. Al abrir ArcMap, el add-in comprueba en
+segundo plano si hay una versión nueva en GitHub y lo indica en **Estado** y **Acerca de**
+(silencioso si no hay internet).
 
 Pulsa **Iniciar** → MessageBox «Puente iniciado» y el add-in escucha en
 `127.0.0.1:27179`. El add-in escribe su log en `C:\MCP_Logs\arcmap-mcp.log`.

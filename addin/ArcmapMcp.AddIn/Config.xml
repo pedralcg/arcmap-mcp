@@ -4,10 +4,10 @@
   <Name>arcmap-mcp</Name>
   <AddInID>{51f4ce63-6bcf-49b2-ae3a-ba2c79ea3e1a}</AddInID>
   <Description>Levanta/para el puente MCP dentro de ArcMap (socket 127.0.0.1:27179). Permite conducir la sesion viva de ArcMap desde un agente IA (Claude, etc.). Autor: Pedro Alcoba Gomez (pedralcg.dev).</Description>
-  <Version>2.4.3</Version>
+  <Version>2.8.0</Version>
   <Author>Pedro Alcoba Gomez — pedralcg.dev · pedro@pedralcg.dev · GitHub @pedralcg</Author>
   <Company>pedralcg.dev</Company>
-  <Date>2026-06-11</Date>
+  <Date>2026-07-24</Date>
   <Targets>
     <Target name="Desktop" version="10.5" />
   </Targets>
@@ -40,12 +40,33 @@
                 image="Images/stop.png"
                 category="arcmap-mcp"
                 onDemand="false" />
+        <ComboBox id="pedralcg_arcmap_mcp_AutoStart"
+                  class="AutoStartComboBox"
+                  message="Elige si el puente MCP debe iniciarse solo al abrir ArcMap."
+                  caption="Autoarranque"
+                  tip="Iniciar el puente automaticamente al abrir ArcMap (preferencia por usuario)"
+                  image="Images/autostart.png"
+                  category="arcmap-mcp"
+                  sizeString="Autoarranque: No___"
+                  itemSizeString="Autoarranque: No___"
+                  hintText="Autoarranque"
+                  editable="false"
+                  rows="2"
+                  onDemand="false" />
         <Button id="pedralcg_arcmap_mcp_Status"
                 class="StatusMcpButton"
                 message="Muestra el estado del puente MCP."
                 caption="Estado MCP"
                 tip="Ver estado del puente (ACTIVO / PARADO) y host:puerto"
                 image="Images/status.png"
+                category="arcmap-mcp"
+                onDemand="false" />
+        <Button id="pedralcg_arcmap_mcp_Report"
+                class="ReportMcpButton"
+                message="Reporta un problema (issue de GitHub o email) con el diagnostico."
+                caption="Reportar"
+                tip="Reportar un problema: abre un issue de GitHub o un email con el diagnostico (sin datos de proyecto)"
+                image="Images/report.png"
                 category="arcmap-mcp"
                 onDemand="false" />
         <Button id="pedralcg_arcmap_mcp_About"
@@ -63,8 +84,10 @@
           <Items>
             <Button refID="pedralcg_arcmap_mcp_Start" separator="false" />
             <Button refID="pedralcg_arcmap_mcp_Stop" separator="false" />
-            <Button refID="pedralcg_arcmap_mcp_Status" separator="false" />
-            <Button refID="pedralcg_arcmap_mcp_About" separator="true" />
+            <Button refID="pedralcg_arcmap_mcp_Status" separator="true" />
+            <ComboBox refID="pedralcg_arcmap_mcp_AutoStart" separator="false" />
+            <Button refID="pedralcg_arcmap_mcp_Report" separator="true" />
+            <Button refID="pedralcg_arcmap_mcp_About" separator="false" />
           </Items>
         </Toolbar>
       </Toolbars>

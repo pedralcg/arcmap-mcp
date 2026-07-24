@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Levanta y vigila el tunel del MCP de ArcMap "siempre que sea necesario".
 
@@ -58,8 +58,13 @@ function Resolve-Python {
     $venvPy = Join-Path $venvDir "Scripts\python.exe"
     if (Test-Path $venvPy) { return $venvPy }
     Write-Section "Preparando entorno Python 3 (venv local en $venvDir)"
-    $py = (Get-Command py -ErrorAction SilentlyContinue) ?? (Get-Command python -ErrorAction SilentlyContinue)
-    if (-not $py) { throw "No encuentro Python 3 en PATH. Instalalo o ajusta el script." }
+    # Sin el operador ?? : solo existe en PowerShell 7 y este script tambien se
+    # ejecuta con la 5.1 que trae Windows.
+    $py = Get-Command py -ErrorAction SilentlyContinue
+    if (-not $py) { $py = Get-Command python -ErrorAction SilentlyContinue }
+    if (-not $py) {
+        throw "No encuentro Python 3 en el PATH. Usa install.ps1, que ademas lo busca en QGIS y en ArcGIS Pro."
+    }
     # El flag -3 solo existe en el launcher py.exe, no en python.exe
     if ($py.Name -eq "py.exe") { & $py.Source -3 -m venv $venvDir }
     else { & $py.Source -m venv $venvDir }

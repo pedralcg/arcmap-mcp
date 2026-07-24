@@ -1,4 +1,4 @@
-# Construye ArcmapMcp.AddIn (sin Visual Studio) y empaqueta el .esriaddin.
+﻿# Construye ArcmapMcp.AddIn (sin Visual Studio) y empaqueta el .esriaddin.
 # Requisitos: dotnet CLI + ArcMap 10.5 instalado (rutas de DLL en el .csproj).
 # Estructura del paquete (ZIP plano, el formato que carga el Add-In Manager de 10.x):
 #   config.xml + Images\*.png + Install\ArcmapMcp.AddIn.dll + Install\Newtonsoft.Json.dll

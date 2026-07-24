@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using System.Threading;
+using System.Windows.Forms;
 using ESRI.ArcGIS.Desktop.AddIns;
 
 namespace ArcmapMcp.AddIn
@@ -31,6 +33,62 @@ namespace ArcmapMcp.AddIn
             Log.Info("Extensión cargada; dispatcher STA capturado (thread "
                      + Thread.CurrentThread.ManagedThreadId + ", "
                      + Thread.CurrentThread.GetApartmentState() + ")");
+
+            bool auto = Ajustes.Autoarranque;
+            Log.Info("Preferencia de autoarranque leida: " + (auto ? "SI" : "NO"));
+            if (auto)
+            {
+                // Nunca romper el arranque de ArcMap por el puente: si el puerto está
+                // ocupado (segunda instancia), se registra y el usuario sigue trabajando.
+                string error = StartServer();
+                Log.Info(error == null
+                    ? "Autoarranque activo: puente levantado al abrir ArcMap"
+                    : "Autoarranque activo pero el puente no arrancó: " + error);
+            }
+
+            LanzarComprobacionActualizacion();
+        }
+
+        /// <summary>
+        /// Comprueba en un hilo de fondo si hay una versión nueva en GitHub. Jamás
+        /// bloquea el arranque de ArcMap: sin internet o con rate-limit, no pasa nada.
+        /// Si hay versión nueva (y no se ha avisado ya de ELLA), muestra un aviso una
+        /// sola vez, marshalado al hilo UI (un MessageBox no puede lanzarse desde el
+        /// hilo de fondo).
+        /// </summary>
+        private static void LanzarComprobacionActualizacion()
+        {
+            var hilo = new Thread(delegate ()
+            {
+                Actualizaciones.ComprobarEnSegundoPlano(delegate (string versionNueva)
+                {
+                    StaDispatcher.Post(delegate
+                    {
+                        try
+                        {
+                            DialogResult r = MessageBox.Show(
+                                "Hay una versión nueva de arcmap-mcp disponible: v" + versionNueva + ".\n"
+                                + "Tienes instalada la v" + Diagnostico.VersionAddin() + ".\n\n"
+                                + "¿Abrir el repositorio para descargarla?",
+                                "arcmap-mcp · Actualización disponible",
+                                MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+                            if (r == DialogResult.Yes)
+                                Process.Start(new ProcessStartInfo
+                                {
+                                    FileName = Actualizaciones.RepoUrl,
+                                    UseShellExecute = true
+                                });
+                        }
+                        catch (System.Exception ex)
+                        {
+                            Log.Error("No se pudo mostrar el aviso de actualización", ex);
+                        }
+                    });
+                });
+            });
+            hilo.IsBackground = true;
+            hilo.Name = "arcmap-mcp-update-check";
+            hilo.Start();
         }
 
         protected override void OnShutdown()

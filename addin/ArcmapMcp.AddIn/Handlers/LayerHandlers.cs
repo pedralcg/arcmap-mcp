@@ -1,7 +1,11 @@
 using System;
+using System.Globalization;
 using System.IO;
 using ESRI.ArcGIS.ArcMapUI;
 using ESRI.ArcGIS.Carto;
+using ESRI.ArcGIS.Display;
+using ESRI.ArcGIS.Geodatabase;
+using ESRI.ArcGIS.Geometry;
 using ESRI.ArcGIS.esriSystem;
 using Newtonsoft.Json.Linq;
 
@@ -138,6 +142,227 @@ namespace ArcmapMcp.AddIn.Handlers
                 ["capa"] = capa,
                 ["lyr_origen"] = lyrFile
             });
+        }
+
+        /// <summary>
+        /// Simbología graduada (class breaks) sobre la capa VIVA, por un campo
+        /// numérico. Cubre el hueco que no tapan las tools nativas: execute_arcpy no
+        /// puede cambiar el renderer de la sesión (opera sobre una copia), y
+        /// apply_symbology_from_layer necesita un .lyr plantilla. Aquí se construye
+        /// el IClassBreaksRenderer directamente y se aplica in-process.
+        ///
+        /// El histograma se calcula sobre TODOS los valores del campo en la fuente
+        /// (BasicTableHistogram no honra definition query ni selección); si necesitas
+        /// clasificar un subconjunto, filtra antes con una definition query permanente.
+        /// </summary>
+        public static JObject SetGraduatedSymbology(JObject parameters)
+        {
+            string capa = (string)parameters["capa"];
+            string campo = (string)parameters["campo"];
+            if (string.IsNullOrEmpty(capa) || string.IsNullOrEmpty(campo))
+                throw new ArgumentException("Indica 'capa' (nombre en la TOC) y 'campo' (campo numérico a graduar).");
+
+            int numClases = LeerInt(parameters["num_clases"], 5);
+            if (numClases < 2 || numClases > 32)
+                throw new ArgumentException("'num_clases' debe estar entre 2 y 32.");
+            string metodo = ((string)parameters["metodo"] ?? "natural_breaks").ToLowerInvariant();
+
+            IMxDocument doc;
+            IMap map = MapHandlers.FocusMap(out doc);
+            IGeoFeatureLayer gfl = MapHandlers.FindLayer(map, capa) as IGeoFeatureLayer;
+            if (gfl == null)
+                throw new ArgumentException("Solo las capas de entidades admiten simbología graduada: " + capa);
+
+            IFeatureClass fc = gfl.FeatureClass;
+            if (fc == null)
+                throw new ArgumentException("La capa no tiene fuente de datos accesible (¿rota?): " + capa);
+
+            int idxCampo = fc.FindField(campo);
+            if (idxCampo < 0)
+                throw new ArgumentException("Campo no encontrado en la capa '" + capa + "': " + campo);
+            IField f = fc.Fields.get_Field(idxCampo);
+            if (!EsCampoNumerico(f.Type))
+                throw new ArgumentException("El campo '" + campo + "' no es numérico (es "
+                    + DataAccess.NombreTipoCampo(f.Type) + "); la simbología graduada necesita un campo numérico.");
+
+            // Histograma de los valores del campo → clasificación en cortes.
+            // Se tipa como la coclase (no ITableHistogram) para llamar a GetHistogram
+            // sin arrastrar el tipo IHistogram, que vive en otro ensamblado no referenciado.
+            BasicTableHistogramClass tableHist = new BasicTableHistogramClass();
+            tableHist.Field = campo;
+            tableHist.Table = (ITable)fc;
+            object dataValues, dataFreq;
+            tableHist.GetHistogram(out dataValues, out dataFreq);
+
+            IClassifyGEN clasificador = Clasificador(metodo);
+            int clasesDeseadas = numClases;
+            try
+            {
+                clasificador.Classify(dataValues, dataFreq, ref clasesDeseadas);
+            }
+            catch (Exception ex)
+            {
+                throw new ArgumentException("No se pudo clasificar el campo '" + campo + "' con método '"
+                    + metodo + "': " + ex.Message + ". ¿Tiene el campo suficientes valores distintos?");
+            }
+            double[] cortes = (double[])clasificador.ClassBreaks;
+            if (cortes == null || cortes.Length < 2)
+                throw new ArgumentException("El campo '" + campo + "' no tiene variación suficiente para "
+                    + numClases + " clases (valores todos iguales o insuficientes).");
+            int n = cortes.Length - 1; // el clasificador puede reducir el número real de clases
+
+            // Rampa de color: por defecto amarillo claro → rojo oscuro (secuencial).
+            IColor desde = LeerColor(parameters["color_desde"], 255, 255, 178);
+            IColor hasta = LeerColor(parameters["color_hasta"], 189, 0, 38);
+            IAlgorithmicColorRamp rampa = new AlgorithmicColorRampClass
+            {
+                Algorithm = esriColorRampAlgorithm.esriHSVAlgorithm,
+                FromColor = desde,
+                ToColor = hasta,
+                Size = n
+            };
+            bool rampaOk;
+            rampa.CreateRamp(out rampaOk);
+            IEnumColors colores = rampa.Colors;
+            colores.Reset();
+
+            esriGeometryType shp = fc.ShapeType;
+            double tam = LeerDouble(parameters["tamano"],
+                shp == esriGeometryType.esriGeometryPolyline ? 2.0
+                : shp == esriGeometryType.esriGeometryPolygon ? 0.4 : 6.0);
+
+            IClassBreaksRenderer render = new ClassBreaksRendererClass
+            {
+                Field = campo,
+                BreakCount = n,
+                SortClassesAscending = true,
+                MinimumBreak = cortes[0]
+            };
+            for (int i = 0; i < n; i++)
+            {
+                render.set_Break(i, cortes[i + 1]);
+                IColor col = colores.Next() ?? hasta;
+                render.set_Symbol(i, SimboloGraduado(shp, col, tam));
+                render.set_Label(i, EtiquetaClase(cortes[i], cortes[i + 1]));
+            }
+
+            gfl.Renderer = (IFeatureRenderer)render;
+            MapHandlers.NotificarCambioContenido(map, doc);
+
+            var breaksJson = new JArray();
+            for (int i = 0; i < cortes.Length; i++)
+                breaksJson.Add(cortes[i]);
+
+            return Protocol.Result(new JObject
+            {
+                ["capa"] = gfl.Name,
+                ["campo"] = campo,
+                ["metodo"] = metodo,
+                ["num_clases"] = n,
+                ["cortes"] = breaksJson
+            });
+        }
+
+        private static bool EsCampoNumerico(esriFieldType tipo)
+        {
+            return tipo == esriFieldType.esriFieldTypeSmallInteger
+                || tipo == esriFieldType.esriFieldTypeInteger
+                || tipo == esriFieldType.esriFieldTypeSingle
+                || tipo == esriFieldType.esriFieldTypeDouble;
+        }
+
+        /// <summary>Método de clasificación arcpy → coclase IClassifyGEN.</summary>
+        private static IClassifyGEN Clasificador(string metodo)
+        {
+            switch (metodo)
+            {
+                case "natural_breaks":
+                case "jenks":
+                    return new NaturalBreaksClass();
+                case "quantile":
+                case "cuantil":
+                    return new QuantileClass();
+                case "equal_interval":
+                case "intervalo_igual":
+                    return new EqualIntervalClass();
+                case "geometrical_interval":
+                case "intervalo_geometrico":
+                    return new GeometricalIntervalClass();
+                case "standard_deviation":
+                case "desviacion_estandar":
+                    return new StandardDeviationClass();
+                default:
+                    throw new ArgumentException("Método de clasificación no soportado: '" + metodo
+                        + "'. Usa natural_breaks, quantile, equal_interval, geometrical_interval o standard_deviation.");
+            }
+        }
+
+        /// <summary>Símbolo relleno de un color según la geometría de la capa.</summary>
+        private static ISymbol SimboloGraduado(esriGeometryType shp, IColor color, double tam)
+        {
+            switch (shp)
+            {
+                case esriGeometryType.esriGeometryPolygon:
+                case esriGeometryType.esriGeometryMultiPatch:
+                    ISimpleFillSymbol fill = new SimpleFillSymbolClass { Color = color };
+                    ILineSymbol borde = new SimpleLineSymbolClass
+                    {
+                        Color = GrisBorde(),
+                        Width = tam
+                    };
+                    fill.Outline = borde;
+                    return (ISymbol)fill;
+                case esriGeometryType.esriGeometryPolyline:
+                    return (ISymbol)new SimpleLineSymbolClass { Color = color, Width = tam };
+                default: // punto / multipunto
+                    return (ISymbol)new SimpleMarkerSymbolClass { Color = color, Size = tam };
+            }
+        }
+
+        private static IColor GrisBorde()
+        {
+            return new RgbColorClass { Red = 130, Green = 130, Blue = 130 };
+        }
+
+        private static IColor LeerColor(JToken t, int rDef, int gDef, int bDef)
+        {
+            int r = rDef, g = gDef, b = bDef;
+            JArray arr = t as JArray;
+            if (arr != null && arr.Count >= 3)
+            {
+                r = ClampByte((int)arr[0]);
+                g = ClampByte((int)arr[1]);
+                b = ClampByte((int)arr[2]);
+            }
+            return new RgbColorClass { Red = r, Green = g, Blue = b };
+        }
+
+        private static int ClampByte(int v)
+        {
+            return v < 0 ? 0 : (v > 255 ? 255 : v);
+        }
+
+        private static int LeerInt(JToken t, int porDefecto)
+        {
+            return t != null && t.Type != JTokenType.Null ? (int)t : porDefecto;
+        }
+
+        private static double LeerDouble(JToken t, double porDefecto)
+        {
+            return t != null && t.Type != JTokenType.Null ? (double)t : porDefecto;
+        }
+
+        private static string EtiquetaClase(double lo, double hi)
+        {
+            return FormatoNum(lo) + " - " + FormatoNum(hi);
+        }
+
+        private static string FormatoNum(double v)
+        {
+            // Enteros sin decimales; el resto con hasta 2 decimales, sin ceros de cola.
+            if (Math.Abs(v - Math.Round(v)) < 1e-9)
+                return ((long)Math.Round(v)).ToString(CultureInfo.InvariantCulture);
+            return v.ToString("0.##", CultureInfo.InvariantCulture);
         }
 
         /// <summary>Primer IGeoFeatureLayer dentro de una capa (la propia, o la

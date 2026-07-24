@@ -18,6 +18,8 @@ namespace ArcmapMcp.AddIn
         private const string GitHub = "https://github.com/pedralcg";
         private const string LinkedIn = "https://www.linkedin.com/in/pedro-alcoba-gomez/";
         private const string Lugar = "Bullas, Murcia";
+        private const string Repo = "https://github.com/pedralcg/arcmap-mcp";
+        private const int NumHerramientas = 48;
 
         private const string SvgWeb =
             @"<svg viewBox=""0 0 24 24"" width=""22"" height=""22"" fill=""none"" stroke=""#1e5631"" stroke-width=""2""><circle cx=""12"" cy=""12"" r=""9""/><path d=""M3 12h18M12 3c2.5 2.7 2.5 15.3 0 18M12 3c-2.5 2.7-2.5 15.3 0 18""/></svg>";
@@ -68,14 +70,23 @@ namespace ArcmapMcp.AddIn
  a.card .s{font-size:12px;color:var(--muted);word-break:break-all;}
  .foot{margin-top:18px;text-align:center;font-size:12px;color:var(--muted);}
  .foot b{color:var(--amber);}
+ .foot a{color:var(--green);text-decoration:none;font-weight:600;}
+ .foot a:hover{text-decoration:underline;}
+ .titulo{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;}
+ .ver{font-size:12px;font-weight:700;letter-spacing:.5px;color:var(--green);
+       background:var(--soft);border-radius:999px;padding:3px 10px;}
+ .upd{font-size:12px;font-weight:700;letter-spacing:.5px;color:#fff;
+       background:var(--amber);border-radius:999px;padding:3px 10px;text-decoration:none;}
 </style></head><body>
  <div class=""wrap"">
   <div class=""topbar""><i></i></div>
   <div class=""brand"">pedralcg<b>.dev</b></div>
   <div class=""hero"">
-   <h1>arcmap-mcp</h1>
+   <div class=""titulo""><h1>arcmap-mcp</h1><span class=""ver"">v__VERSION__</span>__UPDATE__</div>
    <p class=""kicker"">Puente MCP para ArcMap</p>
-   <p class=""desc"">Conduce la sesi&oacute;n viva de ArcMap desde un agente IA.
+   <p class=""desc"">Conduce la sesi&oacute;n viva de ArcMap desde un agente IA:
+      <b>__NUM_TOOLS__ herramientas</b> para listar y simbolizar capas, consultar datos,
+      encuadrar, geoprocesar y exportar series de planos.
       Software libre creado por <b>__AUTOR__</b> &middot; __LUGAR__.</p>
    <p class=""quote"">__TAGLINE__</p>
    <div class=""cards"">
@@ -88,7 +99,9 @@ namespace ArcmapMcp.AddIn
     <a class=""card"" href=""__LINKEDIN__""><span class=""ic"">__SVG_LI__</span>
        <span class=""t"">LinkedIn</span><span class=""s"">pedro-alcoba-gomez</span></a>
    </div>
-   <p class=""foot"">arcmap-mcp &middot; <b>pedralcg.dev</b></p>
+   <p class=""foot"">C&oacute;digo abierto (licencia MIT) en
+      <a href=""__REPO__"">github.com/pedralcg/arcmap-mcp</a><br>
+      arcmap-mcp v__VERSION__ &middot; <b>pedralcg.dev</b></p>
   </div>
  </div>
 </body></html>";
@@ -97,7 +110,18 @@ namespace ArcmapMcp.AddIn
         {
             try
             {
+                // Versión leída del ensamblado: la ficha no se queda desfasada.
+                string version = typeof(AboutFicha).Assembly.GetName().Version.ToString(3);
+                // Badge de actualización, solo si el chequeo en 2º plano encontró una nueva.
+                string update = Actualizaciones.HayNueva
+                    ? @"<a class=""upd"" href=""" + Actualizaciones.RepoUrl + @""">&#8593; v"
+                      + Actualizaciones.UltimaDisponible + " disponible</a>"
+                    : "";
                 string html = Html
+                    .Replace("__VERSION__", version)
+                    .Replace("__UPDATE__", update)
+                    .Replace("__NUM_TOOLS__", NumHerramientas.ToString())
+                    .Replace("__REPO__", Repo)
                     .Replace("__AUTOR__", Autor)
                     .Replace("__TAGLINE__", Tagline)
                     .Replace("__LUGAR__", Lugar)
@@ -121,8 +145,10 @@ namespace ArcmapMcp.AddIn
             {
                 Log.Error("Acerca de: no se pudo abrir la ficha HTML", ex);
                 MessageBox.Show(
-                    "arcmap-mcp - Puente MCP para ArcMap\n\n"
+                    "arcmap-mcp " + typeof(AboutFicha).Assembly.GetName().Version.ToString(3)
+                    + " - Puente MCP para ArcMap (" + NumHerramientas + " herramientas)\n\n"
                     + "Autor:    " + Autor + "\n"
+                    + "Repo:     " + Repo + "  (licencia MIT)\n"
                     + "Web:      " + Web + "\n"
                     + "Email:    " + Email + "\n"
                     + "GitHub:   " + GitHub + "\n"

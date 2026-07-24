@@ -12,9 +12,57 @@ el servidor MCP no sirve de nada si el add-in dentro de ArcMap no está escuchan
 
 ---
 
+## Vía rápida: `INSTALAR.bat`
+
+Con **ArcMap cerrado**, doble clic en `INSTALAR.bat` (en la raíz del repo). Prepara el
+entorno, instala el add-in y registra el servidor en los clientes IA detectados.
+
+Desde terminal es lo mismo:
+
+```powershell
+cd C:\mcp\arcmap-mcp
+powershell -ExecutionPolicy Bypass -File .\install.ps1   # clientes detectados automáticamente
+.\install.ps1 -Clientes todos                            # o los cinco, detectados o no
+.\install.ps1 -Clientes claude-desktop                   # o solo uno
+```
+
+> **Si has descargado el ZIP** en vez de clonar: desbloquéalo antes de extraerlo
+> (clic derecho en el ZIP ▸ *Propiedades* ▸ *Desbloquear*). Windows marca lo que viene
+> de internet y ArcMap puede negarse a cargar un add-in marcado, sin decir por qué. El
+> instalador desbloquea también por su cuenta lo que encuentra, por si acaso.
+>
+> El `-ExecutionPolicy Bypass` es necesario porque Windows no ejecuta scripts `.ps1`
+> con su configuración de fábrica; `INSTALAR.bat` ya lo incluye.
+
+El instalador detecta la versión de ArcMap y el Python 2.7 de ArcGIS por registro,
+prepara el entorno del servidor, copia el add-in a la carpeta que ArcMap lee de verdad
+y añade el bloque `arcmap` a la configuración de cada cliente sin tocar el resto (hace
+copia de seguridad antes de escribir). Es idempotente: repítelo tras cada actualización
+del add-in.
+
+Después, abre ArcMap y marca la casilla **Autoarranque** de la barra `arcmap-mcp`: el
+puente se levantará solo en cada sesión. Para comprobar que todo responde:
+
+```powershell
+.\install.ps1 -SoloVerificar       # estado del entorno + ping real al puente
+.\install.ps1 -Desinstalar         # retira add-in, venv y entradas de los clientes
+```
+
+Si algo no encaja en tu equipo, los pasos manuales equivalentes son los de abajo.
+
+---
+
 ## Paso 1 — Entorno Python 3 del servidor (una vez)
 
-Necesitas Python 3 (64 bits) con el paquete `mcp`. El lanzador lo prepara solo:
+Necesitas **Python 3.10 o superior** (64 bits) con el paquete `mcp`. No hace falta que
+esté en el PATH ni que lo instales aparte si ya tienes QGIS o ArcGIS Pro: `install.ps1`
+busca el intérprete en el lanzador `py`, en el PATH, en las instalaciones de python.org,
+en `QGIS *\apps\Python3*`, en OSGeo4W y en el entorno `arcgispro-py3`, y descarta los
+que se queden por debajo de 3.10. Si no encuentra ninguno, ofrece instalarlo con
+`winget`. Ojo: el Python **2.7** que trae ArcMap no sirve aquí; ese es el del análisis
+arcpy, dentro del add-in.
+
+El lanzador también prepara el entorno por su cuenta:
 
 ```powershell
 cd C:\mcp\arcmap-mcp
@@ -44,7 +92,10 @@ el `.esriaddin` es un ZIP — extráelo a
 `%USERPROFILE%\Documents\ArcGIS\AddIns\Desktop10.5\{51f4ce63-6bcf-49b2-ae3a-ba2c79ea3e1a}\`
 (la carpeta debe contener `Config.xml` e `Install\`) y reabre ArcMap.
 
-4. Pulsa **Iniciar** → MessageBox «Puente iniciado». El add-in escucha en
+4. Pulsa **Iniciar** → MessageBox «Puente iniciado». O marca la casilla
+   **Autoarranque** y el puente se levantará solo en cada sesión de ArcMap (la
+   preferencia se guarda por usuario en `HKCU\Software\pedralcg\arcmap-mcp`).
+   El add-in escucha en
    `127.0.0.1:27179` y registra su actividad en `C:\MCP_Logs\arcmap-mcp.log`
    (si algo no va, ese log es el primer sitio donde mirar).
 

@@ -96,14 +96,21 @@ def _checkout(ext):
 
 def op_execute_code(job):
     """Código arcpy arbitrario. Variables: arcpy, MAP/mapping, mxd (SNAPSHOT de la
-    sesión), df. Asignar RESULT. NO incluir '# -*- coding -*-' (llega unicode)."""
+    sesión), df. Asignar RESULT. NO incluir '# -*- coding -*-' (llega unicode).
+
+    Sin snapshot en el job, `mxd` y `df` sencillamente no existen: el add-in solo
+    copia el documento cuando el código lo necesita, porque copiarlo cuesta
+    segundos o minutos en sesiones grandes.
+    """
     code = job["params"].get("code", u"")
-    mxd = _abrir_mxd(job)
+    mxd = MAP.MapDocument(_u(job["mxd"])) if job.get("mxd") else None
     buff = StringIO.StringIO()
     old_stdout = sys.stdout
     sys.stdout = buff
-    ns = {"arcpy": arcpy, "MAP": MAP, "mapping": MAP,
-          "mxd": mxd, "df": mxd.activeDataFrame, "RESULT": None}
+    ns = {"arcpy": arcpy, "MAP": MAP, "mapping": MAP, "RESULT": None}
+    if mxd is not None:
+        ns["mxd"] = mxd
+        ns["df"] = mxd.activeDataFrame
     try:
         exec(code, ns)
     finally:
@@ -440,6 +447,37 @@ def _json_default(o):
         return repr(o)
 
 
+def _serializar(respuesta):
+    """JSON como UNICODE, siempre.
+
+    Con ensure_ascii=False, json.dumps de Py2 devuelve `str` (bytes) cuando el
+    payload es ASCII puro y `unicode` en cuanto aparece un no-ASCII. Escribir ese
+    `str` en un fichero abierto con io.open(encoding=...) lanza
+    "write() argument 1 must be unicode" → el fichero de salida quedaba VACÍO y el
+    add-in fallaba con "Error reading JObject ... line 0, position 0". La coerción
+    explícita es obligatoria: no la quites.
+    """
+    texto = json.dumps(respuesta, ensure_ascii=False, default=_json_default)
+    if isinstance(texto, str):
+        texto = texto.decode("utf-8")
+    return texto
+
+
+def _escribir_salida(out_path, respuesta):
+    """Escritura ATÓMICA: serializa entero, escribe a .tmp y renombra.
+
+    El add-in solo ve el fichero cuando está completo, así que un fallo a mitad
+    nunca puede presentarse como 'salida vacía'.
+    """
+    texto = _serializar(respuesta)
+    tmp = out_path + ".tmp"
+    with io.open(tmp, "w", encoding="utf-8") as f:
+        f.write(texto)
+    if os.path.exists(out_path):
+        os.remove(out_path)
+    os.rename(tmp, out_path)
+
+
 def main():
     if len(sys.argv) != 3:
         sys.stderr.write("uso: runner.py <job.json> <out.json>\n")
@@ -456,8 +494,21 @@ def main():
         respuesta = {"ok": False,
                      "error": _u(ex.message if getattr(ex, "message", None) else ex),
                      "traceback": _u(traceback.format_exc())}
-    with io.open(out_path, "w", encoding="utf-8") as f:
-        f.write(json.dumps(respuesta, ensure_ascii=False, default=_json_default))
+    try:
+        _escribir_salida(out_path, respuesta)
+    except Exception:
+        # Último recurso: el resultado no era serializable o el disco falló. Se
+        # responde un sobre de error válido (ASCII puro) en vez de dejar el
+        # fichero vacío, que es lo que el add-in no sabe interpretar.
+        fallback = {"ok": False,
+                    "error": u"El runner no pudo serializar la respuesta de la operación.",
+                    "traceback": _u(traceback.format_exc())}
+        try:
+            _escribir_salida(out_path, fallback)
+        except Exception:
+            with io.open(out_path, "w", encoding="utf-8") as f:
+                f.write(u'{"ok": false, "error": "El runner no pudo escribir su salida."}')
+        return 1
     return 0
 
 

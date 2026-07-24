@@ -36,6 +36,7 @@ namespace ArcmapMcp.AddIn
 
         public static void Error(string msg, Exception ex = null)
         {
+            Estadisticas.RegistrarError(); // el contador que ve el botón "Estado"
             WriteLine("ERROR", ex == null ? msg : msg + " :: " + ex);
         }
 

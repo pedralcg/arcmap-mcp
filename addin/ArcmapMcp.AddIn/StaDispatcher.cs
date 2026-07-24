@@ -61,5 +61,20 @@ namespace ArcmapMcp.AddIn
             }
             return task.Result;
         }
+
+        /// <summary>
+        /// Encola una acción en el hilo UI para que corra DESPUÉS de que termine el
+        /// evento en curso, sin bloquear. Necesario para mostrar un diálogo modal
+        /// fuera del OnSelChange de un ComboBox de add-in: hacerlo dentro hace que
+        /// ArcMap revierta la selección del combo al cerrarse el diálogo y vuelva a
+        /// disparar el evento. Prioridad Background: se ejecuta cuando la cola de
+        /// entrada (incluido cualquier re-disparo espurio del combo) ya se ha drenado.
+        /// </summary>
+        public static void Post(Action action)
+        {
+            if (action == null) return;
+            if (_ui == null) { action(); return; }  // sin dispatcher: mejor síncrono que nada
+            _ui.BeginInvoke(DispatcherPriority.Background, action);
+        }
     }
 }

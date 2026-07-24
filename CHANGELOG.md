@@ -3,6 +3,130 @@
 Formato inspirado en [Keep a Changelog](https://keepachangelog.com/es/); versionado
 [SemVer](https://semver.org/lang/es/).
 
+## [2.8.0] — 2026-07-24
+
+Aviso de nuevas versiones y reporte de problemas desde la barra.
+
+### Añadido
+- **Aviso de nueva versión.** Al abrir ArcMap, el add-in comprueba en segundo plano
+  (como mucho una vez al día, sin bloquear el arranque) si hay una versión más reciente
+  publicada como tag en GitHub. Si la hay, muestra un aviso **una sola vez** por versión
+  y ofrece abrir el repositorio. El estado («al día» / «hay vX disponible») queda visible
+  en el botón **Estado** y en **Acerca de**. Sin internet o con límite de la API de
+  GitHub, no pasa nada: es silencioso y tolerante a fallo. La comprobación se cachea en
+  `HKCU\Software\pedralcg\arcmap-mcp`.
+- **Botón «Reportar».** Abre un formulario con el diagnóstico de la sesión
+  (versiones, entorno, contadores) ya preparado, y permite reportar por **issue de
+  GitHub** o por **email**, ambos pre-rellenados. El diagnóstico es **no sensible**: no
+  incluye nombres de capas, título del documento ni rutas. El **log** (que sí puede
+  contener datos de proyecto) nunca se adjunta solo: se prepara aparte en el Escritorio,
+  con un aviso para revisarlo antes de compartirlo.
+
+### Notas técnicas
+- La comprobación de versión fuerza **TLS 1.2** (`ServicePointManager.SecurityProtocol`):
+  .NET Framework 4.5 no lo habilita por defecto y la API de GitHub lo exige. La petición
+  envía `User-Agent` (obligatorio para la API) y usa un timeout corto.
+
+## [2.7.0] — 2026-07-23
+
+Simbología graduada nativa sobre la capa viva.
+
+### Añadido
+- **`set_graduated_symbology`**: aplica colores graduados (class breaks) a una capa
+  de la sesión por un campo numérico, in-process y persistente (se guarda con
+  `save_mxd`). Cubre el hueco entre las dos vías que había: `execute_arcpy` no puede
+  cambiar el renderer de la sesión —opera sobre una copia del documento y lo
+  descarta— y `apply_symbology_from_layer` exige un `.lyr` plantilla. Ahora se
+  construye el `IClassBreaksRenderer` directamente. Parámetros: `campo`, `num_clases`
+  (2-32, defecto 5), `metodo` (natural_breaks | quantile | equal_interval |
+  geometrical_interval | standard_deviation), `color_desde`/`color_hasta` (RGB) y
+  `tamano`. Símbolo según geometría (línea, relleno o marcador). El histograma se
+  calcula sobre todos los valores del campo en la fuente (no honra definition query
+  ni selección; para un subconjunto, fíjalo con una definition query permanente).
+
+## [2.6.1] — 2026-07-23
+
+Arreglo del autoarranque, que no llegaba a guardarse.
+
+### Corregido
+- **La casilla «Autoarranque» revertía a «No» sola, ~2 s después de ponerla en «Sí».**
+  El `MessageBox` de confirmación se mostraba *dentro* de `OnSelChange` del ComboBox; al
+  cerrarse un diálogo modal, ArcMap revierte la selección del combo al primer ítem y
+  vuelve a disparar `OnSelChange` (esta vez con «No»), que reescribía la preferencia
+  recién guardada. La escritura al registro nunca falló —el log mostraba «guardado como
+  SI (relectura: SI)» e inmediatamente «guardado como NO (relectura: NO)»—: el problema
+  era ese re-disparo espurio. Ahora el aviso se pospone al *message pump*
+  (`StaDispatcher.Post`, prioridad Background) para que corra cuando el combo ya ha
+  consolidado su selección, y el guard `_sincronizando` ignora cualquier re-disparo que
+  llegue entretanto.
+
+## [2.6.0] — 2026-07-22
+
+`execute_arcpy` deja de copiar el documento cuando no hace falta. En sesiones
+grandes esa copia bloqueaba ArcMap durante minutos y el puente parecía caído.
+
+### Cambiado
+- **`execute_arcpy` solo copia el documento si el código lo usa.** Antes hacía un
+  `SaveAsDocument` del mxd en el hilo de ArcMap *siempre*; con decenas de capas y
+  ortofotos eso tarda minutos, deja la interfaz sin responder y hace que cualquier
+  petición posterior (incluido `ping`) parezca un puente muerto — cuando el código
+  típico (geoprocesar un ráster, recorrer una tabla) no toca el documento para nada.
+  Ahora se decide leyendo si el código menciona `mxd`, `df` o `mapping`, y el nuevo
+  parámetro **`usar_documento`** fuerza la decisión en cualquiera de los dos sentidos.
+  Sin documento, `mxd` y `df` no existen dentro del código.
+- **La copia del documento ya no se serializa desde ArcMap: se copia el `.mxd` del
+  disco.** `SaveAsDocument` era la única parte de `execute_arcpy` que corría *dentro*
+  del proceso de ArcMap, y serializar un documento con capas pesadas o fuentes rotas
+  podía **tumbar ArcMap entero** (visto en un proyecto de 84 capas con ortofotos ECW).
+  Copiar un fichero no puede hacer eso, y además es instantáneo. La contrapartida —los
+  cambios sin guardar de la sesión no se reflejan— se avisa en la respuesta, y
+  `serializar_sesion=True` recupera el comportamiento anterior cuando se necesite.
+- El tiempo máximo para serializar el documento sube de 60 s a 600 s: en sesiones
+  pesadas, 60 s se agotaban antes de terminar una copia legítima.
+
+### Añadido
+- El log registra el inicio, la duración y el tamaño de cada copia del documento, y
+  la preferencia de autoarranque que se lee al arrancar y la que se guarda al
+  cambiarla (con relectura de comprobación).
+
+## [2.5.0] — 2026-07-22
+
+Instalación de un solo comando, autoarranque opcional del puente y el arreglo de un
+fallo que dejaba `execute_arcpy` inservible en la mitad de las llamadas.
+
+### Añadido
+- **`install.ps1`**: instalador end-to-end e idempotente. Detecta la versión de ArcMap
+  y el Python 2.7 de ArcGIS, prepara el entorno del servidor, instala el add-in en la
+  ruta que ArcMap lee de verdad y registra el servidor en los clientes indicados
+  (`-Clientes todos`) respetando el resto de su configuración. Incluye
+  `-SoloVerificar` (diagnóstico con ping real al puente) y `-Desinstalar`.
+- **Casilla «Autoarranque»** en la barra del add-in: con ella marcada, el puente se
+  levanta solo al abrir ArcMap. La preferencia se guarda por usuario en el registro
+  (`HKCU\Software\pedralcg\arcmap-mcp`), así que sobrevive a las actualizaciones.
+
+### Corregido
+- **`execute_arcpy` fallaba con `Error reading JObject … line 0, position 0`** siempre
+  que el resultado era ASCII puro. En Python 2, `json.dumps(ensure_ascii=False)`
+  devuelve `str` cuando no hay ningún carácter no-ASCII, y escribir ese `str` en un
+  fichero abierto con codificación explícita lanza `TypeError` **después** de haber
+  truncado el fichero de salida: el add-in recibía cero bytes. Bastaba una tilde en la
+  respuesta para que la misma llamada funcionara, de ahí que el fallo pareciera
+  aleatorio. Ahora la salida se serializa entera antes de abrir el fichero, se escribe
+  de forma atómica y se coacciona a texto Unicode de forma explícita.
+- Salida ilegible o vacía del proceso arcpy: el add-in devuelve un error accionable
+  (código de salida, `stderr` y primeros bytes) en vez de propagar la excepción del
+  parser, y **conserva** los ficheros del trabajo fallido para poder diagnosticarlo.
+- **`start-arcmap-mcp.ps1` no funcionaba con la PowerShell que trae Windows**: usaba el
+  operador `??`, que solo existe en PowerShell 7. Ahora es compatible con la 5.1.
+- Los scripts se distribuyen como UTF-8 **con BOM** y sin tipografía fuera de ASCII:
+  Windows PowerShell 5.1 lee los ficheros sin BOM como cp1252, y ahí un guion largo se
+  descompone en caracteres entre los que aparece una comilla tipográfica, que PowerShell
+  acepta como delimitador de cadena y rompe el script entero. `empaquetar.ps1` verifica
+  ahora que todos los scripts parseen con la 5.1 antes de generar el paquete.
+- Los flujos de salida y de error del proceso arcpy se leen ambos en asíncrono: con
+  más de unos pocos kilobytes de mensajes, la tubería se llenaba y el proceso quedaba
+  colgado hasta agotar el tiempo de espera.
+
 ## [2.4.3] — 2026-06-11
 
 El puente dentro de ArcMap se reescribe como **add-in .NET (C#/ArcObjects)**,

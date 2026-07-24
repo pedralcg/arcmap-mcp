@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 using System.Text;
+using System.Text.RegularExpressions;
 using ESRI.ArcGIS.ArcMapUI;
 using ESRI.ArcGIS.Carto;
 using ESRI.ArcGIS.Framework;
@@ -33,10 +34,20 @@ namespace ArcmapMcp.AddIn.Handlers
         private static readonly TimeSpan SubprocessTimeout = TimeSpan.FromSeconds(1800);
         private static readonly TimeSpan StaStepTimeout = TimeSpan.FromSeconds(60);
 
+        // Copiar el documento (SaveAsDocument) es lo unico que puede tardar de verdad
+        // en el hilo STA: un mxd con decenas de capas y rasters pesados se va a varios
+        // minutos, y durante ese rato ArcMap parece colgado y el puente, muerto.
+        private static readonly TimeSpan SnapshotTimeout = TimeSpan.FromSeconds(600);
+
         private const string AvisoSnapshot =
             "execute_arcpy corre fuera del proceso de ArcMap, sobre una COPIA del documento: lecturas, "
             + "análisis y exports operan sobre el estado real, pero los cambios al mxd "
             + "NO afectan a la sesión viva (usa las tools nativas para eso).";
+
+        private const string AvisoSnapshotDisco =
+            " La copia se ha tomado del .mxd GUARDADO EN DISCO, que es instantáneo y no ocupa ArcMap: "
+            + "si has cambiado algo en la sesión y no lo has guardado, ese cambio no está aquí. "
+            + "Para incluirlo, guarda el documento (save_mxd) o repite con serializar_sesion=true.";
 
         private static string PythonExe()
         {
@@ -74,19 +85,79 @@ namespace ArcmapMcp.AddIn.Handlers
             return destino;
         }
 
-        /// <summary>Copia del documento vivo a %TEMP% (SaveAsDocument en STA).</summary>
-        private static string Snapshot()
+        /// <summary>Copia del documento vivo a %TEMP% (SaveAsDocument en STA).
+        /// Se cronometra siempre: si un documento tarda, el log lo dice en vez de
+        /// dejar la impresion de que el puente se ha caido.</summary>
+        private static string Snapshot(bool serializarSesion)
         {
             string ruta = Path.Combine(WorkDir(), "snap_" + Guid.NewGuid().ToString("N") + ".mxd");
+
+            // Vía barata y SEGURA por defecto: copiar el .mxd del disco.
+            // SaveAsDocument es la única parte de execute_arcpy que corre DENTRO de
+            // ArcMap, y serializar un documento con capas pesadas o fuentes rotas
+            // puede tumbar el proceso entero (el subproceso arcpy, en cambio, muere
+            // solo). Copiar un fichero no puede hacer eso. El precio: no incluye los
+            // cambios que la sesión aún no ha guardado, y eso se avisa al llamante.
+            string origen = serializarSesion ? null : SnapshotDesdeDisco();
+            if (origen != null)
+            {
+                var relojDisco = Stopwatch.StartNew();
+                File.Copy(origen, ruta, true);
+                relojDisco.Stop();
+                Log.Info("Documento copiado del disco en " + relojDisco.Elapsed.TotalSeconds.ToString("0.0")
+                         + " s (sin ocupar ArcMap): " + origen);
+                return ruta;
+            }
+
+            Log.Info("Copiando el documento a " + ruta + " (ArcMap queda ocupado mientras dura)");
+            var reloj = Stopwatch.StartNew();
             JObject r = StaDispatcher.Invoke(delegate
             {
                 IApplication app = ArcSession.App();
                 app.SaveAsDocument(ruta, true); // true = copia: el doc activo no cambia
                 return Protocol.Result(new JObject());
-            }, StaStepTimeout);
+            }, SnapshotTimeout);
+            reloj.Stop();
+
             if (!(bool)r["ok"])
-                throw new InvalidOperationException("No se pudo capturar el snapshot del mxd: " + (string)r["error"]);
+            {
+                Log.Error("Copia del documento fallida tras " + reloj.Elapsed.TotalSeconds.ToString("0.0")
+                          + " s: " + (string)r["error"]);
+                throw new InvalidOperationException(
+                    "No se pudo copiar el documento (" + reloj.Elapsed.TotalSeconds.ToString("0.0") + " s): "
+                    + (string)r["error"]
+                    + ". Si el mxd es grande, usa execute_arcpy con usar_documento=false cuando tu código "
+                    + "no necesite mxd ni df.");
+            }
+
+            long mb = 0;
+            try { mb = new FileInfo(ruta).Length / (1024 * 1024); } catch { }
+            Log.Info("Documento copiado en " + reloj.Elapsed.TotalSeconds.ToString("0.0") + " s (" + mb + " MB)");
             return ruta;
+        }
+
+        /// <summary>
+        /// Ruta del .mxd tal y como está EN DISCO, si existe. ArcObjects no permite
+        /// consultar si el documento tiene cambios sin guardar (IDocumentDirty2 solo
+        /// deja marcarlo), así que la diferencia se comunica en el aviso del
+        /// resultado en vez de intentar adivinarla.
+        /// </summary>
+        private static string SnapshotDesdeDisco()
+        {
+            JObject r = StaDispatcher.Invoke(delegate
+            {
+                IApplication app = ArcSession.App();
+                return Protocol.Result(new JObject { ["ruta"] = ArcSession.MxdPath(app) });
+            }, StaStepTimeout);
+
+            if (!(bool)r["ok"]) return null;
+            string mxd = (string)r["result"]["ruta"];
+            if (string.IsNullOrEmpty(mxd) || !File.Exists(mxd))
+            {
+                Log.Info("El documento no está guardado en disco: hay que serializarlo desde ArcMap.");
+                return null;
+            }
+            return mxd;
         }
 
         /// <summary>Lanza el runner con el job y devuelve su JSON de salida.
@@ -105,6 +176,9 @@ namespace ArcmapMcp.AddIn.Handlers
             // rompería ñ/tildes, igual que un header '# -*- coding -*-' mal puesto).
             File.WriteAllText(jobPath, job.ToString(Formatting.None), new UTF8Encoding(false));
 
+            // Ante salida ilegible se CONSERVAN job y out: son la única evidencia
+            // para diagnosticar (se borraban siempre, y con ellos la pista).
+            bool conservarEvidencia = false;
             try
             {
                 var psi = new ProcessStartInfo
@@ -116,31 +190,79 @@ namespace ArcmapMcp.AddIn.Handlers
                     RedirectStandardError = true,
                     RedirectStandardOutput = true,
                 };
+                int exitCode;
+                string stderr;
                 using (Process p = Process.Start(psi))
                 {
-                    string stderr = p.StandardError.ReadToEnd(); // drena antes del Wait: sin deadlock de pipe
+                    // AMBOS flujos en asíncrono: leer uno solo con ReadToEnd cuelga el
+                    // subprocess si el otro pipe se llena (~4 KB de mensajes de arcpy).
+                    var salida = new StringBuilder();
+                    var errores = new StringBuilder();
+                    p.OutputDataReceived += delegate (object s, DataReceivedEventArgs e)
+                    { if (e.Data != null) salida.AppendLine(e.Data); };
+                    p.ErrorDataReceived += delegate (object s, DataReceivedEventArgs e)
+                    { if (e.Data != null) errores.AppendLine(e.Data); };
+                    p.BeginOutputReadLine();
+                    p.BeginErrorReadLine();
+
                     if (!p.WaitForExit((int)SubprocessTimeout.TotalMilliseconds))
                     {
                         try { p.Kill(); } catch { /* ya muerto */ }
                         return Protocol.Error("Timeout (" + SubprocessTimeout.TotalSeconds
                             + "s) del subprocess arcpy; proceso terminado (sin zombies).");
                     }
-                    if (!File.Exists(outPath))
-                        return Protocol.Error("El runner arcpy no produjo salida (exit "
-                            + p.ExitCode + "). stderr: " + Recortar(stderr));
+                    exitCode = p.ExitCode;
+                    stderr = errores.ToString();
+                    if (salida.Length > 0)
+                        Log.Info("runner '" + op + "' stdout: " + Recortar(salida.ToString()));
                 }
-                JObject respuesta = JObject.Parse(File.ReadAllText(outPath, Encoding.UTF8));
-                if (!(bool)respuesta["ok"])
+
+                if (!File.Exists(outPath))
+                    return Protocol.Error("El runner arcpy no produjo salida (exit "
+                        + exitCode + "). stderr: " + Recortar(stderr));
+
+                string texto = File.ReadAllText(outPath, Encoding.UTF8);
+                if (string.IsNullOrEmpty(texto.Trim()))
                 {
-                    // Sobre de error estándar (error + traceback del runner).
-                    return respuesta;
+                    conservarEvidencia = true;
+                    Log.Info("runner '" + op + "' salida VACÍA; evidencia en " + jobPath + " / " + outPath);
+                    return Protocol.Error("El runner arcpy terminó (exit " + exitCode
+                        + ") dejando la salida VACÍA: la operación no llegó a completarse. "
+                        + "stderr: " + Recortar(stderr)
+                        + " | evidencia conservada: " + jobPath + " y " + outPath);
                 }
+
+                JObject respuesta;
+                try
+                {
+                    respuesta = JObject.Parse(texto);
+                }
+                catch (Exception ex)
+                {
+                    conservarEvidencia = true;
+                    Log.Info("runner '" + op + "' salida ILEGIBLE; evidencia en " + jobPath + " / " + outPath);
+                    return Protocol.Error("El runner arcpy devolvió una salida ilegible (exit "
+                        + exitCode + "): " + ex.Message
+                        + " | primeros bytes: " + Recortar(texto.Length > 200 ? texto.Substring(0, 200) : texto)
+                        + " | stderr: " + Recortar(stderr)
+                        + " | evidencia conservada: " + jobPath + " y " + outPath);
+                }
+                if (respuesta["ok"] == null)
+                {
+                    conservarEvidencia = true;
+                    return Protocol.Error("El runner arcpy devolvió un JSON sin campo 'ok' (exit "
+                        + exitCode + "). Evidencia conservada: " + outPath);
+                }
+                // Sobre de error estándar del runner (error + traceback) o resultado.
                 return respuesta;
             }
             finally
             {
-                Borrar(jobPath);
-                Borrar(outPath);
+                if (!conservarEvidencia)
+                {
+                    Borrar(jobPath);
+                    Borrar(outPath);
+                }
             }
         }
 
@@ -157,9 +279,9 @@ namespace ArcmapMcp.AddIn.Handlers
         }
 
         /// <summary>Job de documento: snapshot + runner + limpieza del snapshot.</summary>
-        private static JObject RunJobConSnapshot(string op, JObject parameters)
+        private static JObject RunJobConSnapshot(string op, JObject parameters, bool serializarSesion = false)
         {
-            string snap = Snapshot();
+            string snap = Snapshot(serializarSesion);
             try
             {
                 return RunJob(op, parameters, snap);
@@ -193,11 +315,43 @@ namespace ArcmapMcp.AddIn.Handlers
         // Handlers (nombre de comando y contrato JSON de los schemas del servidor MCP).
         // ------------------------------------------------------------------ //
 
+        /// <summary>
+        /// ¿El código necesita el documento? Solo si menciona `mxd`, `df` o el módulo
+        /// de mapping. Copiar el .mxd de una sesión cargada cuesta segundos o minutos,
+        /// y la mayoría del arcpy útil (geoprocesar rásters, recorrer tablas, calcular
+        /// índices) trabaja sobre ficheros en disco y no lo toca.
+        /// </summary>
+        private static bool NecesitaDocumento(string code)
+        {
+            if (string.IsNullOrEmpty(code)) return false;
+            return Regex.IsMatch(code, @"\b(mxd|df|MAP|mapping)\b");
+        }
+
         public static JObject ExecuteArcpy(JObject parameters)
         {
-            JObject r = RunJobConSnapshot("execute_code", parameters);
+            // El usuario manda: usar_documento fuerza el comportamiento en ambos
+            // sentidos. Sin él, se decide leyendo el código.
+            bool conDocumento;
+            JToken explicito = parameters["usar_documento"];
+            if (explicito != null && explicito.Type != JTokenType.Null)
+                conDocumento = (bool)explicito;
+            else
+                conDocumento = NecesitaDocumento((string)parameters["code"]);
+
+            // serializar_sesion fuerza la vía SaveAsDocument (la única que recoge
+            // cambios sin guardar, y la única capaz de tumbar ArcMap).
+            JToken serializar = parameters["serializar_sesion"];
+            bool serializarSesion = serializar != null && serializar.Type != JTokenType.Null && (bool)serializar;
+
+            JObject r = conDocumento
+                ? RunJobConSnapshot("execute_code", parameters, serializarSesion)
+                : RunJob("execute_code", parameters, null);
+
             if ((bool)r["ok"])
-                r["result"]["aviso"] = AvisoSnapshot;
+                r["result"]["aviso"] = conDocumento
+                    ? (serializarSesion ? AvisoSnapshot : AvisoSnapshot + AvisoSnapshotDisco)
+                    : "Ejecutado SIN copiar el documento (el código no usa mxd ni df): más rápido y sin "
+                      + "ocupar ArcMap. Si necesitas la sesión, pasa usar_documento=true.";
             return r;
         }
 
