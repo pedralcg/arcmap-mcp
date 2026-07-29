@@ -12,7 +12,22 @@ namespace ArcmapMcp.AddIn
     public class McpExtension : Extension
     {
         private static McpExtension _instance;
-        private McpServer _server;
+
+        // ArcMap instancia la extensión VARIAS veces por arranque (3-4 en el log del
+        // 27-jul). Con el servidor en un campo de instancia, las cargas 2..N veían su
+        // propio _server a null, intentaban bindear el 27179 y morían con
+        // SocketException: el log se llenaba de "Autoarranque activo pero el puente no
+        // arrancó", que era FALSO — la primera carga lo había levantado bien.
+        // El servidor es un recurso del PROCESO, así que su estado va en estático.
+        private static McpServer _server;
+
+        // Quién levantó el puente: solo esa carga puede pararlo en su OnShutdown, para
+        // que la descarga de una instancia espuria no tumbe el puente de la buena.
+        private static McpExtension _duenoServidor;
+
+        // La comprobación de versión también es del proceso: 4 cargas = 4 llamadas a la
+        // API de GitHub por arranque, que además tiene rate-limit.
+        private static bool _actualizacionComprobada;
 
         public static McpExtension Instance
         {
@@ -34,19 +49,33 @@ namespace ArcmapMcp.AddIn
                      + Thread.CurrentThread.ManagedThreadId + ", "
                      + Thread.CurrentThread.GetApartmentState() + ")");
 
+            // Guard de instancia única: si otra carga de la extensión ya levantó el
+            // puente en este proceso, no hay nada que hacer y desde luego nada que
+            // reportar como error.
+            if (IsRunning)
+            {
+                Log.Info("El puente ya estaba levantado por una carga anterior de la extensión "
+                         + "en este proceso: no se reintenta (ArcMap carga la extensión varias veces).");
+                return;
+            }
+
             bool auto = Ajustes.Autoarranque;
             Log.Info("Preferencia de autoarranque leida: " + (auto ? "SI" : "NO"));
             if (auto)
             {
                 // Nunca romper el arranque de ArcMap por el puente: si el puerto está
-                // ocupado (segunda instancia), se registra y el usuario sigue trabajando.
+                // ocupado (otro ArcMap abierto), se registra y el usuario sigue trabajando.
                 string error = StartServer();
                 Log.Info(error == null
                     ? "Autoarranque activo: puente levantado al abrir ArcMap"
                     : "Autoarranque activo pero el puente no arrancó: " + error);
             }
 
-            LanzarComprobacionActualizacion();
+            if (!_actualizacionComprobada)
+            {
+                _actualizacionComprobada = true;
+                LanzarComprobacionActualizacion();
+            }
         }
 
         /// <summary>
@@ -93,8 +122,20 @@ namespace ArcmapMcp.AddIn
 
         protected override void OnShutdown()
         {
-            StopServer();
-            _instance = null;
+            // Solo la carga que levantó el puente lo para. Si ArcMap descarga una de las
+            // instancias espurias, el puente de la buena tiene que sobrevivir.
+            if (_duenoServidor == null || ReferenceEquals(_duenoServidor, this))
+            {
+                StopServer();
+                _duenoServidor = null;
+            }
+            else
+            {
+                Log.Info("Extensión descargada (carga secundaria): el puente sigue vivo, "
+                         + "lo para la carga que lo arrancó.");
+            }
+            if (ReferenceEquals(_instance, this))
+                _instance = null;
             Log.Info("Extensión descargada");
         }
 
@@ -107,6 +148,7 @@ namespace ArcmapMcp.AddIn
             {
                 _server = new McpServer();
                 _server.Start();
+                _duenoServidor = this;
                 return null;
             }
             catch (System.Exception ex)
@@ -120,6 +162,9 @@ namespace ArcmapMcp.AddIn
         {
             if (_server != null && _server.IsRunning)
                 _server.Stop();
+            // Liberar la propiedad: si el usuario lo para desde el botón, cualquier carga
+            // puede volver a arrancarlo después.
+            _duenoServidor = null;
         }
     }
 }
