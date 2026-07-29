@@ -3,6 +3,55 @@
 Formato inspirado en [Keep a Changelog](https://keepachangelog.com/es/); versionado
 [SemVer](https://semver.org/lang/es/).
 
+## [2.8.1] — 2026-07-29
+
+El runner dice en qué fase está, `execute_arcpy` falla con motivo, y la extensión deja
+de pelearse consigo misma.
+
+### Añadido
+- **Traza de fase del runner.** Desde el add-in, un runner atascado abriendo un
+  documento y uno reclasificando un ráster de 4 GB son el mismo `python.exe` que no
+  termina: el reloj de pared no distingue colgado de trabajando. Ahora el runner anota
+  su fase (`importando arcpy`, `leyendo job`, `abriendo documento` con el tamaño del
+  mxd, `ejecutando codigo`, `serializando salida`, `terminado`) en un fichero al lado
+  del `out`, y el add-in lo sondea cada segundo: cada cambio de fase queda en el log con
+  su marca de tiempo. Si salta el timeout, el error ya no es un «timeout» mudo sino
+  «atascado en la fase 'abriendo documento (5,9 MB)' desde hace 412 s», y el `job_*.json`
+  y la traza se conservan como evidencia. La escritura de la fase no puede romper el job:
+  falla en silencio si falla.
+
+### Corregido
+- **`execute_arcpy` podía tardar media hora en dar señales de vida.** El tope del
+  subproceso arcpy era de 1800 s para *todas* las operaciones del runner, incluida
+  `execute_code`, que es interactiva: el cliente MCP se rinde a los 120 s, así que el
+  fallo no llegaba nunca en forma de error sino de cuelgue mudo, y dejaba un
+  `python.exe` huérfano vivo que además impedía cerrar ArcMap. Ahora `execute_code`
+  tiene su propio tope (**`ARCMAP_EXEC_TIMEOUT`, 900 s** por defecto) y el resto de
+  operaciones del runner (DDP, hidrología, índices, que sí son legítimamente largas)
+  conserva el amplio (`ARCMAP_SUBPROCESS_TIMEOUT`, 1800 s). Al agotarse, el subproceso
+  se mata, se conserva el `job_*.json` como evidencia y el error dice en qué fase se
+  quedó y qué hacer. Del lado del servidor MCP, `execute_arcpy` deja de usar `GP_TIMEOUT`
+  y espera 930 s, deliberadamente **por encima** del tope del add-in, para que gane el
+  error con fase en vez de un corte de socket que dejaría el runner huérfano vivo.
+  El tope es una red de seguridad contra runners eternos, no un presupuesto de
+  rendimiento: 900 s y no 300 porque abrir el mxd de 5,9 MB medido costó 324 s, y un
+  tope de 300 mataría un `usar_documento=true` legítimo.
+- **La extensión se cargaba 3-4 veces por arranque y todas menos la primera decían que
+  el puente no había arrancado.** El servidor vivía en un campo de *instancia*: las
+  cargas 2..N veían su propio `_server` a null, intentaban bindear el 27179 y morían con
+  `SocketException`, dejando un «Autoarranque activo pero el puente no arrancó» que era
+  falso — la primera carga lo había levantado bien. El puente es un recurso del proceso,
+  así que su estado pasa a estático, con guard de instancia única en `OnStartup` y
+  propiedad explícita: solo la carga que lo arrancó lo para en su `OnShutdown`, para que
+  descargar una instancia espuria no tumbe el puente bueno. La comprobación de versión
+  en GitHub también corre una sola vez por proceso, y no cuatro.
+
+### Notas técnicas
+- Medición del 2026-07-29 sobre un mxd de 5,9 MB: el mismo `RESULT = 2 + 2` tarda
+  **6,4 s sin documento y 324,5 s con él** (51x). Abrir el documento es todo el coste;
+  el código ejecutado no pinta nada. De ahí que el mensaje de timeout empuje a
+  `usar_documento=false`.
+
 ## [2.8.0] — 2026-07-24
 
 Aviso de nuevas versiones y reporte de problemas desde la barra.
