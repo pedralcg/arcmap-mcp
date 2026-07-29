@@ -28,6 +28,14 @@ TIMEOUT = int(os.environ.get("ARCMAP_BRIDGE_TIMEOUT", "60"))  # tools rápidas
 # el puente los corre en el hilo principal de ArcMap y pueden tardar minutos. Si se
 # corta antes, el server reporta "timeout" pero el proceso sigue vivo en ArcMap.
 GP_TIMEOUT = int(os.environ.get("ARCMAP_GP_TIMEOUT", "1800"))  # 30 min
+# execute_arcpy es interactivo y NO debe esperar 30 min: a los 120 s el cliente MCP
+# ya ha dado la llamada por colgada, así que un techo alto solo sirve para que el
+# fallo no tenga forma de error (nos costó las sesiones del 27-jul y del 29-jul).
+# Va por encima del ARCMAP_EXEC_TIMEOUT del add-in (900 s) a propósito: así vence
+# primero el timeout del add-in, que mata el subproceso y devuelve un error que dice
+# en qué FASE se quedó el runner, en vez de un corte mudo de socket que además deja
+# el runner huérfano vivo (y un runner huérfano impide cerrar ArcMap).
+EXEC_TIMEOUT = int(os.environ.get("ARCMAP_EXEC_TIMEOUT_CLIENTE", "930"))
 
 
 class ArcMapClient:
@@ -159,6 +167,14 @@ def execute_arcpy(code: str, usar_documento: bool | None = None,
     no copia nunca (más rápido, pero `mxd` y `df` no existirán), `True` copia
     siempre. Déjalo sin indicar para que se decida solo.
 
+    Abrir el documento es, con diferencia, lo que más cuesta: medido el 2026-07-29
+    sobre un mxd de 5,9 MB, el mismo `RESULT = 2 + 2` tarda 6,4 s sin documento y
+    324,5 s con él (51x). Si tu código no usa `mxd` ni `df`, pasa
+    `usar_documento=False`. Pasado `ARCMAP_EXEC_TIMEOUT` (900 s por defecto) el
+    add-in mata el subproceso y devuelve un error que dice en qué fase se quedó
+    (importando arcpy / abriendo documento / ejecutando codigo), en vez de esperar
+    en silencio.
+
     Ejemplos:
         RESULT = [l.name for l in MAP.ListLayers(mxd)]        # copia el documento
         arcpy.gp.Reclassify_sa(r"C:\\slope.tif", "Value",
@@ -170,7 +186,7 @@ def execute_arcpy(code: str, usar_documento: bool | None = None,
         params["usar_documento"] = usar_documento
     if serializar_sesion:
         params["serializar_sesion"] = True
-    return _client.send("execute_code", params, timeout=GP_TIMEOUT)
+    return _client.send("execute_code", params, timeout=EXEC_TIMEOUT)
 
 
 # --------------------------------------------------------------------------- #

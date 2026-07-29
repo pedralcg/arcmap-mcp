@@ -21,11 +21,55 @@ import io
 import json
 import os
 import sys
+import time
 import traceback
 import StringIO
 
+# --------------------------------------------------------------------------- #
+# Traza de fase.
+#
+# El add-in solo puede medir reloj de pared sobre este proceso: desde fuera, un
+# runner atascado abriendo un documento y uno reclasificando un ráster de 4 GB
+# son el mismo python.exe que no termina. Por eso el runner DICE en qué fase
+# está, en un fichero al lado del out. Si salta el timeout, el add-in lee ese
+# fichero y el error nombra el punto exacto donde se quedó, en vez de un
+# "timeout" mudo. Coste: escribir ~80 bytes cuatro o cinco veces por job.
+#
+# La ruta se DERIVA del out (out.json -> out.json.fase) para no cambiar el
+# contrato de argumentos del runner.
+# --------------------------------------------------------------------------- #
+
+_FASE_PATH = sys.argv[2] + ".fase" if len(sys.argv) > 2 else None
+
+
+def _fase(nombre, detalle=None):
+    """Anota la fase actual. NUNCA puede romper el job: si falla, se ignora."""
+    if not _FASE_PATH:
+        return
+    try:
+        datos = {"fase": nombre, "ts": time.time()}
+        if detalle:
+            datos["detalle"] = detalle
+        # Mismo cuidado que en _serializar: json.dumps de Py2 con
+        # ensure_ascii=False devuelve str si todo es ASCII, y io.open exige unicode.
+        texto = json.dumps(datos, ensure_ascii=False)
+        if isinstance(texto, str):
+            texto = texto.decode("utf-8")
+        with io.open(_FASE_PATH, "w", encoding="utf-8") as f:
+            f.write(texto)
+    except Exception:
+        pass
+
+
+# `import arcpy` NO es gratis: son segundos en frío, y en una máquina con la
+# licencia en un servidor lento puede irse mucho más. Se anota ANTES de importar
+# para que un cuelgue en el propio import también quede identificado.
+_fase(u"importando arcpy")
+
 import arcpy
 from arcpy import mapping as MAP
+
+_fase(u"arcpy importado")
 
 
 def _u(x):
@@ -43,11 +87,24 @@ def _u(x):
 
 
 def _abrir_mxd(job):
-    """Abre el snapshot del documento; error accionable si el job no lo trae."""
+    """Abre el snapshot del documento; error accionable si el job no lo trae.
+
+    Es LA fase cara: medido el 2026-07-29, abrir un mxd de 5,9 MB costó 324 s
+    frente a 6,4 s del job entero sin documento. Por eso se anota con el tamaño:
+    si el timeout salta aquí, el mensaje ya dice por qué.
+    """
     ruta = job.get("mxd")
     if not ruta:
         raise ValueError(u"Operación de documento sin snapshot .mxd (bug del add-in).")
-    return MAP.MapDocument(_u(ruta))
+    try:
+        mb = os.path.getsize(ruta) / (1024.0 * 1024.0)
+        detalle = u"%.1f MB" % mb
+    except Exception:
+        detalle = None
+    _fase(u"abriendo documento", detalle)
+    doc = MAP.MapDocument(_u(ruta))
+    _fase(u"documento abierto", detalle)
+    return doc
 
 
 def _get_ddp(mxd):
@@ -103,7 +160,7 @@ def op_execute_code(job):
     segundos o minutos en sesiones grandes.
     """
     code = job["params"].get("code", u"")
-    mxd = MAP.MapDocument(_u(job["mxd"])) if job.get("mxd") else None
+    mxd = _abrir_mxd(job) if job.get("mxd") else None
     buff = StringIO.StringIO()
     old_stdout = sys.stdout
     sys.stdout = buff
@@ -111,6 +168,7 @@ def op_execute_code(job):
     if mxd is not None:
         ns["mxd"] = mxd
         ns["df"] = mxd.activeDataFrame
+    _fase(u"ejecutando codigo")
     try:
         exec(code, ns)
     finally:
@@ -484,18 +542,22 @@ def main():
         return 2
     job_path, out_path = sys.argv[1], sys.argv[2]
     try:
+        _fase(u"leyendo job")
         with io.open(job_path, "r", encoding="utf-8") as f:
             job = json.loads(f.read())
         op = OPS.get(job.get("op"))
         if op is None:
             raise ValueError(u"Operación desconocida: %s" % _u(job.get("op")))
+        _fase(u"ejecutando op", _u(job.get("op")))
         respuesta = {"ok": True, "result": op(job)}
     except Exception as ex:
         respuesta = {"ok": False,
                      "error": _u(ex.message if getattr(ex, "message", None) else ex),
                      "traceback": _u(traceback.format_exc())}
     try:
+        _fase(u"serializando salida")
         _escribir_salida(out_path, respuesta)
+        _fase(u"terminado")
     except Exception:
         # Último recurso: el resultado no era serializable o el disco falló. Se
         # responde un sobre de error válido (ASCII puro) en vez de dejar el

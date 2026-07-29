@@ -31,8 +31,36 @@ namespace ArcmapMcp.AddIn.Handlers
     /// </summary>
     internal static class PythonHandlers
     {
-        private static readonly TimeSpan SubprocessTimeout = TimeSpan.FromSeconds(1800);
+        private static readonly TimeSpan SubprocessTimeout = LeerTimeout("ARCMAP_SUBPROCESS_TIMEOUT", 1800);
         private static readonly TimeSpan StaStepTimeout = TimeSpan.FromSeconds(60);
+
+        // execute_arcpy es INTERACTIVO: al otro lado hay alguien esperando la
+        // respuesta, no un batch nocturno. Con el techo de 1800 s de los jobs
+        // pesados, un execute_arcpy atascado es indistinguible de un cuelgue
+        // permanente (el cliente MCP se rinde mucho antes) y no deja ni un error
+        // que leer. Ya costó dos sesiones enteras: 2026-07-27 y 2026-07-29.
+        // Los jobs legítimamente largos (DDP, hidrología, índices) NO pasan por
+        // aquí: conservan SubprocessTimeout.
+        // 900 s y no 300: abrir un mxd de 5,9 MB costó 324 s medidos el 2026-07-29, o
+        // sea que un tope de 300 mataría un usar_documento=true legítimo. Esto es una
+        // RED DE SEGURIDAD contra runners eternos, no un presupuesto de rendimiento:
+        // quien informa de si avanza o está pillado es la traza de fase del runner.
+        private static readonly TimeSpan ExecuteTimeout = LeerTimeout("ARCMAP_EXEC_TIMEOUT", 900);
+
+        // Cada cuánto se mira la fase del runner mientras corre. 1 s es ruido
+        // despreciable frente a jobs de segundos o minutos.
+        private static readonly TimeSpan SondeoFase = TimeSpan.FromSeconds(1);
+
+        /// <summary>Timeout en segundos desde variable de entorno, con defecto.
+        /// Un valor ilegible o &lt;= 0 no rompe el add-in: se usa el defecto.</summary>
+        private static TimeSpan LeerTimeout(string variable, int defectoSegundos)
+        {
+            int segundos;
+            string bruto = Environment.GetEnvironmentVariable(variable);
+            if (string.IsNullOrEmpty(bruto) || !int.TryParse(bruto, out segundos) || segundos <= 0)
+                segundos = defectoSegundos;
+            return TimeSpan.FromSeconds(segundos);
+        }
 
         // Copiar el documento (SaveAsDocument) es lo unico que puede tardar de verdad
         // en el hilo STA: un mxd con decenas de capas y rasters pesados se va a varios
@@ -162,12 +190,17 @@ namespace ArcmapMcp.AddIn.Handlers
 
         /// <summary>Lanza el runner con el job y devuelve su JSON de salida.
         /// Timeout duro con Kill: sin zombies de python.exe.</summary>
-        private static JObject RunJob(string op, JObject parameters, string mxdSnapshot)
+        private static JObject RunJob(string op, JObject parameters, string mxdSnapshot,
+                                      TimeSpan? timeout = null)
         {
+            TimeSpan tope = timeout ?? SubprocessTimeout;
             string runner = ExtraerRunner();
             string stamp = Guid.NewGuid().ToString("N");
             string jobPath = Path.Combine(WorkDir(), "job_" + stamp + ".json");
             string outPath = Path.Combine(WorkDir(), "out_" + stamp + ".json");
+            // El runner deriva esta misma ruta de su segundo argumento: no hace falta
+            // pasarla, y así el contrato de argumentos del runner no cambia.
+            string fasePath = outPath + ".fase";
 
             var job = new JObject { ["op"] = op, ["params"] = parameters ?? new JObject() };
             if (mxdSnapshot != null)
@@ -205,12 +238,52 @@ namespace ArcmapMcp.AddIn.Handlers
                     p.BeginOutputReadLine();
                     p.BeginErrorReadLine();
 
-                    if (!p.WaitForExit((int)SubprocessTimeout.TotalMilliseconds))
+                    // Sondeo en vez de una espera ciega: el runner va anotando su fase
+                    // y aquí se registra cada cambio. Así el log dice DÓNDE se quedó
+                    // pillado, que desde fuera es indistinguible de estar trabajando.
+                    var reloj = Stopwatch.StartNew();
+                    string fase = null;
+                    TimeSpan faseDesde = TimeSpan.Zero;
+                    bool termino = false;
+                    while (reloj.Elapsed < tope)
                     {
-                        try { p.Kill(); } catch { /* ya muerto */ }
-                        return Protocol.Error("Timeout (" + SubprocessTimeout.TotalSeconds
-                            + "s) del subprocess arcpy; proceso terminado (sin zombies).");
+                        if (p.WaitForExit((int)SondeoFase.TotalMilliseconds)) { termino = true; break; }
+                        string nueva = LeerFase(fasePath);
+                        if (nueva != null && nueva != fase)
+                        {
+                            fase = nueva;
+                            faseDesde = reloj.Elapsed;
+                            Log.Info("runner '" + op + "' [" + reloj.Elapsed.TotalSeconds.ToString("0")
+                                     + " s] fase: " + fase);
+                        }
                     }
+
+                    if (!termino)
+                    {
+                        string donde = fase == null
+                            ? "no llegó a anotar ninguna fase (murió al arrancar el intérprete)"
+                            : "atascado en la fase '" + fase + "' desde hace "
+                              + (reloj.Elapsed - faseDesde).TotalSeconds.ToString("0") + " s";
+                        try { p.Kill(); } catch { /* ya muerto */ }
+                        Log.Error("runner '" + op + "' superó el timeout de " + tope.TotalSeconds
+                                  + " s: " + donde + ". Proceso " + PidSeguro(p)
+                                  + " terminado. Evidencia: " + jobPath);
+                        conservarEvidencia = true;
+                        return Protocol.Error("Timeout (" + tope.TotalSeconds
+                            + " s) del subprocess arcpy en '" + op + "': " + donde
+                            + ". Proceso terminado (sin zombies)."
+                            + (fase != null && fase.StartsWith("abriendo documento")
+                                ? " Abrir el documento es LA operación cara (medido: 324 s con documento"
+                                  + " frente a 6 s sin él). Si tu código no usa mxd ni df, pasa"
+                                  + " usar_documento=false; si lo necesita, sube ARCMAP_EXEC_TIMEOUT (segundos)."
+                                : op == "execute_code"
+                                    ? " Sube ARCMAP_EXEC_TIMEOUT (segundos) si la operación es legítimamente larga."
+                                    : " Sube ARCMAP_SUBPROCESS_TIMEOUT (segundos) si la operación es legítimamente larga.")
+                            + " Evidencia conservada: " + jobPath);
+                    }
+                    // Con salida redirigida en asíncrono, hay que rematar con el
+                    // WaitForExit sin argumentos para que los buffers acaben de vaciarse.
+                    p.WaitForExit();
                     exitCode = p.ExitCode;
                     stderr = errores.ToString();
                     if (salida.Length > 0)
@@ -258,10 +331,13 @@ namespace ArcmapMcp.AddIn.Handlers
             }
             finally
             {
+                // La traza de fase es de usar y tirar salvo que haya que diagnosticar:
+                // cuando se conserva evidencia, dice dónde se quedó el runner.
                 if (!conservarEvidencia)
                 {
                     Borrar(jobPath);
                     Borrar(outPath);
+                    Borrar(fasePath);
                 }
             }
         }
@@ -273,18 +349,50 @@ namespace ArcmapMcp.AddIn.Handlers
             return s.Length <= 2000 ? s : s.Substring(s.Length - 2000);
         }
 
+        /// <summary>
+        /// Lee la fase que el runner dice estar ejecutando. Best-effort por diseño: el
+        /// fichero se está reescribiendo desde el otro proceso, así que una lectura a
+        /// medias es normal y se ignora (en el siguiente sondeo se lee bien). Jamás
+        /// puede tumbar el job que está vigilando.
+        /// </summary>
+        private static string LeerFase(string ruta)
+        {
+            try
+            {
+                if (!File.Exists(ruta)) return null;
+                string texto;
+                using (var fs = new FileStream(ruta, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                using (var sr = new StreamReader(fs, Encoding.UTF8))
+                    texto = sr.ReadToEnd();
+                if (string.IsNullOrEmpty(texto.Trim())) return null;
+                JObject j = JObject.Parse(texto);
+                string fase = (string)j["fase"];
+                if (string.IsNullOrEmpty(fase)) return null;
+                string detalle = (string)j["detalle"];
+                return string.IsNullOrEmpty(detalle) ? fase : fase + " (" + detalle + ")";
+            }
+            catch { return null; }
+        }
+
+        /// <summary>PID para el log sin arriesgar una excepción sobre un proceso ya muerto.</summary>
+        private static string PidSeguro(Process p)
+        {
+            try { return "PID " + p.Id; } catch { return "(PID desconocido)"; }
+        }
+
         private static void Borrar(string ruta)
         {
             try { if (ruta != null && File.Exists(ruta)) File.Delete(ruta); } catch { }
         }
 
         /// <summary>Job de documento: snapshot + runner + limpieza del snapshot.</summary>
-        private static JObject RunJobConSnapshot(string op, JObject parameters, bool serializarSesion = false)
+        private static JObject RunJobConSnapshot(string op, JObject parameters, bool serializarSesion = false,
+                                                 TimeSpan? timeout = null)
         {
             string snap = Snapshot(serializarSesion);
             try
             {
-                return RunJob(op, parameters, snap);
+                return RunJob(op, parameters, snap, timeout);
             }
             finally
             {
@@ -344,8 +452,8 @@ namespace ArcmapMcp.AddIn.Handlers
             bool serializarSesion = serializar != null && serializar.Type != JTokenType.Null && (bool)serializar;
 
             JObject r = conDocumento
-                ? RunJobConSnapshot("execute_code", parameters, serializarSesion)
-                : RunJob("execute_code", parameters, null);
+                ? RunJobConSnapshot("execute_code", parameters, serializarSesion, ExecuteTimeout)
+                : RunJob("execute_code", parameters, null, ExecuteTimeout);
 
             if ((bool)r["ok"])
                 r["result"]["aviso"] = conDocumento
