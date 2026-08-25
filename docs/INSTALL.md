@@ -83,9 +83,15 @@ Esto deja el intérprete en:
 
 1. **Cierra ArcMap** (el instalador de add-ins no actualiza una sesión abierta).
 2. Doble clic en `addin\dist\arcmap-mcp.esriaddin` ▸ **Install**.
-3. Abre ArcMap → debe aparecer la barra **arcmap-mcp** (si no está visible:
-   *Customize ▸ Toolbars ▸ arcmap-mcp*), con 4 botones:
-   **Iniciar / Detener / Estado / Acerca de**.
+3. Abre ArcMap y activa la barra **arcmap-mcp** en *Customize ▸ Toolbars ▸ arcmap-mcp*.
+   Trae 4 botones: **Iniciar / Detener / Estado / Acerca de**.
+
+   > **Desde la 2.8.2 la barra no aparece sola tras instalar, y es deliberado.** El
+   > add-in declaraba `showInitially="true"`, que fuerza la barra visible en **cada**
+   > arranque; ArcMap recolocaba entonces el resto de barras en bucle, sesión tras
+   > sesión. Hay que activarla **una vez** y ArcMap ya recuerda la posición. Si vienes
+   > de la 2.8.1 o anterior y tus barras estaban descolocadas, esto es lo que lo
+   > causaba.
 
 **Si el instalador falla en silencio** (no hay barra ni rastro en el Add-In Manager):
 el `.esriaddin` es un ZIP — extráelo a

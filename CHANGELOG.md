@@ -3,6 +3,22 @@
 Formato inspirado en [Keep a Changelog](https://keepachangelog.com/es/); versionado
 [SemVer](https://semver.org/lang/es/).
 
+## [2.8.2] — 2026-08-25
+
+La barra deja de imponerse en cada arranque.
+
+### Corregido
+- **La barra `arcmap-mcp` ya no se muestra sola en cada sesión** (`showInitially="false"`
+  en el `<Toolbar>` de `Config.xml`). Con `showInitially="true"`, ArcMap forzaba la barra
+  visible en **todos** los arranques y recolocaba el resto de barras de herramientas en
+  bucle: el layout se descolocaba solo, sesión tras sesión, sin causa aparente. El
+  diagnóstico costó una sesión entera porque el síntoma (barras que se mueven) no apunta
+  a un add-in, y porque `Normal.mxt` solo se escribe al salir limpio de ArcMap, así que
+  la corrección manual del layout se perdía en cada cierre anómalo.
+
+  **Al actualizar, la barra no aparecerá tras instalar.** Actívala una vez en
+  *Customize ▸ Toolbars ▸ arcmap-mcp* y ArcMap recordará su sitio.
+
 ## [2.8.1] — 2026-07-29
 
 El runner dice en qué fase está, `execute_arcpy` falla con motivo, y la extensión deja
