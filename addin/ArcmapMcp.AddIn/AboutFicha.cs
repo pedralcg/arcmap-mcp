@@ -114,7 +114,7 @@ namespace ArcmapMcp.AddIn
                 string version = typeof(AboutFicha).Assembly.GetName().Version.ToString(3);
                 // Badge de actualización, solo si el chequeo en 2º plano encontró una nueva.
                 string update = Actualizaciones.HayNueva
-                    ? @"<a class=""upd"" href=""" + Actualizaciones.RepoUrl + @""">&#8593; v"
+                    ? @"<a class=""upd"" href=""" + Actualizaciones.ActualizarUrl + @""">&#8593; v"
                       + Actualizaciones.UltimaDisponible + " disponible</a>"
                     : "";
                 string html = Html

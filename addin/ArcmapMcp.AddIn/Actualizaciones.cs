@@ -17,6 +17,16 @@ namespace ArcmapMcp.AddIn
             "https://api.github.com/repos/pedralcg/arcmap-mcp/tags";
         public const string RepoUrl = "https://github.com/pedralcg/arcmap-mcp";
 
+        /// <summary>
+        /// Instrucciones de actualización. El aviso de versión nueva lleva aquí y no a la
+        /// portada del repo: desde la portada el usuario tenía que adivinar que el paquete
+        /// vive en addin/dist/. Instalar por él no es posible (ArcMap mantiene la DLL
+        /// cargada mientras está abierto), así que lo mejor que se puede hacer es dejarle
+        /// a un clic lo que tiene que ejecutar.
+        /// </summary>
+        public const string ActualizarUrl =
+            "https://github.com/pedralcg/arcmap-mcp/blob/main/docs/INSTALL.md#actualizar";
+
         /// <summary>Última versión conocida (de red o de caché), sin la "v". Para el indicador.</summary>
         public static string UltimaDisponible { get; private set; }
 

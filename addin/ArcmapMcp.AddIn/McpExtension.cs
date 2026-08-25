@@ -98,13 +98,18 @@ namespace ArcmapMcp.AddIn
                             DialogResult r = MessageBox.Show(
                                 "Hay una versión nueva de arcmap-mcp disponible: v" + versionNueva + ".\n"
                                 + "Tienes instalada la v" + Diagnostico.VersionAddin() + ".\n\n"
-                                + "¿Abrir el repositorio para descargarla?",
+                                + "Para actualizar, con ArcMap cerrado, doble clic en\n"
+                                + "ACTUALIZAR.bat dentro de la carpeta del repositorio\n"
+                                + "(equivale a: git pull  +  install.ps1).\n\n"
+                                + "No se puede instalar sin cerrar ArcMap: mientras está\n"
+                                + "abierto mantiene cargado el add-in.\n\n"
+                                + "¿Abrir las instrucciones de actualización?",
                                 "arcmap-mcp · Actualización disponible",
                                 MessageBoxButtons.YesNo, MessageBoxIcon.Information);
                             if (r == DialogResult.Yes)
                                 Process.Start(new ProcessStartInfo
                                 {
-                                    FileName = Actualizaciones.RepoUrl,
+                                    FileName = Actualizaciones.ActualizarUrl,
                                     UseShellExecute = true
                                 });
                         }

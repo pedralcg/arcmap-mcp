@@ -1,0 +1,90 @@
+====================================================================
+ arcmap-mcp - conduce ArcMap desde un asistente de IA
+ https://github.com/pedralcg/arcmap-mcp
+====================================================================
+
+Este fichero es el resumen para ir al grano. La guia completa esta en
+README.md y en docs\INSTALL.md.
+
+
+--------------------------------------------------------------------
+ INSTALAR
+--------------------------------------------------------------------
+
+  1. Cierra ArcMap por completo.
+
+  2. Doble clic en INSTALAR.bat
+
+  3. Abre ArcMap y activa la barra de herramientas:
+     Customize (Personalizar) > Toolbars (Barras de herramientas) >
+     arcmap-mcp
+
+  4. En esa barra, pon el desplegable en "Autoarranque: Si".
+     A partir de ahora el puente se levanta solo con ArcMap.
+
+  5. Cierra y vuelve a abrir tu asistente de IA (Claude Desktop,
+     Claude Code, etc.) y pidele la herramienta "ping".
+
+Si algo no responde, ejecuta INSTALAR.bat otra vez con la opcion de
+verificar; las instrucciones estan en README.md.
+
+
+--------------------------------------------------------------------
+ ACTUALIZAR
+--------------------------------------------------------------------
+
+CIERRA ARCMAP ANTES. Mientras esta abierto, ArcMap mantiene cargado
+el complemento y no se puede sustituir.
+
+  * Si descargaste el ZIP (lo mas habitual):
+
+      1. Baja el ZIP nuevo desde la pagina del proyecto
+         (boton verde "Code" > "Download ZIP").
+      2. Clic derecho en el ZIP > Propiedades > marca "Desbloquear".
+      3. Extraelo ENCIMA de esta misma carpeta, sobrescribiendo.
+      4. Doble clic en INSTALAR.bat
+
+     Si, INSTALAR.bat: el mismo fichero sirve para instalar y para
+     actualizar, tantas veces como haga falta.
+
+  * Si clonaste el proyecto con git:
+
+      Doble clic en ACTUALIZAR.bat  (baja los cambios y reinstala)
+
+AVISO IMPORTANTE tras actualizar: la barra "arcmap-mcp" NO aparecera
+sola al abrir ArcMap. Es lo correcto, no es un fallo. Activala una vez
+desde Customize > Toolbars > arcmap-mcp y ArcMap recordara donde va.
+
+Para saber en que version estas: boton "Estado" de la barra.
+
+
+--------------------------------------------------------------------
+ PROBLEMAS FRECUENTES
+--------------------------------------------------------------------
+
+"No aparece la barra arcmap-mcp"
+    Customize > Toolbars > arcmap-mcp. Si no esta en la lista, cierra
+    ArcMap y vuelve a ejecutar INSTALAR.bat
+
+"El instalador no hace nada o se cierra al momento"
+    Windows bloquea lo que viene de internet. Clic derecho en el ZIP >
+    Propiedades > Desbloquear, y extrae de nuevo.
+
+"Mi asistente de IA no ve las herramientas"
+    Hay que cerrarlo y abrirlo entero: la lista de servidores solo se
+    lee al arrancar.
+
+"El instalador dice que ArcMap esta abierto"
+    Cierralo del todo (revisa la barra de tareas) y repite.
+
+
+--------------------------------------------------------------------
+ AYUDA
+--------------------------------------------------------------------
+
+Boton "Reportar" de la barra arcmap-mcp: prepara un informe con el
+diagnostico tecnico, te lo ensena antes de enviar nada, y lo manda
+como incidencia en GitHub o por correo.
+
+Pedro Alcoba Gomez - pedro@pedralcg.dev - https://pedralcg.dev
+Licencia: ver el fichero LICENSE

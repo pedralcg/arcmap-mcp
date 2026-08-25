@@ -159,6 +159,31 @@ el puente se levantará solo en esta sesión y en todas las siguientes. Después
 Reinicia por completo tu cliente IA (el registro de servidores MCP se lee al arrancar) y
 pídele la herramienta `ping`. Para desinstalarlo todo: `.\install.ps1 -Desinstalar`.
 
+### 4. Actualizar
+
+El add-in avisa solo cuando hay versión nueva (consulta los tags del repo una vez al día).
+Actualizar depende de cómo lo descargaste, y en los dos casos **hay que cerrar ArcMap**:
+mientras está abierto mantiene cargado el add-in y no se puede reemplazar en caliente.
+
+| Descargaste… | Para actualizar |
+|---|---|
+| **con git** | Doble clic en **`ACTUALIZAR.bat`**. Hace `git pull` y reinstala. |
+| **el ZIP** | Baja el ZIP nuevo, extráelo sobre la misma carpeta y doble clic en **`INSTALAR.bat`**. |
+
+Sin git, **tu actualizador es `INSTALAR.bat`**: no hay un segundo fichero que aprender.
+`install.ps1` es idempotente, así que da igual que sea la primera vez o la quinta: borra el
+add-in anterior antes de copiar el nuevo, refresca el entorno del servidor y vuelve a
+registrar los clientes. `ACTUALIZAR.bat` solo le añade el `git pull` por delante, y si lo
+ejecutas sin git te lo dice y no toca nada.
+
+**Tras actualizar el add-in, la barra `arcmap-mcp` no aparecerá sola.** Es el comportamiento
+correcto desde la 2.8.2: actívala una vez en *Customize ▸ Toolbars ▸ arcmap-mcp* y ArcMap
+recordará su posición. Comprueba con el botón **Estado** que la versión es la que esperabas.
+
+> El servidor MCP (Python) no necesita ceremonia: corre desde esta misma carpeta, así que en
+> cuanto reemplazas los ficheros ya está actualizado. Solo el add-in .NET obliga a cerrar
+> ArcMap. Detalle completo en [`docs/INSTALL.md`](docs/INSTALL.md#actualizar).
+
 ### Versiones de ArcMap
 
 El add-in se compila contra ArcMap **10.5** y ahí está validado en uso real. ArcMap

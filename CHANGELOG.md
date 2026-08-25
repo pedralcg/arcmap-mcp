@@ -3,6 +3,36 @@
 Formato inspirado en [Keep a Changelog](https://keepachangelog.com/es/); versionado
 [SemVer](https://semver.org/lang/es/).
 
+## [2.8.3] - 2026-08-25
+
+Actualizar deja de ser un misterio.
+
+### Anadido
+- **`ACTUALIZAR.bat`** en la raiz, espejo de `INSTALAR.bat`: con ArcMap cerrado, un doble
+  clic baja los cambios (`git pull`) y reinstala las dos piezas. Detecta si la carpeta no
+  es un repositorio git (caso de quien bajo el ZIP) y explica que hacer en vez de fallar
+  con un error de git, y aborta sin reinstalar nada si el `git pull` no sale limpio.
+- **`LEEME.txt` en la raiz**, en texto plano y sin acentos a proposito: quien extrae el ZIP
+  y hace doble clic en `README.md` se encuentra markdown en crudo o el dialogo de "como
+  quieres abrir este archivo"; un `.txt` lo abre el Bloc de notas sin preguntar. Contiene
+  solo las dos recetas, los cuatro problemas frecuentes y a donde escribir. Deliberadamente
+  minimo: sin numeros de version ni detalle por cliente, para que no se desincronice.
+- **Seccion `4. Actualizar` en el `README`**, con la tabla git / ZIP y el aviso de la barra.
+- **Seccion `## Actualizar` en `docs/INSTALL.md`**, que no existia: toda la guia estaba
+  escrita como *una vez*, y la unica pista de como actualizar era un inciso a media
+  pagina. Cubre la receta, por que el servidor Python se actualiza solo con el `git pull`
+  y el add-in .NET no, que hacer sin git, y como forzar la comprobacion de version.
+
+### Cambiado
+- **El aviso de version nueva dice que hacer y lleva a las instrucciones**, en vez de
+  abrir la portada del repositorio y dejar al usuario adivinando que el paquete vive en
+  `addin/dist/`. Ahora nombra `ACTUALIZAR.bat`, avisa de que hay que cerrar ArcMap y
+  explica por que no puede instalarse solo: mientras ArcMap esta abierto mantiene cargada
+  la DLL del add-in. El badge de *Acerca de* apunta al mismo sitio.
+
+  Salio del primer uso real del aviso, el 2026-08-25: funciono, pero dejaba al usuario a
+  medio camino.
+
 ## [2.8.2] — 2026-08-25
 
 La barra deja de imponerse en cada arranque.

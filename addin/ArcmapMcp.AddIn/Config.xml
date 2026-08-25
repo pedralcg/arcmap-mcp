@@ -4,7 +4,7 @@
   <Name>arcmap-mcp</Name>
   <AddInID>{51f4ce63-6bcf-49b2-ae3a-ba2c79ea3e1a}</AddInID>
   <Description>Levanta/para el puente MCP dentro de ArcMap (socket 127.0.0.1:27179). Permite conducir la sesion viva de ArcMap desde un agente IA (Claude, etc.). Autor: Pedro Alcoba Gomez (pedralcg.dev).</Description>
-  <Version>2.8.2</Version>
+  <Version>2.8.3</Version>
   <Author>Pedro Alcoba Gomez — pedralcg.dev · pedro@pedralcg.dev · GitHub @pedralcg</Author>
   <Company>pedralcg.dev</Company>
   <Date>2026-08-25</Date>

@@ -52,6 +52,59 @@ Si algo no encaja en tu equipo, los pasos manuales equivalentes son los de abajo
 
 ---
 
+## Actualizar
+
+Con **ArcMap cerrado**, doble clic en `ACTUALIZAR.bat` (en la raíz del repo). Baja los
+cambios y reinstala las dos piezas. Desde terminal es lo mismo:
+
+```powershell
+cd C:\mcp\arcmap-mcp
+git pull
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+`install.ps1` es **idempotente**: se puede repetir siempre que haga falta. Refresca el venv
+(`pip install -r requirements.txt`), borra la carpeta del add-in anterior antes de copiar la nueva
+(sin restos de versiones viejas), desbloquea los ficheros marcados como «procedentes de internet» y
+vuelve a registrar el bloque `arcmap` en los clientes detectados. Si ArcMap está abierto se niega
+con un aviso, en vez de dejar una instalación a medias.
+
+### Por qué hay dos piezas y solo una da guerra
+
+- **El servidor MCP (Python) se actualiza con el `git pull` y ya está.** Tu cliente IA tiene
+  registrado el `python.exe` del venv apuntando al `.py` **de esta carpeta**, así que corre siempre
+  el código actual. Basta con reiniciar la sesión del cliente. Solo necesitas volver a pasar
+  `install.ps1` si cambió `requirements.txt`.
+- **El add-in .NET sí exige cerrar ArcMap.** Vive copiado en
+  `%USERPROFILE%\Documents\ArcGIS\AddIns\Desktop<versión>\{51f4ce63-…}\`, y ArcMap mantiene su
+  DLL cargada mientras está abierto: no hay forma de sustituirlo en caliente. Por eso el aviso de
+  versión nueva no puede instalar nada por su cuenta.
+
+### Tras actualizar el add-in
+
+**La barra `arcmap-mcp` no aparecerá sola**, y es deliberado desde la 2.8.2 (ver el CHANGELOG).
+Actívala una vez en *Customize ▸ Toolbars ▸ arcmap-mcp* y ArcMap recordará su posición. Comprueba
+con el botón **Estado** que la versión es la que esperas.
+
+### Si descargaste el ZIP en vez de clonar
+
+No hay `git pull`: baja el ZIP nuevo, **desbloquéalo antes de extraerlo** (clic derecho ▸
+*Propiedades* ▸ *Desbloquear*), extráelo sobre la misma carpeta y ejecuta `INSTALAR.bat`. Clonar con
+git ahorra este paso en cada actualización.
+
+### Comprobar en qué versión estás
+
+```powershell
+.\install.ps1 -SoloVerificar     # versión del add-in instalado, estado del venv y ping al puente
+```
+
+El add-in avisa por su cuenta: consulta los tags del repo **una vez al día** y, si hay versión
+mayor, lo dice una sola vez por versión (más el indicador en *Estado* y el badge en *Acerca de*). La
+comprobación se cachea en `HKCU\Software\pedralcg\arcmap-mcp`; si necesitas forzarla, borra el
+valor `UltimaComprobacion` y reinicia ArcMap.
+
+---
+
 ## Paso 1 — Entorno Python 3 del servidor (una vez)
 
 Necesitas **Python 3.10 o superior** (64 bits) con el paquete `mcp`. No hace falta que
