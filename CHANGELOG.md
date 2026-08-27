@@ -3,6 +3,70 @@
 Formato inspirado en [Keep a Changelog](https://keepachangelog.com/es/); versionado
 [SemVer](https://semver.org/lang/es/).
 
+## [2.9.0] - 2026-08-27 (SIN PUBLICAR)
+
+Simbologia de raster, auditoria de carpetas y errores que enseñan. **Nada de esto se
+etiqueta en GitHub hasta cerrar el resto de la cola**, por decision explicita.
+
+### Anadido
+- **`set_raster_symbology`**: simbologia de raster, clasificada (2-32 clases) o estirada,
+  con rampa de color. Era el hueco mas pegado a los flujos reales, donde casi todo el
+  producto es raster (NDVI, FCC, P95, pendientes) y NO habia ninguna via: la graduada
+  exige capas de entidades y `execute_arcpy` opera sobre una copia, asi que descarta los
+  cambios de renderer. Calcula solo las estadisticas de banda si faltan, que es la causa
+  numero uno del `E_FAIL` mudo de COM al clasificar.
+- **`set_unique_values_symbology`**: simbologia categorica por valores unicos. La paleta
+  por defecto reparte tonos por el circulo cromatico (en categorico hace falta DISTINGUIR,
+  no ordenar) y es reproducible, para que reexportar una serie de planos no cambie los
+  colores. Tope de 100 categorias, NULL omitidos.
+- **`describe_mxd`**: version declarada de un `.mxd` **sin abrirlo**, leyendo el stream
+  `Version` del compound document. Milisegundos, sin arcpy, sin puente y sin licencia, o
+  sea que funciona sobre documentos que ArcMap se niega a abrir. Su veredicto sirve tanto
+  para acusar ("se declara mas nuevo que tu ArcMap") como para DESCARTAR ("misma version,
+  la causa es otra").
+- **`audit_folder`**: inventario de todos los `.mxd` de una carpeta con version, capas,
+  fuentes rotas y definition queries. No necesita ArcMap ni el puente. Abre cada documento
+  en un **proceso aparte con timeout**, asi que uno colgado no arrastra a los demas ni al
+  sistema. Anuncia siempre lo que trunca.
+- **Marcadores espaciales**: `get_bookmarks`, `add_bookmark`, `remove_bookmark`,
+  `goto_bookmark`. Un nombre repetido reemplaza en vez de duplicar.
+- **Suite de tests automaticos** (`tests/test_client_protocol.py`) que corre **sin ArcMap**,
+  con un puente falso en un socket local. Cubre defectos que ya ocurrieron: respuesta
+  troceada a mitad de caracter multibyte, payload de 400 KB, cierre sin datos, respuesta
+  no-JSON, y el invariante de que ninguna tool hable al socket por su cuenta.
+- **Guia rapida "tu primer plano en 5 pasos"** en el README.
+
+### Cambiado
+- **`ping` deja de pasar por el candado del puente.** Si ArcMap esta ocupado responde igual,
+  sin tocar el hilo STA, con `estado`, `comando_en_curso` y `ocupado_desde_s`. Un chequeo de
+  salud que solo contesta cuando todo va bien no sirve para nada. El resto de comandos
+  siguen dando `busy`, pero ahora dicen QUE comando y cuantos segundos.
+- **Puente caido y puente ocupado se nombran con todas las letras** (campo `estado`:
+  `puente_caido` / `puente_ocupado`) en las tools que pasan por el cliente. Antes los dos
+  estados eran indistinguibles desde fuera y llevaban a relanzar geoprocesos que seguian vivos.
+- **`execute_arcpy` avisa cuando el codigo toca simbologia** (`aviso_simbologia`) y redirige
+  a la herramienta que si muta la sesion viva. El limite estaba documentado y la herramienta
+  no lo mencionaba al devolver un resultado que no habia surtido efecto.
+- **El coste de `execute_arcpy` deja de tener una cifra unica.** Lo que domina no es el
+  tamano del `.mxd` sino si sus capas apuntan a datos alcanzables: con las fuentes vivas son
+  segundos; con una fuente muerta puede no terminar nunca. Los 324,5 s que figuraban como
+  coste normal eran ese segundo caso.
+- **El README explicaba mal la instancia unica**: culpaba al bloqueo de la DLL cuando lo que
+  manda es el puerto, que agarra el primer ArcMap donde se pulse *Iniciar*.
+- `tests/test_bridge.py` pasa a llamarse **`tests/sonda_puente.py`**: nunca fue una suite de
+  tests sino una sonda manual, y `unittest discover` la ejecutaba al importarla, tumbando la
+  suite entera en cualquier maquina sin ArcMap.
+
+### Arreglado
+- **Fuga de sockets en el cliente**: al fallar `connect()`, el socket no se cerraba porque el
+  `finally` colgaba del otro `try`. Con el puente caido se reintenta en bucle, asi que los
+  descriptores se acumulaban. Lo destapo un `ResourceWarning` de la suite nueva, que ahora
+  corre con `-W error::ResourceWarning`.
+- **Techo de seguridad para los handlers de fondo** (45 min). No compite con sus timeouts
+  internos, que suman 40 min en el peor caso legitimo; salta solo si el handler NO VUELVE.
+  Sin el, un handler colgado dejaba el puente inservible: ArcMap vivo, sin ventana y sujetando
+  el puerto, recuperable solo matandolo por PID.
+
 ## [2.8.3] - 2026-08-25
 
 Actualizar deja de ser un misterio.

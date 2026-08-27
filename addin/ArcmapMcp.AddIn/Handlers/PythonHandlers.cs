@@ -273,9 +273,13 @@ namespace ArcmapMcp.AddIn.Handlers
                             + " s) del subprocess arcpy en '" + op + "': " + donde
                             + ". Proceso terminado (sin zombies)."
                             + (fase != null && fase.StartsWith("abriendo documento")
-                                ? " Abrir el documento es LA operación cara (medido: 324 s con documento"
-                                  + " frente a 6 s sin él). Si tu código no usa mxd ni df, pasa"
-                                  + " usar_documento=false; si lo necesita, sube ARCMAP_EXEC_TIMEOUT (segundos)."
+                                ? " Se quedó ABRIENDO EL DOCUMENTO. Abrir en sí NO es caro (medido 0,7 s"
+                                  + " en un .mxd de 36 capas): lo que bloquea de verdad es la CONTENCIÓN"
+                                  + " DE LICENCIA, o sea otro proceso con la licencia de Desktop tomada."
+                                  + " El mismo documento pasó de 180 s bloqueado con ArcMap abierto y de"
+                                  + " 0,7 s con ArcMap cerrado. Comprueba qué más está usando arcpy antes"
+                                  + " de subir el timeout, que solo alarga la espera. Si tu código no usa"
+                                  + " mxd ni df, pasa usar_documento=false."
                                 : op == "execute_code"
                                     ? " Sube ARCMAP_EXEC_TIMEOUT (segundos) si la operación es legítimamente larga."
                                     : " Sube ARCMAP_SUBPROCESS_TIMEOUT (segundos) si la operación es legítimamente larga.")
@@ -455,12 +459,73 @@ namespace ArcmapMcp.AddIn.Handlers
                 ? RunJobConSnapshot("execute_code", parameters, serializarSesion, ExecuteTimeout)
                 : RunJob("execute_code", parameters, null, ExecuteTimeout);
 
+            if (!(bool)r["ok"])
+            {
+                // "no puede abrir documento de mapa" / "Nombre de archivo MXD no valido"
+                // sirven igual para una ruta mala, un fichero corrupto o una version
+                // superior a la de la sesion: Esri no los distingue. Aqui se leen los
+                // .mxd que menciona el codigo y se dice lo que se sabe de cada uno, para
+                // que el diagnostico sea inmediato en vez de media conversacion. Cuesta
+                // milisegundos y solo se hace cuando YA ha fallado.
+                try
+                {
+                    if (MxdVersion.PareceFalloDeApertura((string)r["error"]))
+                    {
+                        string diag = MxdVersion.DiagnosticarCodigo(
+                            (string)parameters["code"], MxdVersion.VersionArcMapSesion());
+                        if (diag != null)
+                            r["diagnostico_mxd"] = diag;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // Un diagnostico que falla no puede tapar el error de verdad.
+                    Log.Error("El diagnostico de .mxd fallo", ex);
+                }
+                return r;
+            }
+
             if ((bool)r["ok"])
+            {
                 r["result"]["aviso"] = conDocumento
                     ? (serializarSesion ? AvisoSnapshot : AvisoSnapshot + AvisoSnapshotDisco)
                     : "Ejecutado SIN copiar el documento (el código no usa mxd ni df): más rápido y sin "
                       + "ocupar ArcMap. Si necesitas la sesión, pasa usar_documento=true.";
+
+                // El código puede "funcionar" y no cambiar nada: los cambios de
+                // renderer sobre la copia se descartan por diseño (ADR-004), y hasta
+                // ahora nadie lo decía. Un agente perdió una sesión entera contra
+                // este límite, que está documentado pero no se menciona al devolver
+                // un resultado que no ha surtido efecto. Se avisa, no se bloquea:
+                // la detección es por texto y puede dar falsos positivos.
+                string aviso = AvisoSimbologia((string)parameters["code"]);
+                if (aviso != null)
+                    r["result"]["aviso_simbologia"] = aviso;
+            }
             return r;
+        }
+
+        /// <summary>
+        /// Si el código toca simbología, devuelve el aviso que REDIRIGE a la
+        /// herramienta que sí muta la sesión viva; null si no la toca.
+        /// </summary>
+        private static string AvisoSimbologia(string code)
+        {
+            if (string.IsNullOrEmpty(code))
+                return null;
+            string c = code.ToLowerInvariant();
+            bool toca = c.Contains("renderer") || c.Contains("symbology")
+                        || c.Contains("symbol") || c.Contains("colorramp");
+            if (!toca)
+                return null;
+
+            return "OJO: tu código menciona simbología (renderer/symbology), y execute_arcpy "
+                 + "opera sobre una COPIA del documento: esos cambios NO llegan a la sesión "
+                 + "viva y se descartan al terminar, aunque la llamada haya ido bien. "
+                 + "Para cambiar la simbología de verdad usa set_graduated_symbology (rangos), "
+                 + "set_unique_values_symbology (categorías), set_raster_symbology (ráster) o "
+                 + "apply_symbology_from_layer (.lyr plantilla). "
+                 + "Si solo estabas LEYENDO la simbología, ignora este aviso.";
         }
 
         public static JObject ListDdp(JObject parameters)

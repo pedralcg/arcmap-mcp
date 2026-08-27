@@ -10,7 +10,12 @@
     <LangVersion>7.3</LangVersion>
     <RootNamespace>ArcmapMcp.AddIn</RootNamespace>
     <AssemblyName>ArcmapMcp.AddIn</AssemblyName>
-    <Version>2.8.3</Version>
+    <!-- OJO: hay DOS versiones y van a la par. Esta es la del ENSAMBLADO, y es la
+         que devuelve `ping`; la de Config.xml es la que ve el Add-In Manager. El
+         2026-08-27 se subió solo Config.xml y `ping` siguió diciendo 2.8.3 con la
+         DLL nueva ya cargada, o sea el "binario desfasado" al revés: la versión
+         mentía sobre código que sí estaba actualizado. Tocar siempre las dos. -->
+    <Version>2.9.0</Version>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <!-- Newtonsoft.Json.dll debe caer en bin\ para empaquetarlo en Install\ -->
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>

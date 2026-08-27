@@ -1,14 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-test_bridge.py  ──  Prueba el puente de ArcMap SIN pasar por ningun cliente MCP.
+sonda_puente.py  ──  Sonda MANUAL del puente de ArcMap, sin cliente MCP por medio.
+
+NO es una suite de tests, aunque se llamara `test_bridge.py` hasta el 2026-08-27:
+es una herramienta de diagnostico que se lanza a mano y que EXIGE ArcMap abierto
+con el puente arrancado. Se renombro porque `unittest discover` la recogia como
+test, la ejecutaba al importarla y tumbaba la suite entera en cualquier maquina
+sin ArcMap.
+
+Los tests automaticos del protocolo, que si corren sin ArcMap, estan en
+`test_client_protocol.py`.
 
 Uso (Python 3, solo stdlib; vale cualquier python del PATH):
-    python test_bridge.py ping
-    python test_bridge.py get_arcmap_info
-    python test_bridge.py list_layers
-    python test_bridge.py zoom_to_layer nombre=NOMBRE_DE_TU_CAPA
-    python test_bridge.py zoom_to_layer "nombre=Capa Con Espacios"
-    python test_bridge.py export_pdf salida=C:/temp/plano.pdf dpi=300
+    python sonda_puente.py ping
+    python sonda_puente.py get_arcmap_info
+    python sonda_puente.py list_layers
+    python sonda_puente.py zoom_to_layer nombre=NOMBRE_DE_TU_CAPA
+    python sonda_puente.py zoom_to_layer "nombre=Capa Con Espacios"
+    python sonda_puente.py export_pdf salida=C:/temp/plano.pdf dpi=300
 
 Los parametros van como pares clave=valor (evita el infierno de comillas de
 PowerShell). Tambien se acepta un unico argumento JSON si empieza por '{'.

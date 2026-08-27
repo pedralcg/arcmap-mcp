@@ -55,7 +55,9 @@ arcmap-mcp/
 │             dist/arcmap-mcp.esriaddin  ← add-in listo para instalar
 │             build.ps1              ← build sin Visual Studio (dotnet CLI)
 ├── docs/     INSTALL.md · TOOLS.md · ROADMAP.md
-├── tests/    test_bridge.py
+├── tests/    test_client_protocol.py  ← tests automáticos (no necesitan ArcMap)
+│             regresion_sesion_viva.py ← barrido de 33 llamadas (ArcMap vivo)
+│             sonda_puente.py          ← sonda manual de un comando suelto
 ├── start-arcmap-mcp.ps1 · requirements.txt · CHANGELOG.md · LICENSE · README.md
 ```
 
@@ -71,9 +73,14 @@ arcmap-mcp/
 
 ## Herramientas MCP
 
-**48 herramientas**, todas probadas por llamada cableada real sobre ArcMap 10.5 (ver
+**57 herramientas**, todas probadas por llamada cableada real sobre ArcMap 10.5 (ver
 `docs/TOOLS.md` para el catálogo completo con firmas, ejemplos y los matices de
 ejecución de cada grupo):
+
+- **Sin ArcMap abierto** (leen del disco, no pasan por el puente): `describe_mxd`
+  (versión declarada de un .mxd sin abrirlo, milisegundos) · **`audit_folder`**
+  (inventario de TODOS los .mxd de una carpeta: versión, capas, fuentes rotas y
+  definition queries, abriendo cada documento en un proceso aparte con timeout).
 
 - **Esenciales:** `ping` · `get_arcmap_info` · `list_layers` · `zoom_to_layer` ·
   `export_pdf` · `refresh` · **`execute_arcpy`** (código arcpy arbitrario sobre un
@@ -84,6 +91,12 @@ ejecución de cada grupo):
 - **Capas y datos:** `select_by_attribute` · `clear_selection` · `get_unique_values` ·
   `count_features` · `list_fields` · `get_layer_info` · `get_layer_features` · `add_layer` ·
   `remove_layer` · `apply_symbology_from_layer` · `set_scale`.
+- **Simbología:** `set_graduated_symbology` (rangos, capas de entidades) ·
+  **`set_unique_values_symbology`** (categorías por valores únicos) ·
+  **`set_raster_symbology`** (ráster clasificado o estirado — NDVI, FCC, P95,
+  pendientes) · `apply_symbology_from_layer` (.lyr plantilla).
+- **Marcadores espaciales:** `get_bookmarks` · `add_bookmark` · `remove_bookmark` ·
+  `goto_bookmark`.
 - **Geoprocesamiento y mantenimiento:** `run_geoprocessing` · `save_mxd` · `save_mxd_as` ·
   `list_broken_data_sources` · `repair_data_source`.
 - **Visualización y catálogo:** **`get_canvas_screenshot`** (imagen INLINE, el agente
@@ -100,6 +113,32 @@ ejecución de cada grupo):
 La filosofía es **híbrida**: `execute_arcpy` es la base universal (cualquier análisis
 de ArcMap 10.x se puede expresar con él) y los wrappers existen solo para lo
 repetitivo y de alto valor.
+
+### Guía rápida: tu primer plano en 5 pasos
+
+Con el add-in instalado y el servidor registrado en tu cliente IA, esto es el camino
+corto de "no he tocado nada" a "tengo un PNG". Pídeselo al agente en lenguaje normal;
+entre paréntesis va la herramienta que acabará usando.
+
+1. **Abre ArcMap y pulsa *Iniciar*** en la barra arcmap-mcp. Es el único paso manual, y
+   sin él no hay puente.
+2. **«¿Está vivo el puente?»** (`ping`). Debe devolver la versión del add-in, el
+   documento abierto y el número de capas. Si dice `PUENTE CAIDO`, vuelve al paso 1;
+   si dice `ocupado`, ArcMap está trabajando y te dice en qué y desde cuándo.
+3. **«Añade esta capa y dime qué hay dentro»** (`add_layer`, `list_layers`,
+   `list_fields`). A partir de aquí el agente ya conoce tus datos y sus campos.
+4. **«Simbolízala y encuádrala»** (`set_graduated_symbology` para rangos,
+   `set_unique_values_symbology` para categorías, `set_raster_symbology` si es ráster;
+   luego `zoom_to_layer`).
+5. **«Expórtame la vista»** (`export_view_png`, o `export_pdf` para el layout). Si
+   quieres ver el resultado sin salir del chat, `get_canvas_screenshot` devuelve la
+   imagen en línea.
+
+Dos atajos que ahorran disgustos desde el primer día. Si vas a trabajar sobre .mxd que
+no conoces, pasa antes `describe_mxd` o `audit_folder`: leen los ficheros **sin
+abrirlos**, así que te dicen versión, capas y fuentes rotas de una carpeta entera sin
+riesgo de quedarte esperando a un documento con las fuentes caídas. Y cuando encuentres
+un encuadre que vas a repetir, guárdalo con `add_bookmark` y vuelve con `goto_bookmark`.
 
 ## Instalación
 
@@ -280,9 +319,13 @@ o Tailscale — y el servidor MCP se conecta como si fuera local
   *Customize ▸ Extensions*). Si falta la licencia, la herramienta devuelve un error claro.
 - **Un comando por conexión, en serie.** El puente atiende una orden a la vez; si
   llega otra mientras trabaja responde `busy` de inmediato (sin encolar).
-- **Una sola instancia de ArcMap.** Con dos ArcMap abiertos, el segundo en arrancar
-  puede quedarse **sin el add-in en silencio** (el primero bloquea la DLL). Usa una
-  única instancia.
+- **El puente vive en UNA instancia de ArcMap, y solo ve esa.** El puerto (`27179`) es
+  único, así que lo agarra el primer ArcMap donde pulses *Iniciar*; el add-in se carga
+  en todas las ventanas, pero solo una tiene el puente. Consecuencia práctica que
+  despista: con diez ArcMap abiertos, `get_arcmap_info` devuelve **un** documento, y no
+  es un fallo ni una limitación de ArcMap, es que las otras nueve son invisibles para
+  el servidor. Si esperabas otro documento, el puente está en otra ventana. Trabaja con
+  una única instancia siempre que puedas.
 - **El workspace es por sesión.** `set_workspace` fija el workspace del add-in (no
   hay `arcpy.env` persistente); se restablece al reiniciar ArcMap.
 

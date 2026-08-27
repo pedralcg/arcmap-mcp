@@ -32,6 +32,23 @@ namespace ArcmapMcp.AddIn
         // cuando el dibujado (p. ej. servicios WMS lentos) retiene el hilo STA.
         private readonly SemaphoreSlim _gate = new SemaphoreSlim(1, 1);
 
+        // Quién tiene el gate y desde cuándo. Sirve para que `ping` pueda decir
+        // "ocupado desde hace N s con el comando X" en vez de un "busy" pelado.
+        // Es la diferencia entre diagnosticar en segundos y en media hora: el
+        // 2026-08-27 un handler se quedó sin volver y desde fuera era imposible
+        // distinguirlo de trabajo legítimo en curso.
+        private volatile string _comandoEnCurso;
+        private long _inicioComandoTicks;
+
+        /// <summary>Segundos que lleva ocupado, o -1 si está libre.</summary>
+        private double SegundosOcupado()
+        {
+            long ticks = Interlocked.Read(ref _inicioComandoTicks);
+            if (ticks == 0)
+                return -1;
+            return (DateTime.UtcNow - new DateTime(ticks, DateTimeKind.Utc)).TotalSeconds;
+        }
+
         public bool IsRunning
         {
             get { return _running; }
@@ -90,16 +107,45 @@ namespace ArcmapMcp.AddIn
                     }
                     else if (!_gate.Wait(0))
                     {
-                        response = Protocol.Error("busy: ArcMap está atendiendo otra petición; reintenta en unos segundos");
+                        // OCUPADO. `ping` NO se queda aquí: un chequeo de salud que
+                        // solo contesta cuando todo va bien no sirve para nada, y es
+                        // justo cuando hay algo atascado cuando hace falta saber QUÉ.
+                        // Se responde sin tocar el STA (que puede ser lo atascado),
+                        // así que esta rama contesta siempre y al instante.
+                        double seg = SegundosOcupado();
+                        string cual = _comandoEnCurso ?? "desconocido";
+                        if ("ping".Equals((string)request["type"]))
+                        {
+                            response = Protocol.Result(new JObject
+                            {
+                                { "estado", "ocupado" },
+                                { "comando_en_curso", cual },
+                                { "ocupado_desde_s", Math.Round(seg, 1) },
+                                { "nota", "El puente está VIVO; ArcMap está atendiendo '" + cual
+                                          + "' desde hace " + seg.ToString("0") + " s. Si es un geoproceso"
+                                          + " pesado sigue corriendo: espera, no relances. Si lleva mucho"
+                                          + " más de lo razonable, mira el log del add-in." },
+                            });
+                        }
+                        else
+                        {
+                            response = Protocol.Error("busy: ArcMap lleva " + seg.ToString("0")
+                                + " s atendiendo '" + cual + "'; reintenta en unos segundos"
+                                + " (llama a ping para ver el estado sin esperar)");
+                        }
                     }
                     else
                     {
+                        _comandoEnCurso = (string)request["type"] ?? "?";
+                        Interlocked.Exchange(ref _inicioComandoTicks, DateTime.UtcNow.Ticks);
                         try
                         {
                             response = Dispatch(request);
                         }
                         finally
                         {
+                            Interlocked.Exchange(ref _inicioComandoTicks, 0);
+                            _comandoEnCurso = null;
                             _gate.Release();
                         }
                     }
@@ -197,6 +243,12 @@ namespace ArcmapMcp.AddIn
                 { "remove_layer",               Handlers.LayerHandlers.RemoveLayer },
                 { "apply_symbology_from_layer", Handlers.LayerHandlers.ApplySymbologyFromLayer },
                 { "set_graduated_symbology",    Handlers.LayerHandlers.SetGraduatedSymbology },
+                { "set_raster_symbology",       Handlers.RasterSymbologyHandlers.SetRasterSymbology },
+                { "set_unique_values_symbology", Handlers.UniqueValuesHandlers.SetUniqueValuesSymbology },
+                { "get_bookmarks",              Handlers.BookmarkHandlers.GetBookmarks },
+                { "add_bookmark",               Handlers.BookmarkHandlers.AddBookmark },
+                { "remove_bookmark",            Handlers.BookmarkHandlers.RemoveBookmark },
+                { "goto_bookmark",              Handlers.BookmarkHandlers.GotoBookmark },
                 { "describe_data",              Handlers.WorkspaceHandlers.DescribeData },
                 { "list_data_frames",           Handlers.DataFrameHandlers.ListDataFrames },
                 { "set_active_df",              Handlers.DataFrameHandlers.SetActiveDf },
@@ -235,6 +287,13 @@ namespace ArcmapMcp.AddIn
             new System.Collections.Generic.HashSet<string> { "export_pdf", "export_jpg", "export_view_png", "run_geoprocessing" };
         private static readonly TimeSpan LongHandlerTimeout = TimeSpan.FromSeconds(1800);
 
+        // Techo de SEGURIDAD para los handlers de fondo. No compite con sus timeouts
+        // internos: el peor caso legítimo es snapshot (600 s) + subprocess (1800 s) =
+        // 2400 s, así que esto va deliberadamente por encima. Si salta, no es que la
+        // operación fuera larga: es que el handler no volvió, y sin este techo eso
+        // deja el puente muerto sin recuperación (incidente del 2026-08-27).
+        private static readonly TimeSpan FondoTimeout = TimeSpan.FromSeconds(2700);
+
         private static JObject Dispatch(JObject request)
         {
             string type = (string)request["type"];
@@ -245,17 +304,44 @@ namespace ArcmapMcp.AddIn
             Func<JObject, JObject> handler;
             if (type != null && _handlersFondo.TryGetValue(type, out handler))
             {
-                // Out-of-process: se ejecuta aquí mismo (thread de fondo); el handler
-                // gestiona su propio timeout de subprocess y sus pasos STA internos.
-                try
+                // Out-of-process: el handler gestiona su propio timeout de subprocess
+                // y sus pasos STA internos. PERO eso no basta: el 2026-08-27 un
+                // handler de fondo NO VOLVIÓ, el `finally` que suelta el gate nunca
+                // llegó, y el puente quedó inservible hasta matar ArcMap por PID.
+                // De ahí este techo exterior: si el handler se pasa de largo, se
+                // devuelve un error y el gate se libera. El trabajo huérfano puede
+                // seguir vivo por dentro (no se puede abortar un thread ajeno sin
+                // riesgo), pero el puente vuelve a atender, que es lo que importa.
+                Func<JObject, JObject> handlerLocal = handler;
+                JObject parametrosLocal = parameters;
+                JObject resultado = null;
+                Exception fallo = null;
+                var terminado = new ManualResetEventSlim(false);
+
+                ThreadPool.QueueUserWorkItem(delegate
                 {
-                    return handler(parameters);
-                }
-                catch (Exception ex)
+                    try { resultado = handlerLocal(parametrosLocal); }
+                    catch (Exception ex) { fallo = ex; }
+                    finally { try { terminado.Set(); } catch { /* ya liberado */ } }
+                });
+
+                if (!terminado.Wait(FondoTimeout))
                 {
-                    Log.Error("Handler de fondo lanzó excepción", ex);
-                    return Protocol.Error(ex.Message, ex);
+                    Log.Error("Handler de fondo '" + type + "' superó el techo de "
+                              + FondoTimeout.TotalSeconds + " s y NO volvió. El gate se libera "
+                              + "para no dejar el puente inservible; puede quedar trabajo huérfano.");
+                    return Protocol.Error("El comando '" + type + "' superó el techo de seguridad de "
+                        + FondoTimeout.TotalSeconds + " s sin devolver nada. El puente sigue disponible, "
+                        + "pero puede haber trabajo huérfano dentro de ArcMap: revisa el log del add-in "
+                        + "y, si ArcMap se queda raro, reinícialo. Causa habitual: abrir un .mxd cuyas "
+                        + "fuentes de datos no responden (usa describe_mxd antes de abrir a ciegas).");
                 }
+                if (fallo != null)
+                {
+                    Log.Error("Handler de fondo lanzó excepción", fallo);
+                    return Protocol.Error(fallo.Message, fallo);
+                }
+                return resultado;
             }
             if (type == null || !_handlers.TryGetValue(type, out handler))
             {

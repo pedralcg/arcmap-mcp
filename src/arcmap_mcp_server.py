@@ -16,6 +16,7 @@ import os
 import json
 import base64
 import socket
+import struct
 
 from mcp.server.fastmcp import FastMCP, Image
 
@@ -56,11 +57,21 @@ class ArcMapClient:
         try:
             s.connect((self.host, self.port))
         except (ConnectionRefusedError, socket.timeout, OSError):
+            # El `finally: s.close()` de más abajo cuelga del OTRO try, así que en
+            # esta rama el socket se filtraba hasta que lo recogía el GC. Con el
+            # puente caído se reintenta en bucle, y ahí los descriptores se acumulan.
+            s.close()
+            # PUENTE CAIDO: nadie escucha en el puerto. El estado se nombra con todas
+            # las letras porque desde fuera se confunde con "ocupado" (ver el timeout
+            # de recv más abajo) y son cosas distintas: aquí esperar no sirve de nada.
             return {
                 "ok": False,
+                "estado": "puente_caido",
                 "error": (
-                    "No hay puente en %s:%s. Abre ArcMap y pulsa 'Iniciar' en la "
-                    "barra arcmap-mcp; luego reintenta." % (self.host, self.port)
+                    "PUENTE CAIDO: nadie escucha en %s:%s. O ArcMap no está abierto, o "
+                    "lo está pero nadie ha pulsado 'Iniciar' en la barra arcmap-mcp. "
+                    "Reintentar sin arrancarlo dará exactamente este mismo error."
+                    % (self.host, self.port)
                 ),
             }
         try:
@@ -74,9 +85,18 @@ class ArcMapClient:
                 try:
                     chunk = s.recv(65536)
                 except socket.timeout:
-                    return {"ok": False, "error": (
-                        "Timeout esperando a ArcMap (%ss). Si es un geoproceso pesado, "
-                        "sigue corriendo dentro de ArcMap; sube ARCMAP_GP_TIMEOUT." % eff)}
+                    # PUENTE VIVO PERO SIN RESPONDER: la conexión se abrió, o sea que
+                    # el add-in está cargado; lo que no contesta es ArcMap, que atiende
+                    # el socket en su HILO PRINCIPAL y no puede hacerlo mientras corre
+                    # un geoproceso. Es el opuesto exacto de "puente_caido": aquí el
+                    # trabajo sigue vivo dentro de ArcMap y matarlo es lo que no hay
+                    # que hacer.
+                    return {"ok": False, "estado": "puente_ocupado", "error": (
+                        "PUENTE VIVO PERO SIN RESPONDER en %ss: la conexión se abrió, "
+                        "así que el add-in está cargado y es ArcMap quien está ocupado "
+                        "(atiende en su hilo principal). Si era un geoproceso pesado "
+                        "SIGUE CORRIENDO dentro de ArcMap: no relances, mira la ventana "
+                        "y sube ARCMAP_GP_TIMEOUT si necesitas esperar más." % eff)}
                 if not chunk:
                     break
                 buf += chunk
@@ -95,15 +115,167 @@ _client = ArcMapClient()
 mcp = FastMCP("arcmap-mcp")
 
 
+# --------------------------------------------------------------------------- #
+# Lectura del .mxd SIN arcpy y SIN abrirlo.
+#
+# Un .mxd es un Compound File Binary (el contenedor OLE de Office), y lleva un
+# stream `Version` con la versión que declara el documento. Leerlo cuesta
+# milisegundos y no necesita ArcMap, ni el puente, ni licencia: es lo único que
+# se puede saber de un documento que NO se deja abrir.
+#
+# Para qué sirve: `arcpy.mapping.MapDocument()` falla con un mensaje genérico
+# ("no puede abrir documento de mapa" / "Nombre de archivo MXD no válido") que
+# vale igual para una ruta mala, un fichero corrupto o una versión superior a la
+# de la sesión. Con la versión declarada en la mano, ese fallo deja de ser mudo.
+# --------------------------------------------------------------------------- #
+
+_FIRMA_CFB = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+_MARCA = 0xFFFFFFFA  # de aquí arriba son marcas (ENDOFCHAIN, FREESECT, ...)
+
+
+def _mxd_version_declarada(ruta):
+    """Devuelve (version, error). `version` es p.ej. '10.5'; None si no se pudo."""
+    try:
+        with open(ruta, "rb") as fh:
+            datos = fh.read()
+    except OSError as exc:
+        return None, "no se pudo leer el fichero: %s" % exc
+
+    if datos[:8] != _FIRMA_CFB:
+        return None, "no es un .mxd válido (no es un compound document)"
+
+    try:
+        ssz = 1 << struct.unpack_from("<H", datos, 30)[0]
+        mssz = 1 << struct.unpack_from("<H", datos, 32)[0]
+        dir0 = struct.unpack_from("<I", datos, 48)[0]
+        mfat0 = struct.unpack_from("<I", datos, 60)[0]
+        difat0 = struct.unpack_from("<I", datos, 68)[0]
+        n_difat = struct.unpack_from("<I", datos, 72)[0]
+
+        # La DIFAT trae 109 entradas en la cabecera; un documento de más de ~7 MB
+        # (sectores de 512 B) necesita más y esas cuelgan de una CADENA de
+        # sectores. Saltársela no da error: deja la FAT corta, las cadenas se
+        # truncan y los streams salen VACÍOS, o sea un fichero sano que parece
+        # ilegible. Pasó con 92 de 400 .mxd al validar esto.
+        difat = list(struct.unpack_from("<109I", datos, 76))
+        sec, vueltas = difat0, 0
+        while sec < _MARCA and vueltas <= n_difat + 1:
+            bloque = struct.unpack_from("<%dI" % (ssz // 4), datos, 512 + sec * ssz)
+            difat.extend(bloque[:-1])
+            sec = bloque[-1]
+            vueltas += 1
+
+        fat = []
+        for s in difat:
+            if s < _MARCA:
+                fat.extend(struct.unpack_from("<%dI" % (ssz // 4), datos, 512 + s * ssz))
+
+        def cadena(inicio):
+            out, s, n = [], inicio, 0
+            while s < _MARCA and n < 2000000:
+                out.append(s)
+                s = fat[s] if s < len(fat) else 0xFFFFFFFE
+                n += 1
+            return out
+
+        def leer_sectores(inicio, size):
+            trozos = (datos[512 + s * ssz:512 + (s + 1) * ssz] for s in cadena(inicio))
+            return b"".join(trozos)[:size]
+
+        entradas = []
+        for s in cadena(dir0):
+            off = 512 + s * ssz
+            for i in range(ssz // 128):
+                e = off + i * 128
+                nlen = struct.unpack_from("<H", datos, e + 64)[0]
+                if nlen < 2:
+                    continue
+                entradas.append((
+                    datos[e:e + nlen - 2].decode("utf-16-le", "replace"),
+                    datos[e + 66],
+                    struct.unpack_from("<I", datos, e + 116)[0],
+                    struct.unpack_from("<I", datos, e + 120)[0]))
+        if not entradas:
+            return None, "el .mxd no tiene directorio legible"
+
+        raiz = entradas[0]
+        mini = leer_sectores(raiz[2], raiz[3])
+        mfat = []
+        for s in cadena(mfat0):
+            mfat.extend(struct.unpack_from("<%dI" % (ssz // 4), datos, 512 + s * ssz))
+
+        def leer_mini(inicio, size):
+            out, s, n = [], inicio, 0
+            while s < _MARCA and n < 2000000:
+                out.append(mini[s * mssz:(s + 1) * mssz])
+                s = mfat[s] if s < len(mfat) else 0xFFFFFFFE
+                n += 1
+            return b"".join(out)[:size]
+
+        for nombre, tipo, inicio, size in entradas:
+            if nombre != "Version" or tipo != 2 or size < 6:
+                continue
+            raw = leer_mini(inicio, size) if size < 4096 else leer_sectores(inicio, size)
+            if len(raw) < 4:
+                return None, "el stream Version salió vacío"
+            nbytes = struct.unpack_from("<I", raw, 0)[0]
+            if nbytes <= 0 or nbytes > len(raw) - 4:
+                return None, "el stream Version tiene una longitud incoherente"
+            txt = raw[4:4 + nbytes].decode("utf-16-le", "replace").rstrip("\x00")
+            return (txt.strip() or None), (None if txt.strip() else "versión vacía")
+
+        return None, "el .mxd no tiene stream Version"
+    except (struct.error, IndexError, ValueError) as exc:
+        return None, "estructura del .mxd ilegible: %s" % exc
+
+
+def _a_tupla(version):
+    """'10.5' -> (10, 5). Devuelve None si no tiene forma de versión."""
+    if not version:
+        return None
+    partes = []
+    for trozo in str(version).split("."):
+        trozo = trozo.strip()
+        if not trozo.isdigit():
+            break
+        partes.append(int(trozo))
+    return tuple(partes) or None
+
+
 @mcp.tool()
 def ping() -> dict:
-    """Comprueba que el puente dentro de ArcMap responde (y versión de ArcGIS)."""
+    """
+    Comprueba que el puente dentro de ArcMap responde (y versión de ArcGIS).
+
+    Los tres estados posibles y qué hacer con cada uno:
+      - Responde            → puente vivo, adelante.
+      - `estado` = `puente_caido`     → nadie escucha: ArcMap cerrado o sin pulsar
+        'Iniciar'. Reintentar no arregla nada.
+      - `estado` = `puente_ocupado`   → el add-in está cargado pero ArcMap no
+        contesta, típicamente porque hay un geoproceso corriendo en su hilo
+        principal. El trabajo sigue vivo: esperar, no relanzar.
+
+    Ojo: mientras ArcMap está ocupado, `ping` TAMPOCO puede responder, por la misma
+    razón que el resto (el puente se atiende en el hilo principal). Así que un
+    `puente_ocupado` en `ping` es información útil, no un fallo del ping.
+    """
     return _client.send("ping")
 
 
 @mcp.tool()
 def get_arcmap_info() -> dict:
-    """Info del documento ArcMap abierto: ruta del .mxd, data frames, escala activa."""
+    """
+    Info del documento ArcMap abierto: ruta del .mxd, data frames, escala activa.
+
+    UNA INSTANCIA, NO TODAS. Devuelve el documento de la instancia de ArcMap que
+    tiene el puente, no "el ArcMap abierto" ni todos los abiertos. El puerto (27179)
+    es único, así que lo agarra el primer ArcMap donde se pulse 'Iniciar'; si tienes
+    diez ventanas de ArcMap abiertas, nueve son invisibles para este servidor y aquí
+    verás una sola.
+
+    Si esperabas ver otro documento, no es que falle: es que el puente vive en otra
+    ventana. Ciérrala o arranca el puente donde toca.
+    """
     return _client.send("get_arcmap_info")
 
 
@@ -167,13 +339,32 @@ def execute_arcpy(code: str, usar_documento: bool | None = None,
     no copia nunca (más rápido, pero `mxd` y `df` no existirán), `True` copia
     siempre. Déjalo sin indicar para que se decida solo.
 
-    Abrir el documento es, con diferencia, lo que más cuesta: medido el 2026-07-29
-    sobre un mxd de 5,9 MB, el mismo `RESULT = 2 + 2` tarda 6,4 s sin documento y
-    324,5 s con él (51x). Si tu código no usa `mxd` ni `df`, pasa
-    `usar_documento=False`. Pasado `ARCMAP_EXEC_TIMEOUT` (900 s por defecto) el
-    add-in mata el subproceso y devuelve un error que dice en qué fase se quedó
-    (importando arcpy / abriendo documento / ejecutando codigo), en vez de esperar
-    en silencio.
+    COSTE. Lo medido, y ninguna cifra sirve sin su condición:
+
+      - Suelo fijo, sin documento (`usar_documento=False`): ~6,4 s, de los cuales
+        ~6,2 son `import arcpy`. Cada llamada arranca un intérprete desde cero.
+      - Abrir el documento en sí: **menos de un segundo** (0,7 s medidos sobre un
+        .mxd de 36 capas el 2026-08-27). Abrir NO es caro.
+
+    Lo caro es otra cosa, y es lo que llevaba mal documentado desde el principio:
+    **el arcpy standalone se BLOQUEA al abrir un documento mientras otra cosa tiene
+    tomada la licencia de Desktop.** El mismo .mxd que abre en 0,7 s con ArcMap
+    cerrado seguía bloqueado a los 180 s con ArcMap abierto. El `import arcpy`
+    funciona igual en los dos casos, así que el bloqueo no se ve venir. Ahí es donde
+    salen los 324,5 s que este docstring dio durante un tiempo como coste normal de
+    abrir, y los timeouts de 900 s.
+
+    Dentro del puente esto normalmente no muerde, porque el runner corre bajo la
+    propia sesión de ArcMap. Si ves esperas largas abriendo documentos, sospecha de
+    **contención de licencia** antes que del tamaño del fichero o de las fuentes de
+    datos. Para inspeccionar sin abrir nada, `describe_mxd` (milisegundos, sin arcpy
+    y sin licencia).
+
+    Si tu código no usa `mxd` ni `df`, pasa `usar_documento=False`: te ahorras el
+    riesgo entero, no solo unos segundos. Pasado `ARCMAP_EXEC_TIMEOUT` (900 s por
+    defecto) el add-in mata el subproceso y devuelve un error que dice en qué fase
+    se quedó (importando arcpy / abriendo documento / ejecutando codigo), en vez de
+    esperar en silencio.
 
     Ejemplos:
         RESULT = [l.name for l in MAP.ListLayers(mxd)]        # copia el documento
@@ -433,6 +624,95 @@ def set_graduated_symbology(capa: str, campo: str, num_clases: int = 5,
     if tamano is not None:
         params["tamano"] = tamano
     return _client.send("set_graduated_symbology", params)
+
+
+@mcp.tool()
+def set_raster_symbology(capa: str, modo: str = "clasificado", num_clases: int = 5,
+                         color_desde: list = None, color_hasta: list = None) -> dict:
+    """
+    Simboliza una capa RÁSTER de la TOC: clasificada o estirada.
+
+    Es la herramienta para NDVI, FCC, P95, pendientes y demás producto ráster.
+    `set_graduated_symbology` NO vale aquí: solo acepta capas de entidades.
+    Tampoco vale `execute_arcpy`, que opera sobre una copia y descarta los
+    cambios de renderer.
+
+    `modo`:
+      - `clasificado` (por defecto): `num_clases` clases (2-32) con rampa de color.
+      - `estirado`: rampa continua entre el mínimo y el máximo de la banda 0.
+
+    `color_desde` / `color_hasta` son `[R, G, B]` de 0 a 255. Por defecto va de
+    amarillo claro `[255, 255, 178]` a rojo oscuro `[189, 0, 38]`, que es
+    secuencial y funciona para casi todo lo continuo.
+
+    Si el ráster no tiene estadísticas calculadas, la clasificación falla: el
+    error lo dice y hay que calcularlas sobre la capa antes.
+    """
+    params: dict = {"capa": capa, "modo": modo, "num_clases": num_clases}
+    if color_desde is not None:
+        params["color_desde"] = color_desde
+    if color_hasta is not None:
+        params["color_hasta"] = color_hasta
+    return _client.send("set_raster_symbology", params)
+
+
+@mcp.tool()
+def set_unique_values_symbology(capa: str, campo: str, tamano: float = None,
+                                color_desde: list = None, color_hasta: list = None) -> dict:
+    """
+    Simboliza una capa de entidades por VALORES ÚNICOS del campo (categórica).
+
+    Complemento de `set_graduated_symbology`: aquella parte un campo numérico en
+    rangos, esta da un color por cada valor distinto. Hasta ahora la única vía
+    para categorías era preparar un `.lyr` plantilla y aplicarlo con
+    `apply_symbology_from_layer`.
+
+    Por defecto reparte tonos por el círculo cromático, que es lo correcto en
+    categórico: lo que importa es DISTINGUIR, no ordenar. Es reproducible, así
+    que la misma capa con el mismo campo sale siempre igual (importa al
+    reexportar una serie de planos). Si pasas `color_desde` y `color_hasta` se
+    usa esa rampa en su lugar.
+
+    Tope de **100 categorías**: por encima, falla diciendo cuántas hay. Una
+    leyenda de miles de entradas no es una leyenda. Los NULL se omiten.
+    """
+    params: dict = {"capa": capa, "campo": campo}
+    if tamano is not None:
+        params["tamano"] = tamano
+    if color_desde is not None:
+        params["color_desde"] = color_desde
+    if color_hasta is not None:
+        params["color_hasta"] = color_hasta
+    return _client.send("set_unique_values_symbology", params)
+
+
+@mcp.tool()
+def get_bookmarks() -> dict:
+    """Lista los marcadores espaciales del data frame activo, con su extensión."""
+    return _client.send("get_bookmarks")
+
+
+@mcp.tool()
+def add_bookmark(nombre: str) -> dict:
+    """
+    Guarda la extensión ACTUAL de la vista como marcador espacial.
+
+    Si ya existe uno con ese nombre lo reemplaza, en vez de dejar dos entradas
+    indistinguibles en el menú de marcadores.
+    """
+    return _client.send("add_bookmark", {"nombre": nombre})
+
+
+@mcp.tool()
+def remove_bookmark(nombre: str) -> dict:
+    """Borra un marcador espacial por nombre."""
+    return _client.send("remove_bookmark", {"nombre": nombre})
+
+
+@mcp.tool()
+def goto_bookmark(nombre: str) -> dict:
+    """Encuadra la vista en un marcador espacial guardado."""
+    return _client.send("goto_bookmark", {"nombre": nombre})
 
 
 @mcp.tool()
@@ -745,6 +1025,270 @@ def calculate_geometry(entrada: str, propiedades, unidad_longitud: str = "",
         "entrada": entrada, "propiedades": propiedades,
         "unidad_longitud": unidad_longitud, "unidad_area": unidad_area, "crs": crs,
     })
+
+
+def _version_arcmap_local():
+    """Versión de ArcMap instalada EN ESTA MÁQUINA, por el nombre de la carpeta.
+
+    Se mira el disco y no el puente porque `ping` no devuelve la versión de
+    ArcGIS (su docstring lo prometía y la respuesta real no la trae). Ojo: si el
+    servidor corre en una máquina distinta de ArcMap (acceso remoto), esto NO es
+    la versión de la sesión; por eso quien lo use lo dice explícitamente.
+    """
+    for base in (r"C:\Program Files (x86)\ArcGIS", r"C:\Program Files\ArcGIS"):
+        try:
+            nombres = os.listdir(base)
+        except OSError:
+            continue
+        for nombre in sorted(nombres, reverse=True):
+            if nombre.lower().startswith("desktop"):
+                return nombre[len("Desktop"):] or None
+    return None
+
+
+@mcp.tool()
+def describe_mxd(ruta: str) -> dict:
+    """
+    Inspecciona un .mxd SIN abrirlo: versión declarada, tamaño y si es válido.
+
+    Cuesta milisegundos y NO necesita ArcMap, ni el puente, ni licencia, porque
+    lee la estructura del fichero en vez de pedírselo a arcpy. Funciona sobre
+    documentos que ArcMap se niega a abrir, que es justo cuando hace falta.
+
+    PARA QUÉ. `arcpy.mapping.MapDocument()` falla con un mensaje genérico ("no
+    puede abrir documento de mapa", "Nombre de archivo MXD no válido") que sirve
+    igual para una ruta mala, un fichero corrupto o un documento guardado con una
+    versión superior a la de la sesión. Esta herramienta separa esos casos: si la
+    versión declarada es mayor que la de ArcMap, ahí está la causa; si coincide,
+    la versión queda DESCARTADA y hay que mirar otra cosa (fuentes de datos
+    inaccesibles, permisos, ruta). Descartar vale tanto como acusar.
+
+    Devuelve `version_declarada`, `version_arcmap_local`, `veredicto` y `motivo`.
+
+    LÍMITE, dicho claro: `version_declarada` es lo que el documento dice de sí
+    mismo en su stream `Version`, no necesariamente la versión de la aplicación
+    que lo grabó. Se ha visto un lote entero de planos declarando `10.5` cuando
+    se creían de 10.8, así que un `compatible` NO garantiza que abra: garantiza
+    que el documento no se declara más nuevo que tu ArcMap.
+    """
+    ruta_abs = os.path.abspath(os.path.expandvars(ruta))
+    if not os.path.isfile(ruta_abs):
+        return {"ok": False, "ruta": ruta_abs,
+                "error": "no existe o no es un fichero: %s" % ruta_abs}
+
+    version, error = _mxd_version_declarada(ruta_abs)
+    local = _version_arcmap_local()
+    v_doc, v_app = _a_tupla(version), _a_tupla(local)
+
+    if version is None:
+        veredicto, motivo = "ilegible", error
+    elif v_doc and v_app and v_doc > v_app:
+        veredicto = "mas_nuevo_que_arcmap"
+        motivo = ("el documento se declara %s y ArcMap instalado aquí es %s: "
+                  "ArcMap no abre documentos de versión superior. ESTA es la causa "
+                  "del fallo genérico al abrirlo." % (version, local))
+    elif v_doc and v_app:
+        veredicto = "compatible"
+        motivo = ("el documento se declara %s y ArcMap instalado aquí es %s, así que "
+                  "la versión NO explica un fallo al abrirlo. Mira las fuentes de "
+                  "datos (rutas de red que no responden hacen que abrir el documento "
+                  "tarde muchísimo o se cuelgue), los permisos y la ruta."
+                  % (version, local))
+    else:
+        veredicto = "indeterminado"
+        motivo = ("versión del documento: %s; ArcMap local: %s. Falta una de las dos "
+                  "para poder comparar." % (version, local))
+
+    return {
+        "ok": True,
+        "ruta": ruta_abs,
+        "tamano_bytes": os.path.getsize(ruta_abs),
+        "version_declarada": version,
+        "version_arcmap_local": local,
+        "veredicto": veredicto,
+        "motivo": motivo,
+        "aviso_version_local": ("'version_arcmap_local' se deduce de la instalación de "
+                                "ESTA máquina, no de la sesión conectada al puente."),
+    }
+
+
+def _arcmap_esta_abierto():
+    """True si hay un ArcMap.exe corriendo. None si no se pudo averiguar.
+
+    Importa mucho para `audit_folder`: el arcpy standalone **se bloquea al abrir un
+    documento mientras ArcMap tiene la licencia tomada**. Medido el 2026-08-27 sobre
+    el mismo .mxd: con ArcMap cerrado abre en 0,7 s; con ArcMap abierto sigue
+    bloqueado a los 180 s. El `import arcpy` funciona igual en los dos casos (~6 s),
+    así que el bloqueo NO se ve venir: aparece en `MapDocument()`.
+    """
+    try:
+        import subprocess
+        salida = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq ArcMap.exe", "/NH"],
+            capture_output=True, timeout=20)
+        return b"ArcMap.exe" in salida.stdout
+    except Exception:
+        return None
+
+
+def _python27_arcgis():
+    """Ruta del Python 2.7 de ArcGIS, o None. Se puede forzar con ARCMAP_PYTHON27."""
+    forzado = os.environ.get("ARCMAP_PYTHON27")
+    if forzado and os.path.isfile(forzado):
+        return forzado
+    for base in (r"C:\Python27", r"C:\Python27_x64"):
+        try:
+            nombres = os.listdir(base)
+        except OSError:
+            continue
+        for nombre in sorted(nombres, reverse=True):
+            cand = os.path.join(base, nombre, "python.exe")
+            if os.path.isfile(cand):
+                return cand
+    return None
+
+
+@mcp.tool()
+def audit_folder(ruta: str, con_capas: bool = True, timeout_por_documento: int = 90,
+                 max_documentos: int = 200, recursivo: bool = False,
+                 forzar_con_arcmap_abierto: bool = False) -> dict:
+    """
+    Audita TODOS los .mxd de una carpeta: versión, capas, fuentes y definition queries.
+
+    El caso de uso real no es inspeccionar un documento sino **auditar una serie
+    de planos**, y hasta ahora eso obligaba a un script externo porque todas las
+    herramientas operaban sobre el documento abierto. Esta NO necesita ArcMap
+    abierto ni el puente: se apoya en el arcpy standalone.
+
+    DOS PASADAS, y la separación importa:
+
+    1. **Siempre**, y cuesta milisegundos por documento: lee del propio fichero la
+       versión declarada y comprueba que es un .mxd válido, sin abrir nada
+       (lo mismo que `describe_mxd`).
+    2. **Solo si `con_capas`**: abre cada documento con arcpy **en un proceso
+       aparte y con `timeout_por_documento`**. El aislamiento no es adorno: si un
+       documento se atasca, muere su proceso y la auditoría continúa marcándolo
+       como `timeout`.
+
+    ⚠️ **CIERRA ARCMAP ANTES DE USAR `con_capas`.** El arcpy standalone se
+    **bloquea al abrir un documento mientras ArcMap tiene la licencia tomada**.
+    Medido el 2026-08-27 sobre el mismo .mxd: con ArcMap cerrado abre en **0,7 s**;
+    con ArcMap abierto sigue bloqueado a los **180 s**. Y no se ve venir, porque
+    `import arcpy` funciona igual en ambos casos: el bloqueo aparece en
+    `MapDocument()`. Por eso esta herramienta comprueba si ArcMap está corriendo y
+    se niega a hacer la pasada 2, salvo que pases
+    `forzar_con_arcmap_abierto=True`.
+
+    Presupuesta el tiempo: con ArcMap cerrado, abrir cuesta menos de un segundo por
+    documento más ~6 s de `import arcpy` por proceso. Empieza con `con_capas=False`
+    para tener el mapa de versiones al instante.
+
+    `max_documentos` corta la lista (por defecto 200) y **lo dice** en la
+    respuesta: nunca trunca en silencio.
+    """
+    import subprocess  # local: solo esta herramienta lo necesita
+
+    carpeta = os.path.abspath(os.path.expandvars(ruta))
+    if not os.path.isdir(carpeta):
+        return {"ok": False, "error": "no existe o no es una carpeta: %s" % carpeta}
+
+    encontrados = []
+    if recursivo:
+        for raiz, _dirs, ficheros in os.walk(carpeta):
+            for f in ficheros:
+                if f.lower().endswith(".mxd"):
+                    encontrados.append(os.path.join(raiz, f))
+    else:
+        for f in sorted(os.listdir(carpeta)):
+            if f.lower().endswith(".mxd"):
+                encontrados.append(os.path.join(carpeta, f))
+    encontrados.sort()
+
+    total = len(encontrados)
+    recortada = total > max_documentos
+    documentos = encontrados[:max_documentos]
+
+    aviso_capas = None
+    if con_capas and not forzar_con_arcmap_abierto and _arcmap_esta_abierto():
+        con_capas = False
+        aviso_capas = (
+            "PASADA 2 OMITIDA: ArcMap está abierto. El arcpy standalone se bloquea al "
+            "abrir documentos mientras ArcMap tiene la licencia tomada (medido: 0,7 s "
+            "con ArcMap cerrado frente a >180 s con ArcMap abierto, mismo .mxd). "
+            "Cierra ArcMap y repite, o pasa forzar_con_arcmap_abierto=True si sabes "
+            "lo que haces: cada documento agotará su timeout sin dar nada.")
+
+    py27 = _python27_arcgis() if con_capas else None
+    auditor = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auditor_mxd.py")
+    if con_capas and (py27 is None or not os.path.isfile(auditor)):
+        con_capas = False
+        aviso_capas = ("No se pudo inspeccionar capas: falta el Python 2.7 de ArcGIS "
+                       "(define ARCMAP_PYTHON27) o el auditor. Se devuelve solo la pasada 1.")
+
+    resultados = []
+    resumen = {"con_capas": 0, "timeout": 0, "error_al_abrir": 0, "ilegibles": 0}
+    versiones: dict = {}
+
+    for doc in documentos:
+        version, err_version = _mxd_version_declarada(doc)
+        fila = {
+            "fichero": os.path.basename(doc),
+            "ruta": doc,
+            "tamano_bytes": os.path.getsize(doc),
+            "version_declarada": version,
+        }
+        if version:
+            versiones[version] = versiones.get(version, 0) + 1
+        else:
+            fila["problema_fichero"] = err_version
+            resumen["ilegibles"] += 1
+
+        if con_capas:
+            try:
+                proc = subprocess.run(
+                    [py27, auditor, doc],
+                    capture_output=True, timeout=timeout_por_documento)
+                bruto = proc.stdout.decode("utf-8", "replace").strip()
+                datos = json.loads(bruto) if bruto else {"ok": False, "error": "sin salida"}
+                if datos.get("ok"):
+                    fila["num_capas"] = datos.get("num_capas")
+                    fila["num_rotas"] = datos.get("num_rotas")
+                    fila["num_con_query"] = datos.get("num_con_query")
+                    fila["capas"] = datos.get("capas")
+                    resumen["con_capas"] += 1
+                else:
+                    fila["error_al_abrir"] = datos.get("error") or "desconocido"
+                    resumen["error_al_abrir"] += 1
+            except subprocess.TimeoutExpired:
+                # El proceso hijo muere con él; ArcMap y este servidor siguen enteros.
+                fila["error_al_abrir"] = ("TIMEOUT tras %s s. Causa habitual: capas que apuntan "
+                                          "a datos que no responden (unidades de red caídas)."
+                                          % timeout_por_documento)
+                fila["timeout"] = True
+                resumen["timeout"] += 1
+            except (json.JSONDecodeError, OSError) as exc:
+                fila["error_al_abrir"] = "no se pudo auditar: %s" % exc
+                resumen["error_al_abrir"] += 1
+
+        resultados.append(fila)
+
+    salida = {
+        "ok": True,
+        "carpeta": carpeta,
+        "recursivo": recursivo,
+        "mxd_encontrados": total,
+        "mxd_auditados": len(documentos),
+        "versiones": versiones,
+        "resumen": resumen,
+        "documentos": resultados,
+    }
+    if recortada:
+        salida["aviso_truncado"] = ("Se encontraron %d .mxd y se auditaron los %d primeros "
+                                    "(max_documentos). Los %d restantes NO están en esta "
+                                    "respuesta." % (total, len(documentos), total - len(documentos)))
+    if aviso_capas:
+        salida["aviso_capas"] = aviso_capas
+    return salida
 
 
 if __name__ == "__main__":

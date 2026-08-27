@@ -5,7 +5,7 @@
 > lista existen solo para lo **repetitivo y de alto valor** —sobre todo las series de
 > planos (Data Driven Pages)—, no para replicar toda la API.
 
-**48 herramientas**, todas probadas por llamada cableada real sobre ArcMap 10.5.
+**57 herramientas**, todas probadas por llamada cableada real sobre ArcMap 10.5.
 
 ## Cómo se ejecuta cada herramienta (importa para lo que puedes esperar)
 
@@ -17,6 +17,35 @@ corresponde:
 | **Nativo en sesión viva** (ArcObjects, hilo STA) | capas, selección, layout, exports, navegación, `run_geoprocessing`, `calculate_geometry` | Opera sobre el documento **vivo**: los cambios se ven al instante. Ocupa la interfaz mientras dura (exports cancelables con **ESC**). |
 | **Out-of-process sobre snapshot** (arcpy en Python 2.7 aparte) | `execute_arcpy`, `list_ddp`, `export_ddp`, `goto_ddp_page`, `raster_index`, `hydrology`, `contours`, `topographic_profile`, `least_cost_path` | Trabaja sobre una **copia temporal del .mxd** con el estado actual: lee el documento real, pero **sus cambios al documento no afectan a la sesión viva**. Las salidas a disco sí son reales, y los resultados de análisis se añaden al mapa al terminar. **No congela la interfaz.** Coste fijo de unos segundos por llamada (snapshot + arranque de Python). |
 | **Solo lectura de datos** (cursores/Describe) | consultas, listados de workspace | Sin efectos secundarios. |
+| **Sin ArcMap, leyendo del disco** | `describe_mxd`, `audit_folder` | **No pasan por el puente**: funcionan con ArcMap cerrado y sobre documentos que ArcMap se niega a abrir. Es su razón de ser. |
+
+---
+
+## Sin ArcMap abierto (inspección de ficheros)
+
+Estas dos no hablan con el puente: leen del disco. Sirven precisamente cuando el camino
+normal falla, que es cuando más falta hace saber algo.
+
+| Tool | Qué hace |
+|---|---|
+| `describe_mxd` | Versión declarada de un `.mxd` **sin abrirlo**, más un veredicto frente a la versión de ArcMap. Milisegundos, sin arcpy y sin licencia |
+| `audit_folder` | Inventario de TODOS los `.mxd` de una carpeta: versión, capas, fuentes rotas y definition queries |
+
+**`describe_mxd` descarta tanto como acusa.** `arcpy.mapping.MapDocument()` falla con un
+mensaje genérico ("no puede abrir documento de mapa") que vale igual para una ruta mala, un
+fichero corrupto o un documento de versión superior. Si la versión declarada es mayor que la
+de tu ArcMap, ahí está la causa; si coincide, la versión queda **descartada** y hay que mirar
+otra cosa. Ojo con lo que no garantiza: es lo que el documento dice de sí mismo, no
+necesariamente la versión de la aplicación que lo grabó.
+
+**⚠️ `audit_folder` con `con_capas=True` exige ArcMap CERRADO.** El arcpy standalone se
+**bloquea al abrir un documento mientras ArcMap tiene tomada la licencia de Desktop**: el
+mismo `.mxd` abre en 0,7 s con ArcMap cerrado y sigue bloqueado a los 180 s con ArcMap
+abierto. Y no se ve venir, porque `import arcpy` tarda lo mismo en ambos casos. La
+herramienta lo detecta y omite esa pasada explicando por qué; se fuerza con
+`forzar_con_arcmap_abierto=True`, pero entonces cada documento agotará su timeout sin dar
+nada. Abre cada documento en un **proceso aparte con timeout**, así que uno atascado no
+arrastra al resto, y **anuncia siempre lo que trunca**.
 
 ---
 
@@ -88,6 +117,49 @@ respetan definition query y selección, igual que la tabla de atributos).
 | `remove_layer` | Quita capa por nombre |
 | `apply_symbology_from_layer` | Aplica un `.lyr` (estilos canónicos) a una capa |
 | `set_scale` | Fija la escala del df activo |
+
+---
+
+## Simbología
+
+Todas **nativas sobre la sesión viva**. Y la aclaración que ahorra una sesión perdida:
+`execute_arcpy` **NO sirve** para simbolizar, porque opera sobre una copia del documento y
+sus cambios al renderer se descartan (ADR-004). Si tu código toca renderer o symbology, la
+respuesta lo avisa y te manda aquí.
+
+| Tool | Qué hace |
+|---|---|
+| `set_graduated_symbology` | Rangos sobre un campo numérico (capas de ENTIDADES) |
+| `set_unique_values_symbology` | Categorías por valores únicos de un campo (capas de ENTIDADES) |
+| `set_raster_symbology` | RÁSTER, clasificado (2-32 clases) o estirado |
+| `apply_symbology_from_layer` | Aplica un `.lyr` plantilla ya preparado |
+
+Cada una acepta la capa que le toca y **redirige a la correcta si te equivocas**: pedir
+simbología ráster sobre un vectorial responde nombrando las dos alternativas, y al revés.
+
+**Categórica:** la paleta por defecto reparte tonos por el círculo cromático, no una rampa
+secuencial, porque en categórico hace falta **distinguir**, no ordenar. Es reproducible, así
+que la misma capa con el mismo campo sale siempre igual (importa al reexportar una serie).
+Tope de 100 categorías; los NULL se omiten; un valor no listado **no se dibuja** en vez de
+colarse con un color cualquiera.
+
+**Ráster:** si la banda no tiene estadísticas, se calculan solas. Sin ellas la clasificación
+falla con un `E_FAIL` de COM que no explica nada. El número real de clases puede ser menor
+que el pedido si el ráster no tiene variación suficiente, y se devuelve el real.
+
+---
+
+## Marcadores espaciales
+
+| Tool | Qué hace |
+|---|---|
+| `get_bookmarks` | Lista los marcadores del df activo, con su extensión |
+| `add_bookmark` | Guarda la extensión ACTUAL con un nombre |
+| `remove_bookmark` | Borra un marcador por nombre |
+| `goto_bookmark` | Encuadra la vista en un marcador guardado |
+
+`add_bookmark` con un nombre que ya existe **reemplaza**, no duplica: dos entradas iguales en
+el menú de marcadores no se distinguen. La búsqueda por nombre ignora mayúsculas.
 
 ---
 
