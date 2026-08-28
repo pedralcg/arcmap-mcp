@@ -15,8 +15,13 @@ pruebas: nada de exports masivos, nada de guardar el .mxd, nada de tocar datos.
 El objetivo es detectar si algo se rompio al reinstalar el add-in cinco veces.
 """
 import json
+import os
 import socket
 import sys
+
+# Mismas variables que el servidor y el add-in (ver README, "Cambiar el puerto").
+HOST = os.environ.get("ARCMAP_BRIDGE_HOST", "127.0.0.1")
+PORT = int(os.environ.get("ARCMAP_BRIDGE_PORT", "27179"))
 
 SEP = chr(92)
 RASTER = "C:" + SEP + "temp" + SEP + "20260715_verif_qml2lyr" + SEP + "real_NUEVO.tif"
@@ -31,7 +36,7 @@ fallos = []
 def enviar(tipo, params=None, timeout=180):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(timeout)
-    s.connect(("127.0.0.1", 27179))
+    s.connect((HOST, PORT))
     s.sendall(json.dumps({"type": tipo, "params": params or {}}).encode("utf-8"))
     buf = b""
     while True:

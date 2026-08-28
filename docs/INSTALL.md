@@ -290,3 +290,13 @@ Todas son opcionales (hay valores por defecto). Están documentadas en
 `ARCMAP_GP_TIMEOUT`) y ruta del Python 2.7 del runner (`ARCMAP_PYTHON27`). El server
 las lee del entorno o del bloque `env` de la config MCP; el add-in, del entorno del
 usuario (defínelas antes de abrir ArcMap).
+
+`ARCMAP_BRIDGE_PORT` es la única que hay que poner **en los dos extremos**: el add-in y
+el servidor la leen con el mismo nombre, cada uno de su propio entorno, así que
+definirla solo en uno los deja sin encontrarse. Sirve de vía de escape cuando un ArcMap
+que ya no responde deja cogido el `27179`. Se admite `1024`–`65535`; un valor inválido
+se ignora, se avisa en `C:\MCP_Logs\arcmap-mcp.log` y se vuelve al puerto por defecto.
+
+**No existe una variable para el bind**: el add-in escucha solo en `127.0.0.1` por
+decisión de seguridad, y el acceso a un ArcMap remoto se hace por túnel al loopback de
+esa máquina (ver *Acceso remoto* en el README).

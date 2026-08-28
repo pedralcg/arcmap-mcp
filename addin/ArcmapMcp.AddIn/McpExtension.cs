@@ -159,7 +159,15 @@ namespace ArcmapMcp.AddIn
             catch (System.Exception ex)
             {
                 Log.Error("No se pudo arrancar el servidor", ex);
-                return ex.Message + " (¿puerto " + McpServer.Port + " ocupado por otra instancia?)";
+                // El caso habitual no es "otra instancia legítima": es un ArcMap zombi,
+                // vivo y sin ventana principal, sujetando el puerto sin nada que cerrar.
+                // Por eso se nombran las dos salidas, no solo la de matar el proceso.
+                return ex.Message + "\n\nCasi siempre es que el puerto " + McpServer.Port
+                    + " ya está cogido por otro ArcMap. Dos salidas:\n"
+                    + "  · Usar otro puerto: exporta ARCMAP_BRIDGE_PORT=<otro> y vuelve a abrir"
+                    + " ArcMap (y la MISMA variable donde corra el servidor MCP).\n"
+                    + "  · Si el ArcMap que lo sujeta está zombi (vivo pero sin ventana),"
+                    + " matarlo: Stop-Process -Id <PID> -Force.";
             }
         }
 

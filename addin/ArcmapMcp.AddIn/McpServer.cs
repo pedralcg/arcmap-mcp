@@ -16,9 +16,62 @@ namespace ArcmapMcp.AddIn
     /// </summary>
     internal class McpServer
     {
-        // Solo loopback por diseño (execute_arcpy = ejecución de código): el
-        // acceso remoto se hace por túnel, nunca exponiendo el puerto.
-        public const int Port = 27179;
+        // BIND: solo loopback, y NO configurable a propósito (ADR-006, aceptada
+        // 2026-08-28). `execute_arcpy` es ejecución de código arbitrario sin
+        // autenticación, sin usuarios y sin TLS: quien alcance este puerto ejecuta lo
+        // que quiera con los permisos de quien tenga ArcMap abierto. El loopback no es
+        // un descuido pendiente de arreglar, es la única barrera que hay. El acceso a
+        // un ArcMap remoto se hace por TÚNEL (SSH o Tailscale con reenvío de puerto),
+        // que termina en el 127.0.0.1 del destino y además cifra y autentica: ya
+        // alcanza este listener sin abrir nada.
+        private static readonly IPAddress Bind = IPAddress.Loopback;
+
+        // PUERTO: este sí es configurable, por `ARCMAP_BRIDGE_PORT` — el MISMO nombre
+        // que lee el servidor Python (src/arcmap_mcp_server.py), de modo que una sola
+        // variable mueve los dos extremos. No es una comodidad: cuando una instancia de
+        // ArcMap se queda zombi sujetando el 27179 sin ventana que cerrar, sin puerto
+        // alternativo el sistema entero se queda sin vía de escape hasta matar el
+        // proceso por PID (incidente del 2026-08-27). Cambiar el puerto NO saca nada de
+        // local: se sigue escuchando solo en loopback, en otro número.
+        public const int PuertoPorDefecto = 27179;
+        public static readonly int Port;
+
+        // Qué contar sobre el puerto cuando arranque el puente. Se decide aquí y se
+        // escribe en Start(): un inicializador estático no es sitio para tocar el log.
+        private static readonly string _avisoPuerto;
+
+        static McpServer()
+        {
+            string crudo = null;
+            try { crudo = Environment.GetEnvironmentVariable("ARCMAP_BRIDGE_PORT"); }
+            catch { /* si el entorno no se deja leer, el puerto por defecto sirve */ }
+
+            if (crudo == null || crudo.Trim().Length == 0)
+            {
+                Port = PuertoPorDefecto;
+                return;
+            }
+
+            int puerto;
+            // Se rechazan los privilegiados (<1024): ArcMap corre como usuario normal y
+            // el bind fallaría con un error que no explicaría por qué.
+            if (!int.TryParse(crudo.Trim(), out puerto) || puerto < 1024 || puerto > 65535)
+            {
+                Port = PuertoPorDefecto;
+                _avisoPuerto = "ARCMAP_BRIDGE_PORT='" + crudo + "' no es un puerto válido"
+                    + " (se admite 1024-65535). Se usa el de por defecto, " + PuertoPorDefecto + ".";
+                return;
+            }
+
+            Port = puerto;
+            if (puerto != PuertoPorDefecto)
+            {
+                _avisoPuerto = "Puerto tomado de ARCMAP_BRIDGE_PORT: " + puerto
+                    + " (por defecto sería " + PuertoPorDefecto + "). El servidor MCP NO lo"
+                    + " adivina: exporta la MISMA variable donde corra él, o no se encontrarán.";
+            }
+        }
+
         private const int ReadTimeoutMs = 5000;
         private const int MaxRequestBytes = 1024 * 1024; // los requests son pequeños; 1MB = algo va mal
         private static readonly TimeSpan HandlerTimeout = TimeSpan.FromSeconds(60);
@@ -40,6 +93,17 @@ namespace ArcmapMcp.AddIn
         private volatile string _comandoEnCurso;
         private long _inicioComandoTicks;
 
+        // Conexiones ACEPTADAS y todavía abiertas. Hacen falta porque `_listener.Stop()`
+        // cierra el socket de escucha pero NO las conexiones ya aceptadas, y una conexión
+        // viva mantiene ocupado el 127.0.0.1:27179. El 2026-08-27 eso dejó el puerto
+        // cogido por un ArcMap que ya había descargado su extensión ("Servidor TCP
+        // detenido" en el log a las 11:49:49) mientras un handler seguía bloqueado
+        // sujetando su conexión: las instancias siguientes fallaban al bindear con
+        // "Solo se permite un uso de cada dirección de socket". Cerrarlas en Stop()
+        // desbloquea de paso al cliente, que deja de esperar una respuesta que no llega.
+        private readonly System.Collections.Generic.List<TcpClient> _conexiones =
+            new System.Collections.Generic.List<TcpClient>();
+
         /// <summary>Segundos que lleva ocupado, o -1 si está libre.</summary>
         private double SegundosOcupado()
         {
@@ -56,7 +120,9 @@ namespace ArcmapMcp.AddIn
 
         public void Start()
         {
-            _listener = new TcpListener(IPAddress.Loopback, Port);
+            if (_avisoPuerto != null)
+                Log.Info(_avisoPuerto);
+            _listener = new TcpListener(Bind, Port);
             _listener.Start();
             _running = true;
             _acceptThread = new Thread(AcceptLoop)
@@ -65,13 +131,45 @@ namespace ArcmapMcp.AddIn
                 Name = "ArcmapMcp.Accept"
             };
             _acceptThread.Start();
-            Log.Info("Servidor TCP escuchando en 127.0.0.1:" + Port);
+            Log.Info("Servidor TCP escuchando en " + Bind + ":" + Port);
         }
 
         public void Stop()
         {
             _running = false;
             try { _listener.Stop(); } catch { /* ya cerrado */ }
+
+            // Cerrar el listener NO basta: una conexión ya aceptada sigue ocupando el
+            // puerto, y si su handler está bloqueado nadie la va a cerrar. Sin esto, un
+            // ArcMap que ya descargó la extensión deja el 27179 cogido y ninguna instancia
+            // nueva puede levantar el puente (incidente del 2026-08-27).
+            TcpClient[] abiertas;
+            lock (_conexiones)
+            {
+                abiertas = _conexiones.ToArray();
+                _conexiones.Clear();
+            }
+            foreach (TcpClient c in abiertas)
+                try { c.Close(); } catch { /* el handler ya la cerró */ }
+            if (abiertas.Length > 0)
+                Log.Info("Cerradas " + abiertas.Length + " conexión(es) en vuelo para liberar el puerto "
+                         + Port + ". Si alguna tenía un comando a medias, su trabajo puede seguir"
+                         + " corriendo dentro de ArcMap.");
+
+            // Un runner arcpy vivo impide que ArcMap acabe de salir, y ahí es donde nace
+            // el zombi: proceso vivo, sin ventana, con el puerto cogido. Si el puente se
+            // para, nadie va a leer ya el resultado de ese runner, así que se corta.
+            try
+            {
+                int muertos = Handlers.PythonHandlers.MatarRunnersVivos();
+                if (muertos > 0)
+                    Log.Info("Terminados " + muertos + " runner(s) arcpy que seguían vivos.");
+            }
+            catch (Exception ex)
+            {
+                Log.Error("No se pudieron terminar los runners vivos", ex);
+            }
+
             Log.Info("Servidor TCP detenido");
         }
 
@@ -93,6 +191,19 @@ namespace ArcmapMcp.AddIn
         }
 
         private void HandleClient(TcpClient client)
+        {
+            lock (_conexiones) _conexiones.Add(client);
+            try
+            {
+                AtenderCliente(client);
+            }
+            finally
+            {
+                lock (_conexiones) _conexiones.Remove(client);
+            }
+        }
+
+        private void AtenderCliente(TcpClient client)
         {
             using (client)
             {

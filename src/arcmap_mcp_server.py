@@ -20,9 +20,17 @@ import struct
 
 from mcp.server.fastmcp import FastMCP, Image
 
-# Configurable por entorno: en local apunta a 127.0.0.1; para ArcMap en otra
-# máquina (p.ej. vía Tailscale/VPN) exporta ARCMAP_BRIDGE_HOST=<IP-de-tu-equipo>.
+# El add-in escucha SOLO en el loopback de su máquina, y eso no se puede cambiar
+# (decisión de seguridad, ADR-006): apuntar ARCMAP_BRIDGE_HOST a la IP de la otra
+# máquina NO funciona, porque allí no hay nada escuchando en esa interfaz. Para un
+# ArcMap remoto se monta un túnel (SSH `-L`, o Tailscale con reenvío de puerto), que
+# termina en el 127.0.0.1 del destino; entonces este servidor se conecta a su propio
+# extremo local del túnel, y ARCMAP_BRIDGE_HOST solo hace falta si ese extremo no
+# es 127.0.0.1.
 HOST = os.environ.get("ARCMAP_BRIDGE_HOST", "127.0.0.1")
+# Mismo nombre de variable que lee el add-in (McpServer.cs): una sola variable mueve
+# los dos extremos. Es además la vía de escape cuando un ArcMap zombi deja cogido el
+# 27179 y ningún ArcMap nuevo puede levantar el puente.
 PORT = int(os.environ.get("ARCMAP_BRIDGE_PORT", "27179"))
 TIMEOUT = int(os.environ.get("ARCMAP_BRIDGE_TIMEOUT", "60"))  # tools rápidas
 # Timeout amplio para geoprocesos pesados (análisis ambiental, run_geoprocessing, LiDAR/TIN):
@@ -255,9 +263,18 @@ def ping() -> dict:
         contesta, típicamente porque hay un geoproceso corriendo en su hilo
         principal. El trabajo sigue vivo: esperar, no relanzar.
 
-    Ojo: mientras ArcMap está ocupado, `ping` TAMPOCO puede responder, por la misma
-    razón que el resto (el puente se atiende en el hilo principal). Así que un
-    `puente_ocupado` en `ping` es información útil, no un fallo del ping.
+    Desde el add-in 2.9.0, `ping` NO pasa por el candado del puente: cuando hay un
+    comando en curso responde igualmente y al instante, **sin tocar el hilo de
+    ArcMap** (que puede ser justo lo atascado), y trae `estado: ocupado` junto con
+    `comando_en_curso` y `ocupado_desde_s`. Úsalo antes de dar nada por colgado: la
+    diferencia entre "lleva 8 s con un export" y "lleva 1.400 s con execute_code" es
+    la diferencia entre esperar y actuar. Un chequeo de salud que solo contesta
+    cuando todo va bien no sirve para nada.
+
+    El único caso en que `ping` sí puede tardar es con el puente LIBRE y el hilo de
+    ArcMap ocupado por otra cosa (un geoproceso lanzado a mano, un diálogo modal):
+    entonces espera al hilo y puede acabar en timeout. Que no responda nunca es señal
+    de puente caído, no de puente ocupado.
     """
     return _client.send("ping")
 
@@ -343,6 +360,13 @@ def execute_arcpy(code: str, usar_documento: bool | None = None,
 
       - Suelo fijo, sin documento (`usar_documento=False`): ~6,4 s, de los cuales
         ~6,2 son `import arcpy`. Cada llamada arranca un intérprete desde cero.
+        Ese suelo es una DECISIÓN ACEPTADA, no un pendiente de optimizar (ADR-005,
+        2026-08-28): un runner persistente con arcpy ya importado lo bajaría a casi
+        cero, pero reintroduce el estado compartido entre llamadas y convierte el
+        runner huérfano —que hoy es un caso raro, y ya impide cerrar ArcMap— en el
+        modo normal de operación, que es justo lo que costó dos rediseños quitar de
+        en medio. Si algún día duele, la vía acordada NO es un proceso permanente:
+        es reutilizar UN intérprete dentro de una operación por lotes.
       - Abrir el documento en sí: **menos de un segundo** (0,7 s medidos sobre un
         .mxd de 36 capas el 2026-08-27). Abrir NO es caro.
 

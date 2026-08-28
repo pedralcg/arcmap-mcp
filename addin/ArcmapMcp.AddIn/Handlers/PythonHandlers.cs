@@ -34,6 +34,70 @@ namespace ArcmapMcp.AddIn.Handlers
         private static readonly TimeSpan SubprocessTimeout = LeerTimeout("ARCMAP_SUBPROCESS_TIMEOUT", 1800);
         private static readonly TimeSpan StaStepTimeout = TimeSpan.FromSeconds(60);
 
+        // Margen para que los pipes del runner den EOF una vez el proceso ya ha salido.
+        // Generoso para el caso normal (milisegundos) y acotado para el patológico: un
+        // nieto que heredó la salida y no muere. Ver el uso, más abajo.
+        private static readonly TimeSpan FlushSalidaTimeout = TimeSpan.FromSeconds(10);
+
+        // PIDs de los runners arrancados y aún no terminados. Se guardan PIDs y no
+        // objetos Process porque el Process se libera al salir de su `using`, y esto
+        // tiene que sobrevivir a eso. Sirven para un caso concreto: al cerrarse ArcMap,
+        // un runner vivo IMPIDE que el proceso acabe de salir, y ArcMap se queda sin
+        // ventana pero vivo, sujetando el puerto (incidente del 2026-08-27).
+        private static readonly System.Collections.Generic.HashSet<int> _runnersVivos =
+            new System.Collections.Generic.HashSet<int>();
+
+        private static int RegistrarRunner(Process p)
+        {
+            try
+            {
+                int pid = p.Id;
+                lock (_runnersVivos) _runnersVivos.Add(pid);
+                return pid;
+            }
+            catch { return 0; }   // proceso ya muerto: nada que registrar
+        }
+
+        private static void OlvidarRunner(int pid)
+        {
+            if (pid == 0) return;
+            lock (_runnersVivos) _runnersVivos.Remove(pid);
+        }
+
+        /// <summary>
+        /// Mata los runners que sigan vivos. Se llama al parar el puente: si ArcMap se
+        /// está cerrando, un runner vivo lo deja a medio salir — vivo, sin ventana y
+        /// sujetando el puerto—, que es el cuadro del ArcMap zombi. Devuelve cuántos
+        /// mató. El trabajo que estuviera haciendo se pierde, pero al cerrarse ArcMap ya
+        /// no había nadie que fuera a leer su resultado.
+        /// </summary>
+        public static int MatarRunnersVivos()
+        {
+            int[] pids;
+            lock (_runnersVivos)
+            {
+                pids = new int[_runnersVivos.Count];
+                _runnersVivos.CopyTo(pids);
+                _runnersVivos.Clear();
+            }
+            int muertos = 0;
+            foreach (int pid in pids)
+            {
+                try
+                {
+                    using (Process p = Process.GetProcessById(pid))
+                    {
+                        if (p.HasExited) continue;
+                        p.Kill();
+                        muertos++;
+                        Log.Info("Runner arcpy (PID " + pid + ") terminado al parar el puente.");
+                    }
+                }
+                catch { /* ya no existe, o no se deja: no hay nada mejor que hacer */ }
+            }
+            return muertos;
+        }
+
         // execute_arcpy es INTERACTIVO: al otro lado hay alguien esperando la
         // respuesta, no un batch nocturno. Con el techo de 1800 s de los jobs
         // pesados, un execute_arcpy atascado es indistinguible de un cuelgue
@@ -212,6 +276,7 @@ namespace ArcmapMcp.AddIn.Handlers
             // Ante salida ilegible se CONSERVAN job y out: son la única evidencia
             // para diagnosticar (se borraban siempre, y con ellos la pista).
             bool conservarEvidencia = false;
+            int pidRunner = 0;
             try
             {
                 var psi = new ProcessStartInfo
@@ -227,6 +292,7 @@ namespace ArcmapMcp.AddIn.Handlers
                 string stderr;
                 using (Process p = Process.Start(psi))
                 {
+                    pidRunner = RegistrarRunner(p);
                     // AMBOS flujos en asíncrono: leer uno solo con ReadToEnd cuelga el
                     // subprocess si el otro pipe se llena (~4 KB de mensajes de arcpy).
                     var salida = new StringBuilder();
@@ -285,9 +351,24 @@ namespace ArcmapMcp.AddIn.Handlers
                                     : " Sube ARCMAP_SUBPROCESS_TIMEOUT (segundos) si la operación es legítimamente larga.")
                             + " Evidencia conservada: " + jobPath);
                     }
-                    // Con salida redirigida en asíncrono, hay que rematar con el
-                    // WaitForExit sin argumentos para que los buffers acaben de vaciarse.
-                    p.WaitForExit();
+                    // Con salida redirigida en asíncrono hay que rematar con un WaitForExit
+                    // final para que los buffers acaben de vaciarse. PERO **nunca sin
+                    // argumentos**: esa llamada no espera a que muera el hijo (que aquí ya
+                    // murió), espera al EOF de LOS DOS PIPES, y un NIETO que heredó los
+                    // descriptores y sigue vivo impide ese EOF para siempre. Reproducido en
+                    // aislado el 2026-08-28 sobre .NET Framework 4.8: hijo muerto a los
+                    // 0,0 s, `WaitForExit()` bloqueado 12,1 s, exactamente lo que vivió el
+                    // nieto. Con un nieto que no muera, bloquea indefinidamente, el handler
+                    // no vuelve y el puente se queda inservible. arcpy lanza procesos
+                    // auxiliares, así que el nieto no es hipotético.
+                    // Se acota: como mucho FlushSalidaTimeout esperando el vaciado. Si no
+                    // llega, se sigue con lo que haya — perder unas líneas de stderr es
+                    // barato; colgar el puente, no.
+                    if (!p.WaitForExit((int)FlushSalidaTimeout.TotalMilliseconds))
+                        Log.Error("runner '" + op + "' ya terminó, pero sus pipes no dieron EOF en "
+                                  + FlushSalidaTimeout.TotalSeconds + " s: algo heredó la salida y sigue"
+                                  + " vivo (proceso auxiliar de arcpy). Se continúa; la salida capturada"
+                                  + " puede estar incompleta.");
                     exitCode = p.ExitCode;
                     stderr = errores.ToString();
                     if (salida.Length > 0)
@@ -335,6 +416,7 @@ namespace ArcmapMcp.AddIn.Handlers
             }
             finally
             {
+                OlvidarRunner(pidRunner);
                 // La traza de fase es de usar y tirar salvo que haya que diagnosticar:
                 // cuando se conserva evidencia, dice dónde se quedó el runner.
                 if (!conservarEvidencia)

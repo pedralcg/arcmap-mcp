@@ -25,12 +25,15 @@ PowerShell). Tambien se acepta un unico argumento JSON si empieza por '{'.
 Requiere que el puente este levantado dentro de ArcMap (boton Iniciar de la
 barra arcmap-mcp).
 """
+import os
 import sys
 import json
 import socket
 
-HOST = "127.0.0.1"
-PORT = 27179
+# Mismas variables que el servidor y el add-in: si se cambio el puerto, la sonda
+# tiene que seguirlo o dara "conexion rechazada" contra un puente que si esta vivo.
+HOST = os.environ.get("ARCMAP_BRIDGE_HOST", "127.0.0.1")
+PORT = int(os.environ.get("ARCMAP_BRIDGE_PORT", "27179"))
 
 cmd = sys.argv[1] if len(sys.argv) > 1 else "ping"
 

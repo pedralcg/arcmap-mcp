@@ -52,7 +52,8 @@ $Repo = $PSScriptRoot
 $VenvDir = Join-Path $env:LOCALAPPDATA 'arcmap-mcp\venv'
 $VenvPython = Join-Path $VenvDir 'Scripts\python.exe'
 $ServerPy = Join-Path $Repo 'src\arcmap_mcp_server.py'
-$Puerto = 27179
+# Mismo criterio que el add-in y el servidor: ARCMAP_BRIDGE_PORT manda si esta puesta.
+$Puerto = if ($env:ARCMAP_BRIDGE_PORT) { [int]$env:ARCMAP_BRIDGE_PORT } else { 27179 }
 
 # --------------------------------------------------------------------------- #
 # Salida por consola
@@ -337,6 +338,44 @@ function Get-BloqueServidor {
     }
 }
 
+<# El registro del MCP graba la ruta DESDE LA QUE SE EJECUTA este script ($PSScriptRoot).
+   Eso es lo correcto cuando se instala desde el repo, y una trampa cuando se instala
+   desde una copia de usar y tirar: el ZIP de `empaquetar.ps1` extraido en el Escritorio,
+   una descarga de GitHub (que se llama `<repo>-main`), o algo en Temp. Al borrar esa
+   carpeta la config queda apuntando al vacio, el servidor arranca y muere al instante, y
+   el sintoma no aparece hasta la SIGUIENTE sesion, como `CONNECTION_CLOSED`, lejisimos de
+   su causa. Paso el 2026-08-27 en Torre. Se avisa una sola vez. #>
+$script:AvisoEfimeroDado = $false
+function Test-RepoEfimero {
+    if ($script:AvisoEfimeroDado) { return }
+    $sospechosas = @(
+        [Environment]::GetFolderPath('Desktop'),
+        (Join-Path $env:USERPROFILE 'Downloads'),
+        $env:TEMP
+    ) | Where-Object { $_ }
+
+    $motivo = $null
+    foreach ($base in $sospechosas) {
+        if ($Repo.TrimEnd('\').ToLower().StartsWith($base.TrimEnd('\').ToLower() + '\')) {
+            $motivo = "esta dentro de $base"
+            break
+        }
+    }
+    # GitHub nombra asi el ZIP de "Download ZIP": carpeta de prueba casi seguro.
+    if (-not $motivo -and (Split-Path $Repo -Leaf) -match '-(main|master)$') {
+        $motivo = 'tiene el nombre que pone GitHub al ZIP de descarga'
+    }
+    if (-not $motivo) { return }
+
+    $script:AvisoEfimeroDado = $true
+    Write-Aviso "OJO: estas instalando desde una carpeta que parece temporal ($motivo)."
+    Write-Info  "  Repo: $Repo"
+    Write-Info  '  Los clientes MCP quedan apuntando A ESA RUTA. Si la borras, el servidor'
+    Write-Info  '  dejara de arrancar y el fallo saldra en una sesion posterior, sin pistas.'
+    Write-Info  '  Para uso real, mueve el repo a una ubicacion estable (p. ej. C:\mcp\arcmap-mcp)'
+    Write-Info  '  y vuelve a ejecutar este instalador desde alli.'
+}
+
 <# Claude Code guarda en ~/.claude.json mucho mas que los MCP (historial incluido).
    Reescribir ese fichero con ConvertTo-Json seria arriesgado, asi que se delega
    en su propia CLI, que sabe editarlo sin romper nada. #>
@@ -356,7 +395,12 @@ function Register-ClaudeCode {
     }
     & claude mcp remove arcmap --scope user 2>&1 | Out-Null   # idempotencia: re-registra limpio
     & claude mcp add arcmap --scope user -- $VenvPython $ServerPy 2>&1 | Out-Null
+    # Decir SIEMPRE que ruta ha quedado registrada. Antes solo se anunciaba "registrado",
+    # y esa omision costo una sesion: el registro apuntaba a un ZIP de prueba borrado
+    # despues, y el fallo no salio hasta la sesion siguiente como CONNECTION_CLOSED.
     Write-Ok 'Claude Code: servidor arcmap registrado (scope user)'
+    Write-Info "  -> $ServerPy"
+    Test-RepoEfimero
 }
 
 function Register-ClienteJson {
@@ -530,7 +574,10 @@ function Show-Resumen {
         Write-Info "Python 3 base:   $txtPy3"
     }
     Write-Info "Python 2.7:      $txtPy27"
+    Write-Info "Servidor MCP:    $ServerPy"
     Write-Info "Log del add-in:  C:\MCP_Logs\arcmap-mcp.log"
+    # Tambien en -SoloVerificar: es justo cuando se va a mirar por que algo no arranca.
+    Test-RepoEfimero
 }
 
 # --------------------------------------------------------------------------- #

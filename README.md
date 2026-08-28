@@ -282,16 +282,34 @@ Con el puente vivo, pide por MCP la herramienta `ping` → debe devolver la vers
 add-in, el documento abierto y el nº de capas. Luego `list_layers` → tus capas. Todo OK.
 
 ## Acceso remoto (opcional)
-El add-in escucha **solo en `127.0.0.1`** por diseño: `execute_arcpy` es ejecución de
-código, y exponer el puerto sería exponer la máquina. Si ArcMap corre en otro equipo,
-reenvía el puerto con un túnel cifrado — SSH (`ssh -L 27179:127.0.0.1:27179 <host>`)
-o Tailscale — y el servidor MCP se conecta como si fuera local
-(`ARCMAP_BRIDGE_HOST` si el extremo local del túnel no es 127.0.0.1).
+El add-in escucha **solo en `127.0.0.1`, y eso no se puede cambiar**: no hay variable
+ni ajuste para abrir el bind, a propósito. Si ArcMap corre en otro equipo, reenvía el
+puerto con un túnel cifrado — SSH (`ssh -L 27179:127.0.0.1:27179 <host>`) o Tailscale —
+y el servidor MCP se conecta como si fuera local (`ARCMAP_BRIDGE_HOST` solo si el
+extremo local del túnel no es 127.0.0.1).
+
+El túnel no es un rodeo: **termina en el `127.0.0.1` de la máquina de destino**, así
+que alcanza este listener sin abrir nada, y de paso cifra y autentica, que es justo lo
+que al puente le falta.
 
 > ⚠️ **Seguridad.** El puente expone `execute_arcpy`, es decir **ejecución de código
-> Python arbitrario** en la máquina que aloja ArcMap, sin autenticación: la frontera
-> de seguridad es la red. Mantén el puerto fuera de redes abiertas; túnel cifrado o
-> firewall siempre.
+> Python arbitrario** en la máquina que aloja ArcMap, sin autenticación, sin usuarios y
+> sin TLS: quien alcance el puerto ejecuta lo que quiera con los permisos de quien tenga
+> ArcMap abierto. El loopback no es una limitación pendiente de levantar, **es la única
+> barrera que hay**, y por eso el bind se dejó fijo. Lo que sí es configurable es el
+> **puerto**, que no cambia nada de esto: se sigue escuchando solo en loopback.
+
+### Cambiar el puerto: `ARCMAP_BRIDGE_PORT`
+Por defecto `27179`. Existe por un motivo concreto: cuando una instancia de ArcMap se
+queda **zombi** —viva, respondiendo, pero sin ventana principal— sigue sujetando el
+puerto, y sin alternativa ningún ArcMap nuevo puede levantar el puente. Con la variable
+tienes vía de escape sin matar procesos.
+
+Es **la misma variable en los dos extremos**: el add-in la lee del entorno del usuario
+(defínela **antes** de abrir ArcMap) y el servidor MCP, de su propio entorno o del
+bloque `env` de la config del cliente. Si solo la pones en uno, no se encuentran. Se
+admite `1024`–`65535`; un valor inválido se ignora con aviso en el log y se vuelve al
+`27179`.
 
 ## Límites conocidos y rendimiento
 
@@ -325,7 +343,8 @@ o Tailscale — y el servidor MCP se conecta como si fuera local
   despista: con diez ArcMap abiertos, `get_arcmap_info` devuelve **un** documento, y no
   es un fallo ni una limitación de ArcMap, es que las otras nueve son invisibles para
   el servidor. Si esperabas otro documento, el puente está en otra ventana. Trabaja con
-  una única instancia siempre que puedas.
+  una única instancia siempre que puedas. Si el puerto se queda cogido por un ArcMap que
+  ya no responde, `ARCMAP_BRIDGE_PORT` te deja levantar el puente en otro sin matarlo.
 - **El workspace es por sesión.** `set_workspace` fija el workspace del add-in (no
   hay `arcpy.env` persistente); se restablece al reiniciar ArcMap.
 

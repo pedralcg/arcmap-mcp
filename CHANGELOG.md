@@ -3,6 +3,95 @@
 Formato inspirado en [Keep a Changelog](https://keepachangelog.com/es/); versionado
 [SemVer](https://semver.org/lang/es/).
 
+## [2.10.1] - 2026-08-28 (SIN PUBLICAR)
+
+El ArcMap zombi del 2026-08-27, diagnosticado de verdad. **Tampoco se etiqueta.**
+
+### Corregido
+- **`WaitForExit()` sin argumentos podia colgar el puente para siempre**
+  (`PythonHandlers.RunJob`, camino de exito). Esa llamada no espera a que muera el hijo —ahi
+  ya murio— sino al **EOF de los dos pipes**, y un NIETO que heredo los descriptores y sigue
+  vivo lo impide indefinidamente; arcpy lanza procesos auxiliares, asi que el nieto no es
+  hipotetico. El handler no volvia, el `finally` que suelta el gate no llegaba, y el puente
+  quedaba inservible. **Reproducido en aislado** con `cmd` y un nieto por `start /b`: sobre
+  .NET Framework 4.8 el hijo murio a los 0,0 s y `WaitForExit()` bloqueo 12,1 s, exactamente
+  la vida del nieto. (Sobre .NET 8 NO se reproduce: el add-in es net45, asi que la prueba
+  solo vale sobre .NET Framework.) Ahora se acota a 10 s y, si no hay EOF, se sigue avisando
+  en el log: perder unas lineas de stderr es barato, colgar el puente no.
+- **`Stop()` no liberaba el puerto.** Cerraba el listener pero **no las conexiones ya
+  aceptadas**, y una conexion viva mantiene ocupado el 127.0.0.1:27179. El 2026-08-27 eso
+  dejo el puerto cogido por un ArcMap que ya habia descargado su extension, y las instancias
+  siguientes fallaban con "Solo se permite un uso de cada direccion de socket". Ahora se
+  cierran, lo que ademas desbloquea a los clientes que esperaban una respuesta que no iba a
+  llegar (los `CloseWait` que se vieron en el puerto eran eso, no una fuga aparte).
+- **Al parar el puente se terminan los runners arcpy vivos.** Un runner vivo impide que
+  ArcMap acabe de salir, y de ahi nace el zombi: proceso en memoria, sin ventana, con el
+  puerto cogido. Se registran por PID y no por objeto `Process`, porque el `Process` muere
+  con su `using` y el registro tiene que sobrevivirle.
+
+### Cambiado
+- **Docstring de `ping` puesto al dia.** Seguia diciendo que "mientras ArcMap esta ocupado,
+  `ping` TAMPOCO puede responder", y eso dejo de ser cierto en 2.9.0: `ping` no pasa por el
+  candado y contesta al instante con `comando_en_curso` y `ocupado_desde_s`.
+
+### Nota sobre el diagnostico anterior
+Lo que se habia escrito del incidente —"el timeout mata al runner pero no libera la bandera"—
+**era falso, y el log del dia lo desmiente**: `ARCMAP_EXEC_TIMEOUT` son 900 s y la extension se
+descargo a los 9 min 22 s, o sea que el timeout **nunca llego a actuar**, y no hay ninguna linea
+de "supero el timeout". El `busy` de aquellos nueve minutos era el candado funcionando sobre un
+runner atascado. El zombi no nacia de una bandera mal liberada, sino de un cierre que no cerraba
+ni las conexiones ni el runner.
+
+## [2.10.0] - 2026-08-28 (SIN PUBLICAR)
+
+El puerto deja de estar clavado y la documentacion deja de prometer un bind que no
+existe. **Tampoco se etiqueta**, por la misma decision que la 2.9.0.
+
+### Anadido
+- **`ARCMAP_BRIDGE_PORT` en el add-in.** El puerto era una constante compilada
+  (`Port = 27179`), y eso tenia una consecuencia que no se vio hasta sufrirla: cuando una
+  instancia de ArcMap se queda **zombi** —viva y respondiendo, pero sin ventana principal
+  que cerrar— sigue sujetando el puerto, y **sin alternativa ningun ArcMap nuevo puede
+  levantar el puente**. El sistema entero se quedaba sin via de escape hasta matar el
+  proceso por PID. Ahora el add-in lee la variable del entorno del usuario (definirla
+  ANTES de abrir ArcMap) con el **mismo nombre que ya usaba el servidor Python**, de modo
+  que una sola variable mueve los dos extremos. Se admite 1024-65535; un valor invalido se
+  ignora, se avisa en el log y se vuelve al 27179. Cambiar el puerto **no saca nada de
+  local**: se sigue escuchando solo en loopback.
+- El error de "no se pudo arrancar el servidor" ahora **nombra las dos salidas** (otro
+  puerto, o matar el ArcMap zombi) en vez de preguntar si el puerto esta ocupado y dejar
+  ahi al usuario.
+
+### Corregido
+- **El instalador dice que ruta registra, y avisa si es efimera.** `install.ps1` graba en los
+  clientes MCP la ruta desde la que se ejecuta (`$PSScriptRoot`), que es lo correcto desde el
+  repo y una trampa desde una copia de usar y tirar: **una prueba secuestra la configuracion
+  global de verdad**. El 2026-08-27 se instalo desde el ZIP de `empaquetar.ps1` extraido en el
+  Escritorio; al borrar esa carpeta, el servidor MCP quedo apuntando al vacio, arrancaba y moria
+  al instante, y el sintoma no aparecio hasta la sesion siguiente como `CONNECTION_CLOSED`,
+  lejisimos de su causa. Antes solo se anunciaba "servidor arcmap registrado", sin la ruta.
+  Ahora se imprime siempre, tambien en el resumen y en `-SoloVerificar`, y salta un aviso si el
+  repo esta bajo Escritorio, Descargas o Temp, o si la carpeta se llama `<algo>-main`/`-master`
+  (el nombre que pone GitHub al "Download ZIP"). Probar un ZIP sigue siendo legitimo: lo que hay
+  que recordar es **reinstalar desde la ubicacion estable despues**.
+
+### Cambiado
+- **El bind se queda en `IPAddress.Loopback` como decision explicita, no como pendiente.**
+  Se evaluo abrirlo (el README describia acceso remoto y el add-in no lo permitia) y se
+  descarto: `execute_arcpy` es ejecucion de codigo arbitrario sin autenticacion, sin
+  usuarios y sin TLS, asi que el loopback es la unica barrera que hay. Y sobre todo es
+  **innecesario**: un tunel SSH o Tailscale con reenvio de puerto termina en el
+  `127.0.0.1` del destino, o sea que ya alcanza este listener sin abrir nada, y encima
+  cifra y autentica. Queda escrito en el codigo para que no se "arregle" mas adelante.
+- **Documentacion corregida donde prometia lo que no hacia.** El comentario de
+  `src/arcmap_mcp_server.py` decia que para un ArcMap remoto se exportara
+  `ARCMAP_BRIDGE_HOST=<IP-del-equipo>`, cosa que **no puede funcionar** porque en esa
+  interfaz no escucha nadie. Ahora dice lo que hay: tunel al loopback del destino, y
+  `ARCMAP_BRIDGE_HOST` solo si el extremo local del tunel no es 127.0.0.1. Actualizados
+  tambien README, `docs/INSTALL.md` y `.env.example`.
+- `install.ps1` y los dos scripts de `tests/` dejan de clavar el 27179 y siguen la
+  variable, para no dar "conexion rechazada" contra un puente que si esta vivo.
+
 ## [2.9.0] - 2026-08-27 (SIN PUBLICAR)
 
 Simbologia de raster, auditoria de carpetas y errores que enseñan. **Nada de esto se
