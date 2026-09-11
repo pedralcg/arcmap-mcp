@@ -590,13 +590,27 @@ def get_layer_info(capa: str) -> dict:
 
 
 @mcp.tool()
-def add_layer(fuente: str, posicion: str = "TOP", grupo: str = None) -> dict:
+def add_layer(fuente: str, posicion: str = "TOP", grupo: str = None,
+              nombre: str = None) -> dict:
     """
     Añade una capa al data frame activo desde una ruta a shapefile, feature class de
-    file geodatabase o raster. `posicion`: TOP / BOTTOM / AUTO_ARRANGE. `grupo`
-    opcional = nombre de una capa de grupo donde insertarla.
+    file geodatabase, ráster **o `.lyr`**. `posicion`: TOP / BOTTOM / AUTO_ARRANGE.
+    `grupo` opcional = nombre de una capa de grupo YA EXISTENTE donde insertarla.
+
+    `nombre`: cómo se llamará la capa en la TOC. Sin esto entra con el nombre del
+    fichero (`Vis_plataforma_oeste.tif`), que es el que acaba saliendo en la
+    leyenda del plano.
+
+    **Un `.lyr` entra con todo lo que lleve dentro**: nombre, simbología,
+    transparencia y, si es un `.lyr` de GRUPO, el árbol entero con sus
+    visibilidades. Es la única vía para reproducir de una vez la estructura de
+    grupos de un proyecto de QGIS, porque no hay tool que cree grupos. Lo que no
+    trae un `.lyr` de datos sueltos no se inventa: el etiquetado sigue sin viajar.
     """
-    return _client.send("add_layer", {"fuente": fuente, "posicion": posicion, "grupo": grupo})
+    params: dict = {"fuente": fuente, "posicion": posicion, "grupo": grupo}
+    if nombre is not None:
+        params["nombre"] = nombre
+    return _client.send("add_layer", params)
 
 
 @mcp.tool()
@@ -610,6 +624,21 @@ def apply_symbology_from_layer(capa: str, lyr_file: str) -> dict:
     """
     Aplica la simbología de un archivo `.lyr` (estilos canónicos) a una capa
     del mapa. `lyr_file` es la ruta al .lyr de origen.
+
+    Vale para capas de ENTIDADES y para capas RÁSTER. En ráster es la vía para
+    los renderers que ninguna tool sabe construir —valores únicos, colormap, RGB
+    compuesto—: `set_raster_symbology` solo clasifica o estira, y sobre un ráster
+    categórico (una máscara 0/1/2, una reclasificación, un `paletted` traído de
+    QGIS) la clasificación falla porque no hay histograma que cortar. El camino
+    entonces es fabricar el `.lyr` con `execute_arcpy` + ArcObjects y aplicarlo
+    aquí.
+
+    **En ráster viaja también la TRANSPARENCIA del `.lyr`**; en entidades se copia
+    solo el renderer. Es deliberado: en un ráster de visibilidad o de afección la
+    opacidad no es decoración, es lo que deja ver la ortofoto debajo.
+
+    Del `.lyr` se toma la primera capa del tipo que toque, aunque venga dentro de
+    un grupo. Lo que NO viaja: el nombre de la capa y el etiquetado.
     """
     return _client.send("apply_symbology_from_layer", {"capa": capa, "lyr_file": lyr_file})
 
@@ -652,9 +681,12 @@ def set_graduated_symbology(capa: str, campo: str, num_clases: int = 5,
 
 @mcp.tool()
 def set_raster_symbology(capa: str, modo: str = "clasificado", num_clases: int = 5,
-                         color_desde: list = None, color_hasta: list = None) -> dict:
+                         color_desde: list = None, color_hasta: list = None,
+                         colores: list = None, etiquetas: list = None,
+                         algoritmo: str = None, valores: list = None,
+                         transparentes: list = None, transparencia: int = None) -> dict:
     """
-    Simboliza una capa RÁSTER de la TOC: clasificada o estirada.
+    Simboliza una capa RÁSTER de la TOC: clasificada, estirada o por valores únicos.
 
     Es la herramienta para NDVI, FCC, P95, pendientes y demás producto ráster.
     `set_graduated_symbology` NO vale aquí: solo acepta capas de entidades.
@@ -664,19 +696,68 @@ def set_raster_symbology(capa: str, modo: str = "clasificado", num_clases: int =
     `modo`:
       - `clasificado` (por defecto): `num_clases` clases (2-32) con rampa de color.
       - `estirado`: rampa continua entre el mínimo y el máximo de la banda 0.
+      - `unico`: un color por valor de píxel. **Es el modo de un ráster CATEGÓRICO**
+        —máscara de visibilidad, FCC binario, reclasificación, `paletted` de QGIS—,
+        donde el clasificado falla con un E_FAIL de COM porque no hay histograma
+        que cortar, y donde clasificar sería mentir sobre el dato.
 
-    `color_desde` / `color_hasta` son `[R, G, B]` de 0 a 255. Por defecto va de
-    amarillo claro `[255, 255, 178]` a rojo oscuro `[189, 0, 38]`, que es
-    secuencial y funciona para casi todo lo continuo.
+    MODO `unico`:
+      - `valores`: lista de valores de píxel a pintar (ej. `[1, 2]`). Obligatorio;
+        no se deducen del ráster, porque adivinarlos sería inventar la leyenda.
+      - `colores` / `etiquetas`: uno por valor. Sin `colores`, tonos repartidos por
+        el círculo cromático (distinguir, no ordenar).
+      - `transparentes`: valores que NO se pintan y que tampoco salen en la leyenda
+        (ej. `[0]`). Es la traducción exacta del `paletted` de QGIS, donde lo que no
+        está en la paleta queda transparente. **Sin esto el fondo tapa el mapa**, y
+        en una máscara de visibilidad el fondo suele ser el 90 % del ráster.
 
-    Si el ráster no tiene estadísticas calculadas, la clasificación falla: el
-    error lo dice y hay que calcularlas sobre la capa antes.
+    `transparencia` (0-100, cualquier modo): opacidad de la capa. La opacidad 0,6 de
+    QGIS es `transparencia=40`.
+
+    COLOR. Hay dos vías, y la explícita manda:
+
+      - `colores`: una lista de `num_clases` colores `[R, G, B]`, uno por clase.
+        Es la vía FIABLE cuando las clases son categóricas o los cortes vienen
+        fijados por percentil: ahí el color no es un gradiente que se pueda
+        derivar de dos extremos, es una decisión por clase.
+      - `color_desde` / `color_hasta`: los dos extremos de una rampa. Por defecto
+        va de amarillo claro `[255, 255, 178]` a rojo oscuro `[189, 0, 38]`.
+
+    `etiquetas`: lista de `num_clases` rótulos de leyenda. Cuando los cortes salen
+    de una reclasificación, el número del corte no dice nada ("1 – 2") y lo que
+    sirve es el significado ("Defoliación fuerte"). Sin esto, cada clase se rotula
+    con su rango.
+
+    `algoritmo` de interpolación de la rampa: `cielab` (por defecto), `lablch` o
+    `hsv`. **No uses `hsv` para nada cuantitativo**: interpola el tono dando la
+    vuelta a la rueda de color, así que entre dos rojos separados 27° saca un
+    arcoíris que pasa por morado, turquesa y verde. Era el comportamiento por
+    defecto hasta el 2026-09-04; CIE Lab interpola en espacio perceptualmente
+    uniforme y sí produce secuencias que se leen como orden.
+
+    Si el ráster no tiene estadísticas calculadas, se calculan solas.
+
+    La cabecera de la leyenda queda siempre en `Value`: ArcObjects la fija en el
+    `Update()` y después es de solo lectura. Se quita en el elemento de leyenda
+    del layout, no desde aquí.
     """
     params: dict = {"capa": capa, "modo": modo, "num_clases": num_clases}
+    if valores is not None:
+        params["valores"] = valores
+    if transparentes is not None:
+        params["transparentes"] = transparentes
+    if transparencia is not None:
+        params["transparencia"] = transparencia
     if color_desde is not None:
         params["color_desde"] = color_desde
     if color_hasta is not None:
         params["color_hasta"] = color_hasta
+    if colores is not None:
+        params["colores"] = colores
+    if etiquetas is not None:
+        params["etiquetas"] = etiquetas
+    if algoritmo is not None:
+        params["algoritmo"] = algoritmo
     return _client.send("set_raster_symbology", params)
 
 

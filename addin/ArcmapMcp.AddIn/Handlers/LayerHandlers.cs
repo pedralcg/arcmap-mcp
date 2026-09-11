@@ -24,15 +24,24 @@ namespace ArcmapMcp.AddIn.Handlers
         {
             string fuente = (string)parameters["fuente"];
             if (string.IsNullOrEmpty(fuente))
-                throw new ArgumentException("Indica 'fuente' (ruta a .shp, feature class de .gdb o ráster).");
+                throw new ArgumentException("Indica 'fuente' (ruta a .shp, feature class de .gdb, ráster o .lyr).");
             string posicion = ((string)parameters["posicion"] ?? "TOP").ToUpperInvariant();
             if (posicion != "TOP" && posicion != "BOTTOM" && posicion != "AUTO_ARRANGE")
                 throw new ArgumentException("'posicion' debe ser TOP, BOTTOM o AUTO_ARRANGE.");
             string grupo = (string)parameters["grupo"];
+            string nombre = (string)parameters["nombre"];
 
             IMxDocument doc;
             IMap map = MapHandlers.FocusMap(out doc);
-            ILayer nueva = DataAccess.CrearCapaDesdeRuta(fuente);
+            ILayer nueva = CrearCapa(fuente);
+
+            // El nombre de la TOC es el que sale en la leyenda del plano, así que
+            // llega hasta aquí: sin esto la capa se queda con el nombre del
+            // fichero ("Vis_plataforma_oeste_sin_pantalla.tif") y hay que
+            // renombrarla a mano o rodear el puente por MakeRasterLayer.
+            if (!string.IsNullOrEmpty(nombre))
+                nueva.Name = nombre;
+
             IMapLayers mapLayers = (IMapLayers)map;
 
             if (!string.IsNullOrEmpty(grupo))
@@ -55,13 +64,43 @@ namespace ArcmapMcp.AddIn.Handlers
             }
 
             MapHandlers.NotificarCambioContenido(map, doc);
+            ICompositeLayer comp = nueva as ICompositeLayer;
             return Protocol.Result(new JObject
             {
                 ["capa"] = nueva.Name,
                 ["fuente"] = fuente,
                 ["posicion"] = posicion,
-                ["grupo"] = grupo
+                ["grupo"] = grupo,
+                ["es_grupo"] = comp != null,
+                ["capas_dentro"] = comp != null ? (JToken)comp.Count : null
             });
+        }
+
+        /// <summary>
+        /// Crea la capa desde la ruta. Un `.lyr` se abre como layer file: trae
+        /// dentro el nombre, la simbología, la transparencia y —si es de grupo—
+        /// el árbol entero, que es lo único que permite reproducir de una vez la
+        /// estructura de grupos de un proyecto de QGIS. El resto de fuentes van
+        /// por la factory de siempre.
+        ///
+        /// `lf.Close()` cierra el fichero pero NO invalida la capa ya obtenida:
+        /// es el mismo patrón que usa el Add Data de ArcMap, y cerrarlo evita
+        /// dejar el `.lyr` bloqueado en disco mientras dure la sesión.
+        /// </summary>
+        private static ILayer CrearCapa(string fuente)
+        {
+            if (!".lyr".Equals(System.IO.Path.GetExtension(fuente), StringComparison.OrdinalIgnoreCase))
+                return DataAccess.CrearCapaDesdeRuta(fuente);
+
+            if (!File.Exists(fuente))
+                throw new ArgumentException("No existe el archivo .lyr: " + fuente);
+            ILayerFile lf = new LayerFileClass();
+            lf.Open(fuente);
+            ILayer capa = lf.Layer;
+            if (capa == null)
+                throw new ArgumentException("El .lyr no contiene ninguna capa: " + fuente);
+            try { lf.Close(); } catch { }
+            return capa;
         }
 
         public static JObject RemoveLayer(JObject parameters)
@@ -101,35 +140,20 @@ namespace ArcmapMcp.AddIn.Handlers
 
             IMxDocument doc;
             IMap map = MapHandlers.FocusMap(out doc);
-            IGeoFeatureLayer destino = MapHandlers.FindLayer(map, capa) as IGeoFeatureLayer;
-            if (destino == null)
-                throw new ArgumentException("Solo capas de entidades admiten simbología desde .lyr: " + capa);
+            ILayer objetivo = MapHandlers.FindLayer(map, capa);
+            IGeoFeatureLayer destino = objetivo as IGeoFeatureLayer;
+            IRasterLayer destinoRaster = objetivo as IRasterLayer;
+            if (destino == null && destinoRaster == null)
+                throw new ArgumentException("Solo capas de entidades o ráster admiten simbología desde .lyr: " + capa);
 
+            JObject detalle;
             ILayerFile lf = new LayerFileClass();
             lf.Open(lyrFile);
             try
             {
-                IGeoFeatureLayer origen = PrimerGeoFeatureLayer(lf.Layer);
-                if (origen == null)
-                    throw new ArgumentException("El .lyr no contiene una capa de entidades: " + lyrFile);
-
-                // Geometrías incompatibles → el renderer no aplicaría (mismo guard
-                // implícito del UpdateLayer de arcpy.mapping). Si una fuente está
-                // rota no se puede comprobar: se intenta igualmente.
-                try
-                {
-                    if (destino.FeatureClass != null && origen.FeatureClass != null
-                        && destino.FeatureClass.ShapeType != origen.FeatureClass.ShapeType)
-                        throw new ArgumentException("Geometrías incompatibles entre la capa ("
-                            + DataAccess.NombreTipoGeometria(destino.FeatureClass.ShapeType)
-                            + ") y el .lyr (" + DataAccess.NombreTipoGeometria(origen.FeatureClass.ShapeType) + ").");
-                }
-                catch (ArgumentException) { throw; }
-                catch { /* FeatureClass inaccesible: no bloquear por el guard */ }
-
-                // Clonar el renderer para no dejar referencias vivas al layer file.
-                IObjectCopy copia = new ObjectCopyClass();
-                destino.Renderer = (IFeatureRenderer)copia.Copy(origen.Renderer);
+                detalle = destino != null
+                    ? AplicarAEntidades(destino, lf.Layer, lyrFile)
+                    : AplicarARaster(destinoRaster, lf.Layer, lyrFile);
             }
             finally
             {
@@ -137,11 +161,91 @@ namespace ArcmapMcp.AddIn.Handlers
             }
 
             MapHandlers.NotificarCambioContenido(map, doc);
-            return Protocol.Result(new JObject
+            detalle["capa"] = capa;
+            detalle["lyr_origen"] = lyrFile;
+            return Protocol.Result(detalle);
+        }
+
+        private static JObject AplicarAEntidades(IGeoFeatureLayer destino, ILayer raizLyr, string lyrFile)
+        {
+            IGeoFeatureLayer origen = PrimerGeoFeatureLayer(raizLyr);
+            if (origen == null)
+                throw new ArgumentException("El .lyr no contiene una capa de entidades: " + lyrFile);
+
+            // Geometrías incompatibles → el renderer no aplicaría (mismo guard
+            // implícito del UpdateLayer de arcpy.mapping). Si una fuente está
+            // rota no se puede comprobar: se intenta igualmente.
+            try
             {
-                ["capa"] = capa,
-                ["lyr_origen"] = lyrFile
-            });
+                if (destino.FeatureClass != null && origen.FeatureClass != null
+                    && destino.FeatureClass.ShapeType != origen.FeatureClass.ShapeType)
+                    throw new ArgumentException("Geometrías incompatibles entre la capa ("
+                        + DataAccess.NombreTipoGeometria(destino.FeatureClass.ShapeType)
+                        + ") y el .lyr (" + DataAccess.NombreTipoGeometria(origen.FeatureClass.ShapeType) + ").");
+            }
+            catch (ArgumentException) { throw; }
+            catch { /* FeatureClass inaccesible: no bloquear por el guard */ }
+
+            // Clonar el renderer para no dejar referencias vivas al layer file.
+            IObjectCopy copia = new ObjectCopyClass();
+            destino.Renderer = (IFeatureRenderer)copia.Copy(origen.Renderer);
+            return new JObject { ["tipo"] = "entidades" };
+        }
+
+        /// <summary>
+        /// Simbología ráster desde un .lyr. Es la única vía para un renderer que
+        /// las tools no saben construir —valores únicos, colormap, RGB compuesto—:
+        /// `set_raster_symbology` solo clasifica o estira, y sobre un ráster
+        /// categórico (una máscara 0/1/2, una reclasificación, un `paletted` traído
+        /// de QGIS) la clasificación falla porque no hay histograma que cortar.
+        ///
+        /// El renderer se clona y se REENCAJA en el ráster de destino: un
+        /// IRasterRenderer lleva dentro el ráster sobre el que se construyó, y sin
+        /// `Raster` + `Update()` el clon pintaría contra el dato del .lyr.
+        ///
+        /// La transparencia viaja también, y a propósito: en un ráster de
+        /// visibilidad o de afección la opacidad no es decoración, es lo que deja
+        /// ver la ortofoto debajo, y se pierde en cuanto la capa se recrea.
+        /// </summary>
+        private static JObject AplicarARaster(IRasterLayer destino, ILayer raizLyr, string lyrFile)
+        {
+            IRasterLayer origen = PrimerRasterLayer(raizLyr);
+            if (origen == null)
+                throw new ArgumentException("El .lyr no contiene una capa ráster: " + lyrFile);
+            if (origen.Renderer == null)
+                throw new ArgumentException("La capa ráster del .lyr no tiene renderer: " + lyrFile);
+            if (destino.Raster == null)
+                throw new ArgumentException("La capa de destino no tiene ráster accesible (¿fuente rota?): " + destino.Name);
+
+            IObjectCopy copia = new ObjectCopyClass();
+            IRasterRenderer renderer = (IRasterRenderer)copia.Copy(origen.Renderer);
+            renderer.Raster = destino.Raster;
+            renderer.Update();
+            destino.Renderer = renderer;
+
+            var detalle = new JObject
+            {
+                ["tipo"] = "raster",
+                ["renderer"] = NombreRenderer(renderer)
+            };
+
+            ILayerEffects efOrigen = origen as ILayerEffects;
+            ILayerEffects efDestino = destino as ILayerEffects;
+            if (efOrigen != null && efDestino != null && efDestino.SupportsTransparency)
+            {
+                efDestino.Transparency = efOrigen.Transparency;
+                detalle["transparencia"] = efOrigen.Transparency;
+            }
+            return detalle;
+        }
+
+        private static string NombreRenderer(IRasterRenderer renderer)
+        {
+            if (renderer is IRasterUniqueValueRenderer) return "valores únicos";
+            if (renderer is IRasterClassifyColorRampRenderer) return "clasificado";
+            if (renderer is IRasterStretchColorRampRenderer) return "estirado";
+            if (renderer is IRasterRGBRenderer) return "RGB";
+            return renderer.GetType().Name;
         }
 
         /// <summary>
@@ -378,6 +482,23 @@ namespace ArcmapMcp.AddIn.Handlers
             for (int i = 0; i < comp.Count; i++)
             {
                 IGeoFeatureLayer hijo = PrimerGeoFeatureLayer(comp.get_Layer(i));
+                if (hijo != null)
+                    return hijo;
+            }
+            return null;
+        }
+
+        private static IRasterLayer PrimerRasterLayer(ILayer lyr)
+        {
+            IRasterLayer rl = lyr as IRasterLayer;
+            if (rl != null)
+                return rl;
+            ICompositeLayer comp = lyr as ICompositeLayer;
+            if (comp == null)
+                return null;
+            for (int i = 0; i < comp.Count; i++)
+            {
+                IRasterLayer hijo = PrimerRasterLayer(comp.get_Layer(i));
                 if (hijo != null)
                     return hijo;
             }

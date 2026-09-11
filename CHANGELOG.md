@@ -3,6 +3,57 @@
 Formato inspirado en [Keep a Changelog](https://keepachangelog.com/es/); versionado
 [SemVer](https://semver.org/lang/es/).
 
+## [2.11.0] - 2026-09-11 (SIN PUBLICAR)
+
+### Anadido
+- **`apply_symbology_from_layer` acepta capas RASTER.** Hasta ahora las rechazaba de plano
+  ("Solo capas de entidades admiten simbologia desde .lyr"), y eso dejaba sin camino a los
+  renderers que ninguna tool sabe construir: valores unicos, colormap, RGB compuesto.
+  `set_raster_symbology` solo clasifica o estira, y sobre un raster **categorico** —una mascara
+  0/1/2, una reclasificacion, un `paletted` traido de QGIS— la clasificacion falla con `E_FAIL`
+  porque no hay histograma que cortar. Caso que lo destapo: las seis cuencas visuales del
+  ID2026_035 (2026-09-11), que hubo que aplicar rodeando el add-in por
+  `run_geoprocessing("management.ApplySymbologyFromLayer")`.
+  - El renderer se **clona y se reencaja** en el raster de destino (`Raster` + `Update()`): un
+    `IRasterRenderer` lleva dentro el raster sobre el que se construyo, y sin eso el clon
+    pintaria contra el dato del `.lyr`.
+  - **La transparencia del `.lyr` viaja tambien** (en entidades se sigue copiando solo el
+    renderer). En un raster de visibilidad la opacidad es lo que deja ver la ortofoto debajo.
+  - La respuesta dice `tipo`, `renderer` y la `transparencia` aplicada.
+
+- **`set_raster_symbology` gana el modo `unico`** (valores unicos). Es el modo de un raster
+  CATEGORICO —mascara de visibilidad, FCC binario, reclasificacion, `paletted` de QGIS—, donde
+  el clasificado falla con `E_FAIL` porque no hay histograma que cortar y donde clasificar
+  seria mentir sobre el dato.
+  - `valores` es obligatorio: no se deducen del raster. Un raster grande no tiene por que
+    tener tabla de atributos, y adivinarlos seria inventar la leyenda.
+  - `transparentes` pinta esos valores SIN color (NullColor) y sin entrada en la leyenda. Es
+    la traduccion exacta del `paletted` de QGIS, donde lo que no esta en la paleta queda
+    transparente. **Sin esto el valor de fondo tapa el mapa**, y en una mascara de visibilidad
+    el fondo es el 90 % del raster.
+  - Sin `colores`, paleta categorica por el circulo cromatico (distinguir, no ordenar), misma
+    decision que en `set_unique_values_symbology`.
+
+- **`transparencia` (0-100) en cualquier modo de `set_raster_symbology`.** La opacidad 0,6 de
+  QGIS es `transparencia=40`. En un raster tematico la opacidad es lo que deja ver la ortofoto
+  debajo, no un adorno.
+
+- **`add_layer` acepta `.lyr`, incluido el de GRUPO**, y un parametro `nombre` para la capa.
+  Los dos huecos obligaban a rodear el puente: el nombre, por `MakeRasterLayer` via
+  `run_geoprocessing`; el grupo, arrastrando el `.lyr` a mano, porque no hay tool que cree
+  grupos. Un `.lyr` de grupo reproduce de una vez el arbol de un proyecto de QGIS con sus
+  nombres, colores, transparencias y visibilidades por rama.
+
+- Simbologia raster de las clases: paleta explicita por clase, etiquetas de leyenda y algoritmo
+  de interpolacion de rampa (trabajo del 2026-09-04, ver comentarios de
+  `RasterSymbologyHandlers.cs`).
+
+### Sin arreglo posible (documentado, no pendiente)
+- **La cabecera de la leyenda de un raster queda en `Value`.** ArcObjects la fija en el
+  `Update()` del renderer y despues es de solo lectura: `Heading[0] = "..."` devuelve
+  `E_INVALIDARG` y por `ILegendInfo.LegendGroup[0].Heading` tampoco. Se quita en el elemento
+  de leyenda del layout.
+
 ## [2.10.1] - 2026-08-28 (SIN PUBLICAR)
 
 El ArcMap zombi del 2026-08-27, diagnosticado de verdad. **Tampoco se etiqueta.**

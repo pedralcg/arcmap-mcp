@@ -29,6 +29,16 @@ VEC = ("C:" + SEP + "temp" + SEP + "20260710_export_coberturas_id2025_024" + SEP
        + "Áreas Naturales de Interés Turístico.shp")
 NOMBRE_VEC = "Áreas Naturales de Interés Turístico"
 
+# Raster CATEGORICO (mascara de visibilidad 0/1/2 con NoData 255) y su .lyr de
+# valores unicos: el caso que el modo clasificado no puede cubrir.
+VIS_DIR = "C:" + SEP + "temp" + SEP + "20260911_lyr_visibilidad_rcd"
+VIS_TIF = ("F:" + SEP + "Esteban Dropbox" + SEP + "Pedro Alcoba" + SEP
+           + "ID2026_035_Estudio Paisajistico RCD Rosi" + SEP + "01_GIS" + SEP + "01_Datos"
+           + SEP + "Visibilidad_plataformas" + SEP + "Vis_plataformas_acumulado_sin_pantalla.tif")
+VIS = "Vis_plataformas_acumulado_sin_pantalla.tif"
+LYR_VIS = VIS_DIR + SEP + "Vis_plataformas_acumulado_sin_pantalla.lyr"
+LYR_GRUPO = VIS_DIR + SEP + "05_Analisis_de_visibilidad.lyr"
+
 ok_n = 0
 fallos = []
 
@@ -92,6 +102,22 @@ sys.stdout.write("--- simbologia (las nuevas y la vieja) ---" + chr(10))
 t("set_unique_values_symbology", {"capa": NOMBRE_VEC, "campo": "Municipio"})
 t("set_raster_symbology", {"capa": "real_NUEVO.tif", "num_clases": 4})
 t("set_raster_symbology", {"capa": "real_NUEVO.tif", "modo": "estirado"})
+
+sys.stdout.write("--- raster categorico y .lyr (2.11.0) ---" + chr(10))
+# Un raster categorico NO se clasifica: 'unico' es su unica via, y el valor de
+# fondo va en 'transparentes' o tapa el mapa.
+t("add_layer", {"fuente": VIS_TIF, "nombre": "Acumulado sin pantalla"}, nota="(add_layer con nombre)")
+t("set_raster_symbology", {"capa": "Acumulado sin pantalla", "modo": "unico", "valores": [1, 2],
+                           "colores": [[255, 176, 0], [122, 0, 0]],
+                           "etiquetas": ["una", "las dos"],
+                           "transparentes": [0], "transparencia": 30})
+t("apply_symbology_from_layer", {"capa": "Acumulado sin pantalla", "lyr_file": LYR_VIS},
+  nota="(.lyr sobre capa RASTER)")
+t("add_layer", {"fuente": LYR_GRUPO}, nota="(.lyr de GRUPO)")
+t("remove_layer", {"capa": "5. Análisis de visibilidad"})
+t("remove_layer", {"capa": "Acumulado sin pantalla"})
+t("set_raster_symbology", {"capa": "real_NUEVO.tif", "modo": "unico"},
+  espera_ok=False, nota="(modo unico sin 'valores')")
 
 sys.stdout.write("--- marcadores ---" + chr(10))
 t("add_bookmark", {"nombre": "regresion"})
