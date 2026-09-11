@@ -5,6 +5,18 @@ Formato inspirado en [Keep a Changelog](https://keepachangelog.com/es/); version
 
 ## [2.11.0] - 2026-09-11 (SIN PUBLICAR)
 
+Instalada y verificada contra ArcMap vivo el mismo dia: 40/40 en
+`tests/regresion_sesion_viva.py` —con el caso negativo (`modo unico` sin `valores`)
+fallando como debe— y el `.lyr` de grupo comprobado a ojo, con sus dos subgrupos,
+nombres, colores y transparencias en una sola llamada.
+
+### Corregido
+- **La version del `.csproj` iba por detras de la del `config.xml`** (2.10.1 vs 2.11.0), y
+  como `ping` reporta la del ensamblado, el puente decia 2.10.1 con el DLL nuevo cargado.
+  Es la trampa de siempre: la version que responde no prueba que build corre. Ahora van
+  juntas; hasta reinstalar el paquete, la prueba buena es de comportamiento (si
+  `add_layer` devuelve `es_grupo`, es el nuevo).
+
 ### Anadido
 - **`apply_symbology_from_layer` acepta capas RASTER.** Hasta ahora las rechazaba de plano
   ("Solo capas de entidades admiten simbologia desde .lyr"), y eso dejaba sin camino a los
