@@ -6,19 +6,33 @@
     El "tunel" es el socket entre el servidor MCP externo (Py3) y el puente que
     corre DENTRO de ArcMap (el add-in .NET, barra de herramientas arcmap-mcp).
     Este script:
-      1. Prepara el entorno Py3 (.venv + dependencias) si falta.
+      1. Prepara el entorno Py3 si falta: el venv de %LOCALAPPDATA%\arcmap-mcp\venv
+         (el mismo que crea install.ps1) mas las dependencias de requirements.txt.
       2. Sondea el puente (127.0.0.1:27179) y, si no esta, espera con reintentos
          mostrando las instrucciones para arrancarlo dentro de ArcMap.
       3. Cuando el puente responde, hace un ping y muestra la version de ArcGIS.
       4. Con -Server, arranca ademas el servidor MCP externo (modo standalone /
-         pruebas). En uso normal con Claude Code, el servidor lo lanza el cliente
-         MCP via .mcp.json, asi que basta con que el puente este vivo.
+         pruebas). En uso normal el servidor lo lanza TU CLIENTE MCP a partir del
+         registro que deja install.ps1 en su configuracion, asi que basta con que
+         el puente este vivo.
 
 .PARAMETER Server
     Arranca el servidor MCP externo tras confirmar el puente.
 
 .PARAMETER BridgeHost
-    Host del puente (default 127.0.0.1; para otra maquina via Tailscale/VPN: <IP-de-tu-equipo>).
+    Host del puente. Default 127.0.0.1, y en la practica ese siempre.
+
+    El add-in escucha SOLO en el loopback de su maquina y eso no se puede cambiar
+    (decision de seguridad, ADR-006; McpServer.cs fija el bind a IPAddress.Loopback).
+    Poner aqui la IP del otro equipo NO funciona: alli no hay nada escuchando en esa
+    interfaz. Para un ArcMap remoto se monta un TUNEL, que termina en el 127.0.0.1
+    del destino:
+
+        ssh -L 27179:127.0.0.1:27179 <usuario>@<host>     # SSH
+        tailscale ... + reenvio de puerto al loopback     # Tailscale
+
+    y entonces este script se conecta a su propio extremo LOCAL del tunel. Solo hace
+    falta tocar -BridgeHost si ese extremo local no es 127.0.0.1.
 
 .PARAMETER Port
     Puerto del puente (default 27179).
@@ -104,11 +118,13 @@ function Show-BridgeInstructions {
     Write-Host @"
 
   El puente NO esta activo en ${BridgeHost}:${Port}.
-  Para levantarlo (dentro de ArcMap 10.5):
+  Para levantarlo (dentro de ArcMap):
     1. Abre tu .mxd en ArcMap.
-    2. Localiza la barra de herramientas "arcmap-mcp"
-       (si no se ve: Customize > Toolbars > arcmap-mcp).
-    3. Pulsa el boton "Iniciar MCP".
+    2. Activa la barra de herramientas "arcmap-mcp" en
+       Customize > Toolbars > arcmap-mcp. NO aparece sola: hay que
+       activarla una vez y ArcMap recuerda donde la dejaste.
+    3. Pulsa el boton "Iniciar MCP" (o pon el desplegable
+       "Autoarranque" en SI para que se levante solo cada sesion).
 
     (El boton "Estado MCP" debe mostrar ACTIVO en ${BridgeHost}:${Port})
 "@ -ForegroundColor Yellow
@@ -138,14 +154,15 @@ while ($true) {
 # --- 4. Arranque opcional del servidor MCP externo -------------------------- #
 if ($Server) {
     Write-Section "Arrancando servidor MCP externo (stdio)"
-    Write-Host "Para uso con Claude Code, en su lugar registra en .mcp.json:" -ForegroundColor DarkGray
+    Write-Host "Esto es modo standalone / pruebas. Para uso normal registra el servidor en" -ForegroundColor DarkGray
+    Write-Host "tu cliente MCP con install.ps1 (lo hace solo); a mano seria:" -ForegroundColor DarkGray
     Write-Host "  command: $venvPy" -ForegroundColor DarkGray
     Write-Host "  args:    [`"$(Join-Path $SrcDir 'arcmap_mcp_server.py')`"]" -ForegroundColor DarkGray
     & $venvPy (Join-Path $SrcDir "arcmap_mcp_server.py")
 } else {
     Write-Section "Tunel confirmado"
     Write-Host "Listo. El cliente MCP ya puede usar las herramientas." -ForegroundColor Green
-    Write-Host "Registro en .mcp.json:" -ForegroundColor DarkGray
+    Write-Host "Registro en la config de tu cliente MCP (install.ps1 lo deja puesto):" -ForegroundColor DarkGray
     Write-Host "  command: $venvPy"
     Write-Host "  args:    [`"$(Join-Path $SrcDir 'arcmap_mcp_server.py')`"]"
 }
