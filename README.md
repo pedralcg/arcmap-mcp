@@ -14,7 +14,7 @@ Cliente IA (Claude Code / Desktop / Gemini / Antigravity / OpenCode)
         │  protocolo MCP (stdio)
         ▼
 arcmap_mcp_server.py        ← servidor MCP externo (Python 3 + FastMCP): los schemas
-        │                      de las 48 herramientas y el contrato con el cliente
+        │                      de las 57 herramientas y el contrato con el cliente
         │  socket TCP local  127.0.0.1:27179
         ▼
 Add-in .NET (C#)            ← DENTRO de ArcMap: TcpListener + ArcObjects nativo
@@ -56,7 +56,8 @@ arcmap-mcp/
 │             build.ps1              ← build sin Visual Studio (dotnet CLI)
 ├── docs/     INSTALL.md · TOOLS.md · ROADMAP.md
 ├── tests/    test_client_protocol.py  ← tests automáticos (no necesitan ArcMap)
-│             regresion_sesion_viva.py ← barrido de 33 llamadas (ArcMap vivo)
+│             test_runner_py27.py      ← el runner y el auditor bajo Python 2.7, sin arcpy
+│             regresion_sesion_viva.py ← barrido manual del catálogo (ArcMap vivo)
 │             sonda_puente.py          ← sonda manual de un comando suelto
 ├── start-arcmap-mcp.ps1 · requirements.txt · CHANGELOG.md · LICENSE · README.md
 ```
@@ -73,9 +74,29 @@ arcmap-mcp/
 
 ## Herramientas MCP
 
-**57 herramientas**, todas probadas por llamada cableada real sobre ArcMap 10.5 (ver
-`docs/TOOLS.md` para el catálogo completo con firmas, ejemplos y los matices de
-ejecución de cada grupo):
+**57 herramientas** sobre ArcMap 10.5 (ver `docs/TOOLS.md` para el catálogo completo con
+firmas, ejemplos y los matices de ejecución de cada grupo).
+
+Qué significa «probado», que conviene decirlo con precisión:
+
+- `tests/regresion_sesion_viva.py` hace **105 comprobaciones contra una sesión de ArcMap
+  real** y cubre unas **34 de las 57** tools, con sus casos de error. 🔴 **Modifica el
+  documento abierto** (añade capas, cambia simbología, lanza geoprocesos): se lanza contra
+  un mxd de pruebas, nunca contra un proyecto.
+- `tests/regresion_ddp.py` cubre las tres tools del atlas (Data Driven Pages) con **14
+  comprobaciones**, y es **de solo lectura** sobre el documento: necesita un mxd con atlas
+  habilitado, que en la práctica es siempre uno de producción. Exporta a `C:\temp`.
+- Otros **41 tests** corren sin ArcMap (protocolo, runner Python 2.7, instalador).
+- El resto de tools se ha ejercitado **a mano** en trabajo real a lo largo de las
+  versiones —series de planos de decenas de páginas, análisis ambiental— pero **no están
+  en la regresión automática**, así que un fallo suyo no lo caza nadie hasta que aparece.
+
+Esto no es una salvedad de manual. El 2026-09-21, al cubrir **geodatabases** por primera vez
+y al lanzar la regresión **dos veces en la misma sesión**, salió un defecto que llevaba ahí
+desde versiones anteriores: las workspace factories dejaban de poder instanciarse y con ellas
+`add_layer`, `describe_data` y `list_feature_classes`, hasta cerrar ArcMap. Está corregido en
+la 2.12.0 y ya cubierto. Lo que falta por cubrir sigue siendo el sitio donde esperar la
+próxima sorpresa: si usas una versión anterior a la 2.12.0, ese fallo está latente.
 
 - **Sin ArcMap abierto** (leen del disco, no pasan por el puente): `describe_mxd`
   (versión declarada de un .mxd sin abrirlo, milisegundos) · **`audit_folder`**
@@ -93,8 +114,9 @@ ejecución de cada grupo):
   `remove_layer` · `apply_symbology_from_layer` · `set_scale`.
 - **Simbología:** `set_graduated_symbology` (rangos, capas de entidades) ·
   **`set_unique_values_symbology`** (categorías por valores únicos) ·
-  **`set_raster_symbology`** (ráster clasificado o estirado — NDVI, FCC, P95,
-  pendientes) · `apply_symbology_from_layer` (.lyr plantilla).
+  **`set_raster_symbology`** (ráster clasificado, estirado o **por valores únicos** —
+  NDVI, FCC, P95, pendientes, y máscaras categóricas con valores transparentes) ·
+  `apply_symbology_from_layer` (.lyr plantilla).
 - **Marcadores espaciales:** `get_bookmarks` · `add_bookmark` · `remove_bookmark` ·
   `goto_bookmark`.
 - **Geoprocesamiento y mantenimiento:** `run_geoprocessing` · `save_mxd` · `save_mxd_as` ·
@@ -228,8 +250,14 @@ recordará su posición. Comprueba con el botón **Estado** que la versión es l
 El add-in se compila contra ArcMap **10.5** y ahí está validado en uso real. ArcMap
 carga normalmente add-ins compilados para versiones iguales o anteriores a la instalada,
 así que en 10.6–10.8 debería funcionar, pero **nadie lo ha probado todavía**: si lo
-haces, cuéntalo en una *issue*. Para 10.4 o anterior habría que recompilar cambiando el
-`<Target>` de `Config.xml`.
+haces, cuéntalo en una *issue*.
+
+**En 10.4 o anterior no funciona**, y el instalador ya no finge lo contrario: si detecta
+una de esas versiones lo dice y no instala el add-in (sí prepara el servidor y registra
+los clientes). El manifiesto declara `<Target version="10.5">` y la DLL enlaza los
+ensamblados ESRI 10.5, así que ArcMap no lo cargaría — y no explica por qué. Para usarlo
+ahí hay que **recompilar**: cambiar el `<Target>` de `addin\ArcmapMcp.AddIn\Config.xml`,
+apuntar las referencias del `.csproj` a tus ensamblados ESRI y pasar `addin\build.ps1`.
 
 ### Instalación manual
 
@@ -326,55 +354,81 @@ admite `1024`–`65535`; un valor inválido se ignora con aviso en el log y se v
   de análisis se añaden al mapa al terminar). Para mutar la sesión viva usa las
   herramientas nativas (`set_*`, `add_layer`, …). Coste fijo por llamada: unos
   segundos (snapshot + arranque de Python).
-- **Atlas grandes:** `export_ddp` con `paginas="ALL"` sobre un atlas de cientos de
-  páginas puede superar el timeout estándar de 60 s del servidor; exporta por lista de
-  valores o por rango (varias llamadas), que además da feedback por lotes.
-- **Timeout de geoprocesos.** Las herramientas pesadas usan un timeout amplio
-  (`ARCMAP_GP_TIMEOUT`, **30 min** por defecto); las rápidas, `ARCMAP_BRIDGE_TIMEOUT`
-  (60 s). Aparte, tu cliente IA puede tener su propio timeout de herramienta MCP.
+- **Documentos con rutas relativas.** La copia temporal se hace **junto al .mxd
+  original** en vez de en `%TEMP%` cuando el documento guarda sus fuentes con rutas
+  relativas: llevándola a otra carpeta, esas rutas dejarían de resolver y el snapshot
+  abriría con todas las capas rotas. Por eso puede aparecer un fichero oculto
+  `~arcmap-mcp-snap_*.mxd` junto a tu documento mientras dura la llamada; se borra al
+  terminar, y si alguno quedara huérfano el nombre dice de dónde salió.
+- **Atlas grandes:** `export_ddp` sobre un atlas de cientos de páginas puede agotar la
+  espera aun con el timeout amplio; exporta por lista de `valores` o por `rango`
+  (varias llamadas), que además da feedback por lotes. (No hay parámetro `paginas`:
+  la firma es `export_ddp(salida, modo, rango, valores, un_pdf_por_pagina, dpi)`.)
+- **Timeouts.** No hay uno: hay cinco en el servidor, y cada uno cubre el grupo de
+  tools que el add-in atiende de la misma manera.
+
+  | Variable (servidor) | Default | Qué cubre |
+  |---|---|---|
+  | `ARCMAP_BRIDGE_TIMEOUT` | 60 s | Tools rápidas: consultas, capas, simbología, navegación |
+  | `ARCMAP_GP_TIMEOUT` | 1860 s | Lo que ocupa el hilo de ArcMap: `run_geoprocessing`, `calculate_geometry`, `export_pdf`, `export_jpg`, `export_view_png` |
+  | `ARCMAP_FONDO_TIMEOUT` | 2760 s | Lo que va a un handler de fondo: las 3 de Data Driven Pages y las 5 ambientales |
+  | `ARCMAP_SAVE_TIMEOUT` | 630 s | `save_mxd` y `save_mxd_as` |
+  | `ARCMAP_EXEC_TIMEOUT_CLIENTE` | 930 s | **Solo `execute_arcpy`** |
+  | `ARCMAP_EXEC_SESION_TIMEOUT_CLIENTE` | 1560 s | `execute_arcpy` con `serializar_sesion=True`: el add-in gasta hasta 600 s copiando la sesión **antes** de sus 900 s |
+
+  `execute_arcpy` **no** va por `ARCMAP_GP_TIMEOUT`: subir esa variable no alarga nada
+  allí, que es el error que más tiempo ha costado.
+
+  Cada espera del servidor queda **por encima** del tope que el add-in aplica al mismo
+  trabajo (`ARCMAP_EXEC_TIMEOUT` 900 s, `ARCMAP_SUBPROCESS_TIMEOUT` 1800 s, más sus
+  topes internos de 1800 s en el hilo de ArcMap y 2700 s en el handler de fondo). Es
+  deliberado: así vence primero el del add-in, que mata el subproceso y devuelve un
+  error diciendo en qué fase se quedó, en vez de un corte mudo de socket que deja el
+  runner huérfano (y un runner huérfano impide cerrar ArcMap). Aparte, tu cliente IA
+  puede tener su propio timeout de herramienta MCP, normalmente más corto que todo esto.
+
+  **Dónde se definen, que no es intercambiable.** Las del servidor, en el bloque `env`
+  de la config MCP de tu cliente. Las del add-in (`ARCMAP_EXEC_TIMEOUT`,
+  `ARCMAP_SUBPROCESS_TIMEOUT`, `ARCMAP_PYTHON27`), como **variables de usuario de
+  Windows y antes de abrir ArcMap**: el add-in corre dentro del proceso de ArcMap, que
+  no ve nada del `env` del cliente MCP — ponerlas ahí no hace absolutamente nada.
 - **Extensiones.** `raster_index`, `hydrology`, `least_cost_path` requieren **Spatial
   Analyst**; `contours`, `topographic_profile` requieren **3D Analyst** (actívalas en
   *Customize ▸ Extensions*). Si falta la licencia, la herramienta devuelve un error claro.
 - **Un comando por conexión, en serie.** El puente atiende una orden a la vez; si
   llega otra mientras trabaja responde `busy` de inmediato (sin encolar).
-- **El puente vive en UNA instancia de ArcMap, y solo ve esa.** El puerto (`27179`) es
-  único, así que lo agarra el primer ArcMap donde pulses *Iniciar*; el add-in se carga
-  en todas las ventanas, pero solo una tiene el puente. Consecuencia práctica que
-  despista: con diez ArcMap abiertos, `get_arcmap_info` devuelve **un** documento, y no
-  es un fallo ni una limitación de ArcMap, es que las otras nueve son invisibles para
-  el servidor. Si esperabas otro documento, el puente está en otra ventana. Trabaja con
-  una única instancia siempre que puedas. Si el puerto se queda cogido por un ArcMap que
-  ya no responde, `ARCMAP_BRIDGE_PORT` te deja levantar el puente en otro sin matarlo.
+- **El puente vive en UNA instancia de ArcMap, y solo ve esa.** El add-in **se carga en
+  todas las ventanas**; lo que es único es el **puerto** (`27179`), así que lo agarra el
+  primer ArcMap donde pulses *Iniciar* y en los demás el puente no levanta (queda
+  anotado en el log, sin romper nada). Consecuencia práctica que despista: con diez
+  ArcMap abiertos, `get_arcmap_info` devuelve **un** documento, y no es un fallo ni una
+  limitación de ArcMap, es que las otras nueve son invisibles para el servidor. Si
+  esperabas otro documento, el puente está en otra ventana. Trabaja con una única
+  instancia siempre que puedas. Desde la **2.10.0**, `ARCMAP_BRIDGE_PORT` (definida
+  antes de abrir ese ArcMap) permite levantar un segundo puente en otro puerto — y es
+  también la vía de escape cuando un ArcMap que ya no responde deja cogido el `27179`.
 - **El workspace es por sesión.** `set_workspace` fija el workspace del add-in (no
   hay `arcpy.env` persistente); se restablece al reiniciar ArcMap.
 
 ## Estado
 - [x] Add-in .NET nativo (ArcObjects vía CLR, sin runtime Python embebido)
-- [x] 48 herramientas probadas por llamada cableada real, incluido el análisis
-      ambiental (índices espectrales, hidrología, curvas, perfiles 3D y ruta de
-      mínimo coste) y series de planos reales de decenas de páginas
+- [x] 57 herramientas, incluido el análisis ambiental (índices espectrales, hidrología,
+      curvas, perfiles 3D y ruta de mínimo coste) y series de planos reales de decenas
+      de páginas. Cobertura automática: 105 comprobaciones en sesión viva sobre ~34 de
+      ellas, más 41 tests sin ArcMap (ver «Herramientas MCP»)
 - [x] Geoprocesos arcpy fuera de proceso: la GUI de ArcMap no se congela
 - [x] Cancelación de render/exports con ESC (`ITrackCancel`)
 - [x] Registrable en 5 clientes (Claude Code/Desktop, Gemini CLI, Antigravity, OpenCode)
 
-## Soporte y servicios
+## Licencia y contribuciones
 
 El proyecto es **libre y abierto** (MIT): puedes usarlo, modificarlo y desplegarlo sin
 coste. Está pensado para organizaciones que siguen atadas a ArcMap 10.x y quieren
 automatizar su trabajo cartográfico con agentes IA sin esperar a migrar a ArcGIS Pro.
 
-Si tu equipo necesita ayuda para ponerlo en producción, lo mantiene quien lo ha
-construido —técnico GIS y desarrollador— y ofrece, como servicio:
+Las dudas, fallos y propuestas van por **Issues** del repositorio.
 
-- **Instalación y puesta en marcha** en tu entorno (clientes IA, add-in, red/túnel).
-- **Herramientas a medida**: wrappers nuevos para tus flujos concretos (series de planos,
-  índices, modelos de geoprocesamiento propios).
-- **Integración** con tus datos y plantillas (.mxd, estilos `.lyr`, geodatabases).
-- **Formación** del equipo para sacarle partido en el día a día.
-
-Contacto: **pedro@pedralcg.dev** · [pedralcg.dev](https://pedralcg.dev)
-
-## Créditos y licencia
+## Créditos
 
 - Patrón de arquitectura: [qgis_mcp](https://github.com/jjsantos01/qgis_mcp) (Juan
   Santos), el MCP de QGIS open source.

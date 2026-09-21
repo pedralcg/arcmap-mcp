@@ -3,6 +3,180 @@
 Formato inspirado en [Keep a Changelog](https://keepachangelog.com/es/); versionado
 [SemVer](https://semver.org/lang/es/).
 
+## [2.12.0] - 2026-09-20 (SIN PUBLICAR)
+
+Revisión completa del código. Un defecto grave y silencioso, una veintena de tamaño
+medio y una pasada de documentación. Se escribió **con ArcMap cerrado** y se probó en
+sesión viva el **2026-09-21**: el bloque «revisión 2026-09-20» de
+`tests/regresion_sesion_viva.py` dio 75 de 77. De los dos fallos, uno era de la propia
+aserción del test (comparaba las capas rotas de la copia contra cero, no contra las que
+la sesión ya tenía rotas de origen) y el otro, el del multivalor, queda corregido abajo.
+Probar en vivo destapó además el defecto de las **workspace factories**, que no era nuevo
+pero sí invisible. La regresión creció a **105 comprobaciones**, y la aserción defectuosa
+quedó corregida midiendo la línea base de capas rotas de la sesión en vez de exigir cero.
+
+El arreglo grave está además verificado **donde se manifestaba**: sobre un mxd de producción
+real de 36 capas con *Store relative pathnames*, `list_ddp`, `goto_ddp_page` y `export_ddp`
+dan `snapshot_via: disco_junto_al_original`, **cero capas rotas añadidas**, un PDF de 2 MB con
+datos dentro —páginas con cuadrículas de coordenadas distintas, o sea atlas paginado de
+verdad— y ningún `~arcmap-mcp-snap_*.mxd` residual. Eso vive en el nuevo
+`tests/regresion_ddp.py` (14 comprobaciones), separado del otro script a propósito: el atlas
+exige un documento de producción y la regresión general **modifica** el documento abierto.
+
+Verificado en vivo: el arreglo de las rutas relativas (`snapshot_via:
+disco_junto_al_original`, cero capas rotas *por la copia*, sin `~arcmap-mcp-snap_*.mxd`
+residual), la simbología, los exports, `save_mxd_as`, el desempate de capas homónimas y
+los avisos de `execute_arcpy`. **Siguen sin probar en vivo** el cajetín agrupado, el join
+con tabla unida, ESC en un export, el CRS cruzado en `zoom_to_layer` y el modo estirado
+de ráster.
+
+### Corregido — grave
+- **La copia del `.mxd` rompía los documentos con rutas relativas.** Desde la 2.6.0
+  `execute_arcpy`, `list_ddp`, `goto_ddp_page` y `export_ddp` trabajan sobre una copia del
+  documento hecha en `%TEMP%`. Un `.mxd` con *Store relative pathnames* copiado a otra
+  carpeta abre con **todas sus capas rotas** (reproducido en aislado con arcpy: con rutas
+  relativas `ListBrokenDataSources` devuelve la lista entera; con absolutas, ninguna). Y no
+  fallaba: `export_ddp` sacaba el atlas con su leyenda, sus marcos y ni un dato dentro.
+  Ahora se lee `IMxDocument.RelativePaths`; con rutas relativas la copia se deja **junto al
+  original** (`~arcmap-mcp-snap_<guid>.mxd`, oculta, borrada al terminar), y si esa carpeta
+  no deja escribir se serializa desde ArcMap — **nunca** se cae a `%TEMP%`. Si la casilla
+  no se puede leer se asume «relativas», que es el lado seguro. La respuesta trae
+  `snapshot_via` y `capas_rotas_en_copia` (con `aviso_capas_rotas` si no es cero), para
+  que si el fallo vuelve por otro camino no vuelva a ser mudo.
+  - **Efecto lateral nuevo, a sabiendas:** con rutas relativas se escribe un fichero
+    efímero en la carpeta de trabajo del usuario (y, si está sincronizada, viaja un
+    instante a la nube). Los restos de una sesión que muriera a mitad se barren solos:
+    más de 1 día junto al documento, más de 7 en `%TEMP%\arcmap-mcp`.
+  - De paso: la copia de un `.mxd` de **solo lectura** heredaba el atributo y no se podía
+    borrar, así que se acumulaba una por llamada. Pasaba también antes, en `%TEMP%`.
+- **`audit_folder` no servía en carpetas con ñ o tilde.** `auditor_mxd.py` recibía la ruta
+  en cp1252 (Python 2 en Windows), `json.dumps` la leía como UTF-8 y reventaba **fuera** del
+  `try`: stdout vacío y un `"sin salida"` por documento. El «nunca lanza» del docstring era
+  falso; ahora es cierto. Los errores de arcpy salen además legibles, no como `repr()`.
+- **Los cursores COM no se liberaban** en `get_layer_features`, `get_unique_values`,
+  `count_features` ni en el zoom a la selección. `get_layer_features` salía al llegar al
+  límite con el cursor abierto a mitad de tabla. El lock duraba hasta que pasara el GC.
+- **El relay cortaba antes que el add-in.** `export_pdf`, `export_jpg`, `export_view_png` y
+  las tres de Data Driven Pages esperaban 60 s en el relay mientras el add-in les daba
+  1800: un plano de un minuto largo recibía un «puente ocupado» falso con el export en
+  marcha. Y `ARCMAP_GP_TIMEOUT` (1800) **empataba** con los topes del add-in, así que ganaba
+  el corte mudo de socket: justo lo que el par 930/900 de `execute_arcpy` evita. Regla
+  única ahora: el relay espera siempre más que el add-in, y un test lee los topes del `.cs`
+  y falla si alguien los empata. Variables nuevas: `ARCMAP_FONDO_TIMEOUT` (2760, DDP y
+  ambientales), `ARCMAP_SAVE_TIMEOUT` (630) y `ARCMAP_EXEC_SESION_TIMEOUT_CLIENTE` (1560,
+  `execute_arcpy` con `serializar_sesion`). `ARCMAP_GP_TIMEOUT` pasa a 1860. En el add-in,
+  guardar el documento pasa de 60 a 600 s y `calculate_geometry` entra en los comandos largos.
+
+### Corregido
+- `execute_arcpy`: mezclar `print "Número"` con un `print` de unicode perdía el resultado de
+  un código que había ido bien (`StringIO` de Py2); `sys.exit()` dejaba la llamada sin
+  salida; un `RESULT` con cadenas en cp1252 (`os.listdir`) no se podía serializar.
+- `export_ddp` descartaba **en silencio** los `valores` que no casaban con ninguna página:
+  un plano que falta sin aviso. Ahora vuelven en `valores_no_encontrados`.
+- `run_geoprocessing`: una lista en `params` llegaba al geoproceso como texto JSON
+  (ERROR 000732 en Merge/Union). Ahora es un multivalor. Un objeto JSON es error claro.
+- **Las workspace factories se instanciaban con `new XxxWorkspaceFactoryClass()`**, que lanza
+  `InvalidCastException` («no se puede convertir un objeto de tipo `System.__ComObject` al
+  tipo `...WorkspaceFactoryClass`») cuando el RCW no puede castear el objeto COM registrado.
+  Se llevaba por delante **todo** lo que abre un workspace —`add_layer`, `describe_data`,
+  `list_feature_classes`, `set_workspace`— y, una vez roto, hasta cerrar ArcMap.
+  - **No es un defecto nuevo.** Medido el 2026-09-21 sobre la **2.11.0** compilada del commit
+    `714865f`: aparecen igual las dos caras, `FileGDBWorkspaceFactory` y
+    `ShapefileWorkspaceFactory`. Afecta por tanto a **todas las versiones anteriores**.
+  - **Lo dispara el trabajo acumulado en la sesión, no una llamada concreta.** En una sesión
+    recién abierta las dos factories funcionan; empiezan a fallar tras un pase completo de la
+    regresión, y cuál de las dos cae depende de lo que se haya usado. Probadas de una en una,
+    seis hipótesis —geoproceso correcto, geoproceso fallido, `execute_arcpy`, un pase del
+    script, número de operaciones, ruta con tildes— salieron todas limpias, así que no hay un
+    disparador único identificado.
+  - No se había visto porque la regresión **no cubría geodatabases** y porque nunca se
+    lanzaba dos veces en la misma sesión. El primer caso de gdb se añadió ese día, al probar
+    el multivalor, y saltó enseguida.
+  - Ahora la factory se activa **por ProgID** (`Type.GetTypeFromProgID` + `Activator`), que
+    pide el objeto por su interfaz y no pasa por ese cast. Por ProgID y no por CLSID a pelo
+    para no fijar en el código GUIDs que solo viven en el registro de ArcGIS Desktop.
+  - Verificado: **siete pases** de la regresión en una sola sesión sin un solo cast, y
+    `add_layer` y `describe_data` de shapefile y de geodatabase vivos al terminar. Los tres
+    casos de geodatabase están ya en la regresión.
+- **Una capa de la TOC dentro de un multivalor se resolvía a una ruta sin extensión**, así
+  que seguía dando el mismo ERROR 000732 que el arreglo anterior venía a quitar: el
+  `IDatasetName.Name` de un shapefile es `parcelas`, no `parcelas.shp`, y
+  `Merge C:\dir\a;C:\dir\b` no abre nada. Lo destapó la regresión en vivo del 2026-09-21
+  —el único defecto real de los dos fallos— y estaba aislado en cuatro pruebas: el
+  multivalor y el entrecomillado de rutas con espacios funcionaban, y una lista de rutas
+  extensionless fallaba igual **sin** pasar por la resolución, que es lo que señaló a
+  `DataAccess.RutaFuente`. Ahora la ruta lleva la extensión que el dataset tiene de verdad
+  en disco, y solo si está: una feature class de geodatabase, un ráster (cuyo nombre ya
+  trae el `.tif`), un GRID de ESRI y una capa **rota** se devuelven intactos.
+  - Afectaba a `Merge`, `Union`, `Intersect` y a cualquier geoproceso multivalor **con
+    capas del mapa**; con rutas escritas a mano no, que es como se había usado hasta ahora.
+  - `list_layers` y `get_layer_info` informaban esa misma ruta sin extensión, o sea que
+    copiar la `fuente` y pegarla en `params` reproducía el fallo. Ya la dan abrible, y las
+    dos pasan por la misma función en vez de componer la ruta cada una por su lado.
+  - Una ruta sin extensión **escrita a mano** sigue fallando, a propósito: es la entrada
+    explícita de quien llama, y completarla sería adivinar.
+- Los textos **dentro de un grupo** del layout (el cajetín agrupado) no se listaban ni se
+  podían cambiar con `set_text_element`.
+- Un data frame **vacío** hacía fallar `list_layers` con un error COM, y `run_geoprocessing`
+  aunque todos sus argumentos fueran rutas.
+- `set_raster_symbology` validaba `transparencia` **después** de cambiar el renderer y sin
+  avisar a la leyenda: el bug de la 2.4.3. El modo estirado no aseguraba estadísticas.
+- `set_unique_values_symbology` ignoraba la definition query, traía geometría y ordenaba
+  1, 10, 11, 2. Las dos simbologías vectoriales no encontraban campos de una tabla unida.
+- `list_broken_data_sources` recorría todos los data frames y `repair_data_source` solo el
+  activo: una capa rota de un data frame secundario se listaba y no se podía reparar.
+- El zoom a una capa o a su selección no reproyectaba al CRS del data frame.
+- Exports: cancelar con ESC **borraba el fichero que ya existía**; `plano.jpeg` acababa en
+  `.jpeg.jpg`; `dpi: null` reventaba y no había techo.
+- Al vencer un timeout se mataba al runner pero no a su árbol de procesos (el `Kill()` de
+  net45 deja vivo al nieto; comprobado). `runner.py` se extraía siempre al mismo fichero, y
+  dos versiones del add-in se lo pisaban.
+- `add_layer` enmascaraba el error real de una feature class con el de un ráster inexistente.
+- **Instalador:** el stderr de `claude mcp remove` tumbaba la instalación en PowerShell 5.1;
+  se anunciaba «registrado» sin mirar el código de salida; un JSON con comentarios abortaba
+  todo (o perdía los comentarios en pwsh 7); el `.bak` único se pisaba a la segunda pasada;
+  la desinstalación dejaba registro y temporales; aceptaba ArcMap 10.4, donde no carga.
+- El Python 2.7 estaba fijo a `C:\Python27\ArcGIS10.5` en tres sitios del add-in: en
+  10.6–10.8 `execute_arcpy` fallaba sin `ARCMAP_PYTHON27`. Ahora se busca por el registro.
+
+### Cambia — léelo antes de actualizar
+- **Un nombre de capa ambiguo es ERROR**, no «la primera que encuentre» (también en
+  `remove_layer`). `list_layers` da la `ruta` de grupo de cada capa (`Grupo/Capa`) y esa
+  ruta vale como identificador en cualquier tool. Dos capas homónimas en el **mismo**
+  grupo se numeran (`Parcelas#1`, `Parcelas#2`). Lo mismo con dos textos de layout
+  homónimos: `set_text_element` los lista numerados y se desempata con `grupo` o `indice`.
+  - Estos dos desempates **no estaban en el primer arreglo**: los exigió la verificación
+    adversarial, que demostró que sin ellos dos capas (o dos textos) idénticos quedaban
+    inoperables para todas las tools, `remove_layer` incluida. La misma pasada cazó que
+    una fecha ISO en `run_geoprocessing` caía en el error nuevo de «parámetro no
+    admitido» (Newtonsoft la convierte en token `Date`), y que matar el árbol de procesos
+    de un runner exige comprobar antes que el PID sigue siendo suyo (hora de arranque),
+    porque Windows los reutiliza.
+- **`save_mxd_as` ya no sobrescribe por defecto** (`sobrescribir=False`). Al regenerar una
+  serie de `.mxd` hay que pasarlo. Los export sí pisan por defecto, y lo dicen
+  (`sobrescrito`).
+- **La rampa por defecto de `set_graduated_symbology` pasa de HSV a CIE Lab**, como en
+  ráster desde el 2026-09-04. Una serie antigua reexportada saldrá con otros colores; para
+  reproducirla, `algoritmo="hsv"`.
+- Un color mal formado es error (antes caía a la rampa por defecto sin decirlo). Se admite
+  `"#RRGGBB"`.
+- `get_unique_values` corta a `max_valores` (1000) y lo dice con `truncado`;
+  `get_layer_features` exige `limite` entre 1 y 5000.
+- Las cinco ambientales no pisan una salida existente salvo `sobrescribir=true`, y lo
+  comprueban **antes** de gastar el geoproceso.
+
+### Añadido
+- `ping` dice `estado: "ocupado_tras_timeout"` cuando un comando venció su espera y sigue
+  corriendo en ArcMap, en vez de informar «libre» y encolarse detrás.
+- El log rota a los 5 MB. «Acerca de» deriva el número de herramientas del código (57).
+- `tests/test_runner_py27.py`: el runner y el auditor bajo el Python 2.7 de ArcGIS, sin
+  importar arcpy. La suite pasa de 15 a 41 tests.
+
+### Documentación
+- Fuera las 48 herramientas (son 57), el parámetro `paginas` de `export_ddp` que nunca
+  existió, los modos ADD/REMOVE de `select_by_attribute`, la «IP del otro equipo» como
+  acceso remoto y la nota de que no había bookmarks. Timeouts documentados como son.
+
 ## [2.11.0] - 2026-09-11 (SIN PUBLICAR)
 
 Instalada y verificada contra ArcMap vivo el mismo dia: 40/40 en
@@ -23,8 +197,8 @@ nombres, colores y transparencias en una sola llamada.
   renderers que ninguna tool sabe construir: valores unicos, colormap, RGB compuesto.
   `set_raster_symbology` solo clasifica o estira, y sobre un raster **categorico** —una mascara
   0/1/2, una reclasificacion, un `paletted` traido de QGIS— la clasificacion falla con `E_FAIL`
-  porque no hay histograma que cortar. Caso que lo destapo: las seis cuencas visuales del
-  ID2026_035 (2026-09-11), que hubo que aplicar rodeando el add-in por
+  porque no hay histograma que cortar. Caso que lo destapo: las seis cuencas visuales de un
+  estudio paisajistico (2026-09-11), que hubo que aplicar rodeando el add-in por
   `run_geoprocessing("management.ApplySymbologyFromLayer")`.
   - El renderer se **clona y se reencaja** en el raster de destino (`Raster` + `Update()`): un
     `IRasterRenderer` lleva dentro el raster sobre el que se construyo, y sin eso el clon

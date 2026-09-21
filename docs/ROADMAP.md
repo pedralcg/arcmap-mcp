@@ -7,9 +7,11 @@
 
 Estable. La arquitectura actual —add-in .NET dentro de ArcMap (ArcObjects nativo +
 runner arcpy out-of-process) y servidor FastMCP en Python 3— está validada end-to-end
-en ArcMap 10.5, y las **48 herramientas** están probadas por llamada cableada real,
-incluido el análisis ambiental (índices espectrales, hidrología, curvas, perfiles 3D
-y ruta de mínimo coste) y series de planos reales de decenas de páginas.
+en ArcMap 10.5, con **57 herramientas** que incluyen el análisis ambiental (índices
+espectrales, hidrología, curvas, perfiles 3D y ruta de mínimo coste) y series de planos
+reales de decenas de páginas. La regresión en sesión viva cubre unas **34** de ellas con
+105 comprobaciones; el resto se ha ejercitado a mano, no automáticamente, y ahí es donde
+toca seguir ampliando cobertura.
 
 El servidor es registrable en cinco clientes IA (Claude Code, Claude Desktop, Gemini
 CLI, Antigravity, OpenCode).
@@ -18,12 +20,15 @@ CLI, Antigravity, OpenCode).
 
 - **LiDAR**: importar LAS, construir TIN y derivar MDT/MDS y CHM. Se añadirá como
   tools `lidar_*` cuando un flujo concreto lo justifique.
-- **Arranque automático** del puente al abrir ArcMap (hoy es un clic en el botón *Iniciar*).
-- **Marcadores espaciales (bookmarks)**: posible vía ArcObjects; se añadirá si el
-  caso de uso se repite.
 - **Cobertura de pruebas**: ampliar la batería conforme se añadan herramientas;
-  validar el acceso a ArcMap en otra máquina (vía túnel/VPN).
-- **Documentación**: guía rápida "primer plano en 5 pasos" y capturas del add-in.
+  validar el acceso a ArcMap en otra máquina (vía túnel SSH/Tailscale al loopback).
+- **Documentación**: capturas del add-in.
+
+Ya hechas (estaban aquí y conviene no volver a proponerlas): el **arranque
+automático** del puente (desplegable *Autoarranque* de la barra, preferencia por
+usuario en `HKCU\Software\pedralcg\arcmap-mcp`), los **marcadores espaciales**
+(`get_bookmarks`, `add_bookmark`, `remove_bookmark`, `goto_bookmark`) y la guía
+rápida *"tu primer plano en 5 pasos"* del README.
 
 ## Limitaciones por diseño
 
