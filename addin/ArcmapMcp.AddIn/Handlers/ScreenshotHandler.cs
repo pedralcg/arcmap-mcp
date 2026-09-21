@@ -25,8 +25,11 @@ namespace ArcmapMcp.AddIn.Handlers
         public static JObject Run(JObject parameters)
         {
             string modo = ((string)parameters["modo"] ?? "vista").ToLowerInvariant();
-            int dpi = parameters["dpi"] != null ? (int)parameters["dpi"] : 96;
-            if (dpi < 24) dpi = 24;
+            // Con `(int)parameters["dpi"]` un JSON null reventaba con una
+            // InvalidCastException cruda. El techo es más bajo que en los export a
+            // propósito: esta imagen vuelve en base64 dentro de la respuesta JSON, y
+            // por encima de 300 dpi son decenas de MB de texto por captura.
+            int dpi = Parametros.LeerEntero(parameters["dpi"], "dpi", 96, 24, 300);
 
             IApplication app = ArcSession.App();
             IMxDocument doc = ArcSession.Doc(app);
