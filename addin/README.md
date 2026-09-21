@@ -21,8 +21,12 @@ Reglas de diseño:
    — es la única vía segura hacia ArcObjects desde el thread del socket.
 2. Una petición en vuelo (`SemaphoreSlim(1,1)`); si está ocupado → `busy` inmediato,
    sin encolar.
-3. Timeout por tipo de comando (60 s estándar, 1800 s geoprocesos/exports); el timeout
-   responde error sin matar el listener.
+3. Timeout por tipo de comando: 60 s estándar, 600 s guardar el documento, 1800 s
+   geoprocesos nativos y exports, y un techo de 2700 s para los handlers de fondo (que
+   por dentro llevan sus propios topes de subproceso). El timeout responde error sin
+   matar el listener. El relay Python espera SIEMPRE un poco más que el add-in en cada
+   grupo, para que gane el error con diagnóstico y no el corte mudo de socket; un test
+   (`TestNoEmpatarConElAddIn`) lee estos números del `.cs` y falla si alguien los empata.
 4. `try/catch` en cada handler: ninguna excepción escapa al message pump de ArcMap.
 5. Log a fichero (`C:\MCP_Logs\arcmap-mcp.log`) — sin Visual Studio, el log es el
    debugger.
@@ -40,7 +44,8 @@ addin/
 │   ├── McpExtension.cs       ← arranque/parada, captura del Dispatcher
 │   ├── McpServer.cs          ← TcpListener + dispatch de comandos
 │   ├── StaDispatcher.cs      ← InvokeAsync con timeout hacia el hilo STA
-│   ├── Buttons.cs            ← barra: Iniciar / Detener / Estado / Acerca de
+│   ├── Buttons.cs            ← barra (6 controles): Iniciar · Detener · Estado ·
+│   │                            Autoarranque (desplegable) · Reportar · Acerca de
 │   ├── Handlers/             ← implementación de los comandos (ArcObjects + runner)
 │   ├── Python/runner.py      ← runner arcpy out-of-process (recurso embebido)
 │   └── Images/               ← iconos de la barra
@@ -64,8 +69,15 @@ addin/
 
 - **Editar la DLL exige reiniciar ArcMap**: el add-in se carga al arrancar y la DLL
   queda bloqueada (instala siempre con ArcMap cerrado).
-- **Una sola instancia de ArcMap** durante el desarrollo: con dos abiertas, la segunda
-  arranca sin el add-in en silencio (la primera bloquea la DLL del AssemblyCache).
+- **Una sola instancia de ArcMap** durante el desarrollo. No porque la segunda se
+  quede sin add-in —se carga en todas—, sino porque el **puerto es único**: lo agarra
+  el primer ArcMap donde se pulse *Iniciar*, y en el resto `Start()` falla al bindear.
+  `McpExtension.OnStartup` lo trata como caso normal (lo registra en el log y deja
+  seguir trabajando), así que el síntoma es sutil: crees estar hablando con la ventana
+  que tienes delante y estás hablando con la otra. Para dos puentes simultáneos,
+  `ARCMAP_BRIDGE_PORT` distinto en cada proceso (leída del entorno al arrancar).
+  Ojo aparte: ArcMap instancia la extensión **varias veces por arranque** (3-4), por
+  eso el servidor vive en un campo **estático** con guard de instancia única.
 - El protocolo con el servidor es un sobre JSON: éxito `{ok, result}`, error
   `{ok:false, error, traceback}` — un JSON por conexión TCP.
 - Probar cada comando **por llamada MCP real** (no solo lógica aislada): los bugs

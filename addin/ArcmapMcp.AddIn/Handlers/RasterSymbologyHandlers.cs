@@ -68,8 +68,28 @@ namespace ArcmapMcp.AddIn.Handlers
                 throw new ArgumentException("La capa ráster '" + capa
                     + "' no tiene datos accesibles (¿fuente rota?). Revisa con list_broken_data_sources.");
 
-            IColor desde = LeerColor(parameters["color_desde"], 255, 255, 178);
-            IColor hasta = LeerColor(parameters["color_hasta"], 189, 0, 38);
+            IColor desde = Parametros.LeerColor(parameters["color_desde"], "color_desde", 255, 255, 178);
+            IColor hasta = Parametros.LeerColor(parameters["color_hasta"], "color_hasta", 189, 0, 38);
+
+            // La opacidad de un ráster temático no es decoración: es lo que deja
+            // ver la ortofoto debajo, y en QGIS viaja con el estilo. Aquí es un
+            // parámetro de cualquier modo, no solo del de valores únicos.
+            //
+            // Se valida ANTES de tocar el renderer, y ese orden es el arreglo del
+            // bug de la v2.4.3: con la validación al final, un valor fuera de rango
+            // dejaba el renderer ya cambiado, devolvía error y NO llegaba a
+            // ContentsChanged, así que la leyenda exportaba el estado viejo sobre un
+            // mapa ya repintado. Un parámetro inválido no debe dejar la sesión a
+            // medio aplicar.
+            int? transparencia = null;
+            JToken transp = parameters["transparencia"];
+            if (transp != null && transp.Type != JTokenType.Null)
+            {
+                transparencia = Parametros.LeerEntero(transp, "transparencia", 0, 0, 100);
+                ILayerEffects efectosPrevios = rl as ILayerEffects;
+                if (efectosPrevios == null || !efectosPrevios.SupportsTransparency)
+                    throw new ArgumentException("La capa '" + capa + "' no admite transparencia.");
+            }
 
             JObject detalle;
             if (modo == "clasificado")
@@ -79,20 +99,10 @@ namespace ArcmapMcp.AddIn.Handlers
             else
                 detalle = AplicarEstirado(rl, raster, desde, hasta, LeerAlgoritmo(parameters["algoritmo"]));
 
-            // La opacidad de un ráster temático no es decoración: es lo que deja
-            // ver la ortofoto debajo, y en QGIS viaja con el estilo. Aquí es un
-            // parámetro de cualquier modo, no solo del de valores únicos.
-            JToken transp = parameters["transparencia"];
-            if (transp != null && transp.Type != JTokenType.Null)
+            if (transparencia.HasValue)
             {
-                int pct = LeerInt(transp, 0);
-                if (pct < 0 || pct > 100)
-                    throw new ArgumentException("'transparencia' debe ir de 0 a 100 (porcentaje). Recibido: " + pct);
-                ILayerEffects efectos = rl as ILayerEffects;
-                if (efectos == null || !efectos.SupportsTransparency)
-                    throw new ArgumentException("La capa '" + capa + "' no admite transparencia.");
-                efectos.Transparency = (short)pct;
-                detalle["transparencia"] = pct;
+                ((ILayerEffects)rl).Transparency = (short)transparencia.Value;
+                detalle["transparencia"] = transparencia.Value;
             }
 
             MapHandlers.NotificarCambioContenido(map, doc);
@@ -105,9 +115,7 @@ namespace ArcmapMcp.AddIn.Handlers
         private static JObject AplicarClasificado(IRasterLayer rl, IRaster raster,
             JObject parameters, IColor desde, IColor hasta)
         {
-            int numClases = LeerInt(parameters["num_clases"], 5);
-            if (numClases < 2 || numClases > 32)
-                throw new ArgumentException("'num_clases' debe estar entre 2 y 32.");
+            int numClases = Parametros.LeerEntero(parameters["num_clases"], "num_clases", 5, 2, 32);
 
             // Sin estadísticas no hay clasificación posible: el renderer necesita
             // saber mínimo, máximo e histograma. Muchos .tif llegan sin ellas (los
@@ -347,6 +355,11 @@ namespace ArcmapMcp.AddIn.Handlers
         private static JObject AplicarEstirado(IRasterLayer rl, IRaster raster,
             IColor desde, IColor hasta, esriColorRampAlgorithm algoritmo)
         {
+            // Mismas estadísticas que el clasificado: el propio error de más abajo
+            // dice "suele ser que el ráster no tiene estadísticas calculadas", así
+            // que calcularlas aquí y no mandar al usuario a hacerlo a mano.
+            AsegurarEstadisticas(raster);
+
             IRasterStretchColorRampRenderer estirado = new RasterStretchColorRampRendererClass();
             IRasterRenderer render = (IRasterRenderer)estirado;
 
@@ -429,7 +442,7 @@ namespace ArcmapMcp.AddIn.Handlers
         /// anomalías, FCC, P95, pendientes). Se deja HSV alcanzable por si alguien
         /// lo quiere a propósito, pero deja de ser el comportamiento por defecto.
         /// </summary>
-        private static esriColorRampAlgorithm LeerAlgoritmo(JToken t)
+        internal static esriColorRampAlgorithm LeerAlgoritmo(JToken t)
         {
             string nombre = ((string)t ?? "cielab").ToLowerInvariant().Replace(" ", "");
             switch (nombre)
@@ -450,9 +463,21 @@ namespace ArcmapMcp.AddIn.Handlers
             }
         }
 
-        private static IColor[] ConstruirRampa(IColor desde, IColor hasta, int n,
+        /// <summary>N colores interpolados entre dos extremos. Compartido con la
+        /// simbología vectorial (graduada y categórica), que hasta ahora construía
+        /// su propia rampa en HSV y además IGNORABA el `ok` de CreateRamp: con unos
+        /// colores que la rampa no admite salía una leyenda entera del color final
+        /// sin decir una palabra.</summary>
+        internal static IColor[] ConstruirRampa(IColor desde, IColor hasta, int n,
             esriColorRampAlgorithm algoritmo)
         {
+            if (n <= 0)
+                return new IColor[0];
+            // Una sola clase no es una rampa: CreateRamp con Size=1 no es fiable y
+            // el color que corresponde es el del extremo final.
+            if (n == 1)
+                return new[] { hasta };
+
             IAlgorithmicColorRamp rampa = new AlgorithmicColorRampClass
             {
                 Algorithm = algoritmo,
@@ -488,7 +513,7 @@ namespace ArcmapMcp.AddIn.Handlers
                     + "tantos como clases, o no darlo y usar la rampa.");
             var salida = new IColor[nClases];
             for (int i = 0; i < nClases; i++)
-                salida[i] = LeerColor(arr[i], 128, 128, 128);
+                salida[i] = Parametros.LeerColor(arr[i], "colores[" + i + "]", 128, 128, 128);
             return salida;
         }
 
@@ -518,24 +543,5 @@ namespace ArcmapMcp.AddIn.Handlers
                 CultureInfo.InvariantCulture);
         }
 
-        private static IColor LeerColor(JToken t, int rDef, int gDef, int bDef)
-        {
-            int r = rDef, g = gDef, b = bDef;
-            JArray arr = t as JArray;
-            if (arr != null && arr.Count >= 3)
-            {
-                r = (int)arr[0];
-                g = (int)arr[1];
-                b = (int)arr[2];
-            }
-            if (r < 0 || r > 255 || g < 0 || g > 255 || b < 0 || b > 255)
-                throw new ArgumentException("Los colores van como [R, G, B] con valores 0-255.");
-            return new RgbColorClass { Red = r, Green = g, Blue = b };
-        }
-
-        private static int LeerInt(JToken t, int porDefecto)
-        {
-            return t == null || t.Type == JTokenType.Null ? porDefecto : (int)t;
-        }
     }
 }

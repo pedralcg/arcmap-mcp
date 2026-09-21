@@ -95,11 +95,21 @@ namespace ArcmapMcp.AddIn.Handlers
             if (!File.Exists(fuente))
                 throw new ArgumentException("No existe el archivo .lyr: " + fuente);
             ILayerFile lf = new LayerFileClass();
-            lf.Open(fuente);
-            ILayer capa = lf.Layer;
+            ILayer capa;
+            try
+            {
+                lf.Open(fuente);
+                capa = lf.Layer;
+            }
+            finally
+            {
+                // En finally, no tras el Open: si Open lanzaba (fichero de otra
+                // versión, corrupto), el .lyr se quedaba bloqueado en disco el resto
+                // de la sesión de ArcMap.
+                try { lf.Close(); } catch { }
+            }
             if (capa == null)
                 throw new ArgumentException("El .lyr no contiene ninguna capa: " + fuente);
-            try { lf.Close(); } catch { }
             return capa;
         }
 
@@ -148,9 +158,11 @@ namespace ArcmapMcp.AddIn.Handlers
 
             JObject detalle;
             ILayerFile lf = new LayerFileClass();
-            lf.Open(lyrFile);
             try
             {
+                // El Open va DENTRO del try: si lanza, el finally cierra igualmente
+                // y el .lyr no se queda bloqueado.
+                lf.Open(lyrFile);
                 detalle = destino != null
                     ? AplicarAEntidades(destino, lf.Layer, lyrFile)
                     : AplicarARaster(destinoRaster, lf.Layer, lyrFile);
@@ -266,9 +278,7 @@ namespace ArcmapMcp.AddIn.Handlers
             if (string.IsNullOrEmpty(capa) || string.IsNullOrEmpty(campo))
                 throw new ArgumentException("Indica 'capa' (nombre en la TOC) y 'campo' (campo numérico a graduar).");
 
-            int numClases = LeerInt(parameters["num_clases"], 5);
-            if (numClases < 2 || numClases > 32)
-                throw new ArgumentException("'num_clases' debe estar entre 2 y 32.");
+            int numClases = Parametros.LeerEntero(parameters["num_clases"], "num_clases", 5, 2, 32);
             string metodo = ((string)parameters["metodo"] ?? "natural_breaks").ToLowerInvariant();
 
             IMxDocument doc;
@@ -281,10 +291,16 @@ namespace ArcmapMcp.AddIn.Handlers
             if (fc == null)
                 throw new ArgumentException("La capa no tiene fuente de datos accesible (¿rota?): " + capa);
 
-            int idxCampo = fc.FindField(campo);
+            // El campo se busca en la DISPLAY TABLE, no en la feature class: los
+            // campos de un join existen en la capa (y list_fields los ofrece) pero no
+            // en la clase base, así que graduar por uno daba "Campo no encontrado".
+            // Sin joins, la display table ES la feature class y no cambia nada.
+            IFields camposCapa = QueryHandlers.CamposDeCapa(gfl);
+            int idxCampo = camposCapa.FindField(campo);
             if (idxCampo < 0)
-                throw new ArgumentException("Campo no encontrado en la capa '" + capa + "': " + campo);
-            IField f = fc.Fields.get_Field(idxCampo);
+                throw new ArgumentException("Campo no encontrado en la capa '" + capa + "': " + campo
+                    + ". Disponibles: " + NombresDeCampos(camposCapa));
+            IField f = camposCapa.get_Field(idxCampo);
             if (!EsCampoNumerico(f.Type))
                 throw new ArgumentException("El campo '" + campo + "' no es numérico (es "
                     + DataAccess.NombreTipoCampo(f.Type) + "); la simbología graduada necesita un campo numérico.");
@@ -294,7 +310,7 @@ namespace ArcmapMcp.AddIn.Handlers
             // sin arrastrar el tipo IHistogram, que vive en otro ensamblado no referenciado.
             BasicTableHistogramClass tableHist = new BasicTableHistogramClass();
             tableHist.Field = campo;
-            tableHist.Table = (ITable)fc;
+            tableHist.Table = QueryHandlers.TablaDeCapa(gfl);
             object dataValues, dataFreq;
             tableHist.GetHistogram(out dataValues, out dataFreq);
 
@@ -315,20 +331,18 @@ namespace ArcmapMcp.AddIn.Handlers
                     + numClases + " clases (valores todos iguales o insuficientes).");
             int n = cortes.Length - 1; // el clasificador puede reducir el número real de clases
 
-            // Rampa de color: por defecto amarillo claro → rojo oscuro (secuencial).
-            IColor desde = LeerColor(parameters["color_desde"], 255, 255, 178);
-            IColor hasta = LeerColor(parameters["color_hasta"], 189, 0, 38);
-            IAlgorithmicColorRamp rampa = new AlgorithmicColorRampClass
-            {
-                Algorithm = esriColorRampAlgorithm.esriHSVAlgorithm,
-                FromColor = desde,
-                ToColor = hasta,
-                Size = n
-            };
-            bool rampaOk;
-            rampa.CreateRamp(out rampaOk);
-            IEnumColors colores = rampa.Colors;
-            colores.Reset();
+            // Rampa de color: por defecto amarillo claro → rojo oscuro (secuencial),
+            // interpolada en CIE Lab y NO en HSV. Medido el 2026-09-04 sobre el
+            // ráster (ver RasterSymbologyHandlers.LeerAlgoritmo): HSV interpola el
+            // TONO dando la vuelta a la rueda de color y devuelve un arcoíris del
+            // que no se lee ningún orden — justo lo contrario de lo que pide una
+            // simbología graduada. Se construye con el MISMO helper que el ráster,
+            // que además lanza si CreateRamp falla en vez de seguir con una leyenda
+            // entera del mismo color.
+            IColor desde = Parametros.LeerColor(parameters["color_desde"], "color_desde", 255, 255, 178);
+            IColor hasta = Parametros.LeerColor(parameters["color_hasta"], "color_hasta", 189, 0, 38);
+            IColor[] paleta = RasterSymbologyHandlers.ConstruirRampa(desde, hasta, n,
+                RasterSymbologyHandlers.LeerAlgoritmo(parameters["algoritmo"]));
 
             esriGeometryType shp = fc.ShapeType;
             double tam = LeerDouble(parameters["tamano"],
@@ -345,8 +359,7 @@ namespace ArcmapMcp.AddIn.Handlers
             for (int i = 0; i < n; i++)
             {
                 render.set_Break(i, cortes[i + 1]);
-                IColor col = colores.Next() ?? hasta;
-                render.set_Symbol(i, SimboloGraduado(shp, col, tam));
+                render.set_Symbol(i, SimboloGraduado(shp, paleta[i], tam));
                 render.set_Label(i, EtiquetaClase(cortes[i], cortes[i + 1]));
             }
 
@@ -428,27 +441,12 @@ namespace ArcmapMcp.AddIn.Handlers
             return new RgbColorClass { Red = 130, Green = 130, Blue = 130 };
         }
 
-        private static IColor LeerColor(JToken t, int rDef, int gDef, int bDef)
+        private static string NombresDeCampos(IFields campos)
         {
-            int r = rDef, g = gDef, b = bDef;
-            JArray arr = t as JArray;
-            if (arr != null && arr.Count >= 3)
-            {
-                r = ClampByte((int)arr[0]);
-                g = ClampByte((int)arr[1]);
-                b = ClampByte((int)arr[2]);
-            }
-            return new RgbColorClass { Red = r, Green = g, Blue = b };
-        }
-
-        private static int ClampByte(int v)
-        {
-            return v < 0 ? 0 : (v > 255 ? 255 : v);
-        }
-
-        private static int LeerInt(JToken t, int porDefecto)
-        {
-            return t != null && t.Type != JTokenType.Null ? (int)t : porDefecto;
+            var nombres = new System.Collections.Generic.List<string>();
+            for (int i = 0; i < campos.FieldCount; i++)
+                nombres.Add(campos.get_Field(i).Name);
+            return string.Join(", ", nombres);
         }
 
         private static double LeerDouble(JToken t, double porDefecto)

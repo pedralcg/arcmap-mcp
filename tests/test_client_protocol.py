@@ -18,22 +18,30 @@ una hipótesis:
     (screenshots en base64).
   - Cierre sin datos y respuesta no-JSON: devolvían excepción en vez de un error
     con forma de resultado.
+  - Presupuestos de espera: media docena de tools largas usaban el timeout corto de
+    60 s y el relay cortaba con un "puente ocupado" falso mientras el export seguía.
 
-Lo que NO se prueba aquí, a propósito: las 49 tools. Todas delegan en
-`ArcMapClient.send` sin lógica propia, así que probarlas exigiría ArcMap vivo y no
-añadiría cobertura sobre el protocolo. Eso es trabajo de una suite end-to-end
-aparte, con un MXD fijo de pruebas.
+Lo que NO se prueba aquí, a propósito: el comportamiento de las 49 tools. Todas
+delegan en `ArcMapClient.send` sin lógica propia, así que probarlas exigiría ArcMap
+vivo y no añadiría cobertura sobre el protocolo. Lo que SÍ se prueba de ellas es el
+timeout que le pasan a `send`, que es una decisión del servidor y se comprueba con un
+cliente espía. El resto es trabajo de una suite end-to-end aparte, con un MXD fijo.
 """
 import json
 import os
+import re
 import socket
 import sys
 import threading
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
+import arcmap_mcp_server as servidor  # noqa: E402
 from arcmap_mcp_server import ArcMapClient  # noqa: E402
+
+RAIZ = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 
 
 class PuenteFalso(object):
@@ -150,6 +158,270 @@ class TestPuenteOcupado(unittest.TestCase):
         cli = ArcMapClient(host="127.0.0.1", port=srv.port, timeout=1)
         r = cli.send("run_geoprocessing")
         self.assertIn("SIGUE CORRIENDO", r["error"])
+
+    def test_manda_a_ping_y_no_al_hilo_principal(self):
+        """El mensaje describía el puente Python viejo: decía que ArcMap atiende el
+        socket en su hilo principal (hoy el listener va en un hilo de fondo y `ping`
+        contesta igual). Quien lo leyera daba por colgado lo que solo estaba ocupado."""
+        srv = PuenteFalso("colgado")
+        self.addCleanup(srv.cerrar)
+
+        cli = ArcMapClient(host="127.0.0.1", port=srv.port, timeout=1)
+        r = cli.send("export_ddp")
+
+        self.assertIn("ping", r["error"])
+        self.assertIn("comando_en_curso", r["error"])
+        self.assertIn("ocupado_desde_s", r["error"])
+        self.assertNotIn("hilo principal", r["error"])
+
+    def _ocupado(self, ctype, variable=None):
+        """Un puente colgado NUEVO por llamada: `PuenteFalso` atiende una sola vez.
+
+        El presupuesto que se pasa es el mismo `_Espera` de las tools pero de 1 s:
+        aquí se comprueba el NOMBRE que viaja pegado al valor, no cuánto se espera
+        (con los 2760 s de verdad el puente falso cerraría antes y daría otro error).
+        """
+        srv = PuenteFalso("colgado")
+        self.addCleanup(srv.cerrar)
+        cli = ArcMapClient(host="127.0.0.1", port=srv.port, timeout=1)
+        if variable is None:
+            return cli.send(ctype)
+        with unittest.mock.patch.dict(os.environ, {variable: "1"}):
+            presupuesto = servidor._Espera(variable, 1)
+        return cli.send(ctype, timeout=presupuesto)
+
+    def test_nombra_la_variable_de_fondo_y_no_la_de_gp(self):
+        """Decía siempre ARCMAP_GP_TIMEOUT, que no gobierna ni los exports ni las DDP:
+        mandaba a subir un número que no iba a cambiar nada."""
+        r = self._ocupado("export_ddp", "ARCMAP_FONDO_TIMEOUT")
+        self.assertEqual(r["estado"], "puente_ocupado")
+        self.assertIn("ARCMAP_FONDO_TIMEOUT", r["error"])
+        self.assertNotIn("ARCMAP_GP_TIMEOUT", r["error"])
+
+    def test_nombra_la_variable_de_guardado(self):
+        r = self._ocupado("save_mxd", "ARCMAP_SAVE_TIMEOUT")
+        self.assertIn("ARCMAP_SAVE_TIMEOUT", r["error"])
+
+    def test_sin_presupuesto_propio_nombra_el_del_cliente(self):
+        r = self._ocupado("list_layers")
+        self.assertIn("ARCMAP_BRIDGE_TIMEOUT", r["error"])
+
+
+class ClienteEspia(object):
+    """Cliente de mentira que apunta con qué se le llama y no habla con nadie."""
+
+    def __init__(self):
+        self.llamadas = []
+
+    def send(self, ctype, params=None, timeout=None):
+        self.llamadas.append({"ctype": ctype, "params": params or {}, "timeout": timeout})
+        return {"ok": True}
+
+
+class TestPresupuestosDeEspera(unittest.TestCase):
+    """Qué presupuesto de espera pasa cada tool.
+
+    El defecto real: `export_pdf`, `export_jpg`, `export_view_png` y las tres de DDP
+    se quedaban con el timeout corto (60 s) mientras el add-in les daba 1800 s. El
+    relay cortaba a los 60 s con un "puente ocupado" que era mentira —el export
+    seguía— y el usuario relanzaba encima.
+    """
+
+    # tool -> (argumentos, variable de entorno que debe gobernar su espera)
+    ESPERADOS = {
+        "export_pdf":          (("x.pdf",), "ARCMAP_GP_TIMEOUT"),
+        "export_jpg":          (("x.jpg",), "ARCMAP_GP_TIMEOUT"),
+        "export_view_png":     (("x.png",), "ARCMAP_GP_TIMEOUT"),
+        "run_geoprocessing":   (("management.CopyFeatures",), "ARCMAP_GP_TIMEOUT"),
+        "calculate_geometry":  (("capa", "AREA"), "ARCMAP_GP_TIMEOUT"),
+        "list_ddp":            ((), "ARCMAP_FONDO_TIMEOUT"),
+        "export_ddp":          (("x.pdf",), "ARCMAP_FONDO_TIMEOUT"),
+        "goto_ddp_page":       ((1,), "ARCMAP_FONDO_TIMEOUT"),
+        "raster_index":        (("NDVI", {"NIR": "a", "RED": "b"}, "o.tif"),
+                                "ARCMAP_FONDO_TIMEOUT"),
+        "hydrology":           (("inundacion", {"mdt": "m", "nivel": 1, "salida": "s"}),
+                                "ARCMAP_FONDO_TIMEOUT"),
+        "contours":            (("m.tif", "s.shp", 10), "ARCMAP_FONDO_TIMEOUT"),
+        "topographic_profile": (("m.tif", "l.shp", "o.shp"), "ARCMAP_FONDO_TIMEOUT"),
+        "least_cost_path":     (("c.tif", "o.shp", "d.shp", "s.tif"),
+                                "ARCMAP_FONDO_TIMEOUT"),
+        "save_mxd":            ((), "ARCMAP_SAVE_TIMEOUT"),
+        "save_mxd_as":         (("x.mxd",), "ARCMAP_SAVE_TIMEOUT"),
+        "execute_arcpy":       (("RESULT = 1",), "ARCMAP_EXEC_TIMEOUT_CLIENTE"),
+    }
+
+    # Contraste: éstas son instantáneas y tienen que seguir con el timeout corto.
+    # Sin este lado, "subir todos los timeouts" pasaría la otra mitad del test.
+    RAPIDAS = {"ping": (), "list_layers": (), "set_scale": (1000,),
+               "refresh": (), "get_bookmarks": ()}
+
+    def setUp(self):
+        self.espia = ClienteEspia()
+        self.original = servidor._client
+        servidor._client = self.espia
+        self.addCleanup(setattr, servidor, "_client", self.original)
+
+    def _llamar(self, tool, args, **kwargs):
+        getattr(servidor, tool)(*args, **kwargs)
+        return self.espia.llamadas[-1]
+
+    def _timeout_de(self, tool, args):
+        return self._llamar(tool, args)["timeout"]
+
+    def test_cada_tool_larga_pasa_su_presupuesto(self):
+        for tool, (args, variable) in sorted(self.ESPERADOS.items()):
+            timeout = self._timeout_de(tool, args)
+            self.assertIsNotNone(timeout, "%s no pasa timeout: se queda con los 60 s "
+                                          "del cliente" % tool)
+            self.assertEqual(getattr(timeout, "variable", None), variable,
+                             "%s espera segun %s, no segun %s"
+                             % (tool, getattr(timeout, "variable", "?"), variable))
+
+    def test_las_rapidas_siguen_con_el_timeout_corto(self):
+        for tool, args in sorted(self.RAPIDAS.items()):
+            self.assertIsNone(self._timeout_de(tool, args),
+                              "%s no necesita timeout largo" % tool)
+
+    def test_las_ambientales_reenvian_sobrescribir(self):
+        """Si el server no lo reenvía, el runner nunca ve el parámetro y la tool
+        acepta `sobrescribir=true` sin que sirva de nada."""
+        ambientales = {
+            "raster_index": ("NDVI", {"NIR": "a", "RED": "b"}, "o.tif"),
+            "hydrology": ("inundacion", {"mdt": "m", "nivel": 1, "salida": "s"}),
+            "contours": ("m.tif", "s.shp", 10),
+            "topographic_profile": ("m.tif", "l.shp", "o.shp"),
+            "least_cost_path": ("c.tif", "o.shp", "d.shp", "s.tif"),
+        }
+        for tool, args in sorted(ambientales.items()):
+            pedido = self._llamar(tool, args, sobrescribir=True)
+            self.assertEqual(pedido["ctype"], tool)
+            self.assertIs(pedido["params"].get("sobrescribir"), True,
+                          "%s no reenvía sobrescribir" % tool)
+            defecto = self._llamar(tool, args)
+            self.assertIs(defecto["params"].get("sobrescribir"), False,
+                          "%s no manda sobrescribir=False por defecto" % tool)
+
+    def test_los_export_pisan_por_defecto_y_save_mxd_as_no(self):
+        """Los defectos van al revés a propósito: un PDF pisado se regenera (y una
+        serie de planos lo necesita), un .mxd pisado es trabajo de alguien."""
+        for tool in ("export_pdf", "export_jpg", "export_view_png"):
+            self.assertIs(self._llamar(tool, ("C:/o.x",))["params"]["sobrescribir"], True, tool)
+            self.assertIs(self._llamar(tool, ("C:/o.x",), sobrescribir=False)
+                          ["params"]["sobrescribir"], False, tool)
+        self.assertIs(self._llamar("save_mxd_as", ("C:/o.mxd",))["params"]["sobrescribir"], False)
+        self.assertIs(self._llamar("save_mxd_as", ("C:/o.mxd",), sobrescribir=True)
+                      ["params"]["sobrescribir"], True)
+
+    def test_parametros_nuevos_del_addin_llegan_al_puente(self):
+        """Un parámetro que el add-in entiende y el relay no reenvía es un parámetro
+        que no existe: la tool lo acepta y no pasa nada."""
+        p = self._llamar("get_unique_values", ("capa", "campo"), max_valores=7)["params"]
+        self.assertEqual(p["max_valores"], 7)
+        p = self._llamar("set_graduated_symbology", ("capa", "campo"),
+                         algoritmo="hsv", color_desde="#FFFFB2")["params"]
+        self.assertEqual((p["algoritmo"], p["color_desde"]), ("hsv", "#FFFFB2"))
+        p = self._llamar("set_unique_values_symbology", ("capa", "campo"),
+                         algoritmo="lablch")["params"]
+        self.assertEqual(p["algoritmo"], "lablch")
+        p = self._llamar("repair_data_source", ("capa", "a", "b"), data_frame="Detalle")["params"]
+        self.assertEqual(p["data_frame"], "Detalle")
+        # Sin indicarlos NO viajan: el add-in aplica su propio defecto.
+        p = self._llamar("set_graduated_symbology", ("capa", "campo"))["params"]
+        self.assertNotIn("algoritmo", p)
+        self.assertNotIn("data_frame",
+                         self._llamar("repair_data_source", ("capa", "a", "b"))["params"])
+
+    def test_serializar_sesion_tiene_su_propio_presupuesto(self):
+        """Con serializar_sesion el add-in gasta hasta 600 s copiando ANTES de sus
+        900 s de ejecución: con los 930 de siempre ganaba el corte mudo de socket."""
+        normal = self._llamar("execute_arcpy", ("RESULT = 1",))["timeout"]
+        sesion = self._llamar("execute_arcpy", ("RESULT = 1",), serializar_sesion=True)["timeout"]
+        self.assertEqual(normal.variable, "ARCMAP_EXEC_TIMEOUT_CLIENTE")
+        self.assertEqual(sesion.variable, "ARCMAP_EXEC_SESION_TIMEOUT_CLIENTE")
+        self.assertGreater(sesion, 600 + 900)
+
+
+class TestNoEmpatarConElAddIn(unittest.TestCase):
+    """El invariante del que salen todos los números de arriba.
+
+    Cuando los dos topes EMPATAN gana el corte mudo del socket: el add-in se queda
+    sin devolver su error con fase y el trabajo queda huérfano dentro de ArcMap.
+    Por eso cada presupuesto del relay va ESTRICTAMENTE por encima del tope que el
+    add-in aplica al mismo comando. Se lee del .cs para que el día que alguien mueva
+    el tope de allí, esto lo diga aquí.
+    """
+
+    CS = os.path.join(RAIZ, "addin", "ArcmapMcp.AddIn")
+
+    def _segundos(self, fichero, patron):
+        ruta = os.path.join(self.CS, fichero)
+        if not os.path.isfile(ruta):
+            self.skipTest("sin fuentes del add-in en esta copia: %s" % ruta)
+        with open(ruta, encoding="utf-8") as fh:
+            m = re.search(patron, fh.read())
+        self.assertIsNotNone(
+            m, "no se encontró '%s' en %s: si el tope del add-in cambió de nombre, "
+               "revisa a mano que los timeouts del relay siguen por encima"
+               % (patron, fichero))
+        return int(m.group(1))
+
+    def test_gp_por_encima_del_tope_de_comandos_largos(self):
+        tope = self._segundos("McpServer.cs",
+                              r"LongHandlerTimeout\s*=\s*TimeSpan\.FromSeconds\((\d+)\)")
+        self.assertGreater(int(servidor.GP_TIMEOUT), tope)
+
+    def test_fondo_por_encima_del_techo_de_handlers_de_fondo(self):
+        tope = self._segundos("McpServer.cs",
+                              r"FondoTimeout\s*=\s*TimeSpan\.FromSeconds\((\d+)\)")
+        self.assertGreater(int(servidor.FONDO_TIMEOUT), tope)
+
+    def test_guardado_por_encima_del_tope_de_guardado(self):
+        tope = self._segundos("McpServer.cs",
+                              r"GuardadoTimeout\s*=\s*TimeSpan\.FromSeconds\((\d+)\)")
+        self.assertGreater(int(servidor.SAVE_TIMEOUT), tope)
+
+    def test_exec_por_encima_del_tope_de_execute(self):
+        tope = self._segundos(os.path.join("Handlers", "PythonHandlers.cs"),
+                              r'ExecuteTimeout\s*=\s*LeerTimeout\("ARCMAP_EXEC_TIMEOUT",\s*(\d+)\)')
+        self.assertGreater(int(servidor.EXEC_TIMEOUT), tope)
+
+
+class TestAuditFolderValida(unittest.TestCase):
+    """Números absurdos que no fallaban: MENTÍAN.
+
+    `max_documentos=0` devolvía una auditoría vacía con cara de completa; en negativo,
+    `encontrados[:-5]` recorta los ÚLTIMOS cinco y el aviso dice "los -5 primeros"; y
+    `timeout_por_documento=0` hace que subprocess corte al instante y todos los
+    documentos salgan marcados como colgados.
+    """
+
+    def test_max_documentos_cero(self):
+        r = servidor.audit_folder(RAIZ, con_capas=False, max_documentos=0)
+        self.assertFalse(r["ok"])
+        self.assertIn("max_documentos", r["error"])
+
+    def test_max_documentos_negativo(self):
+        r = servidor.audit_folder(RAIZ, con_capas=False, max_documentos=-5)
+        self.assertFalse(r["ok"])
+        self.assertIn("max_documentos", r["error"])
+
+    def test_timeout_no_positivo(self):
+        for valor in (0, -1):
+            r = servidor.audit_folder(RAIZ, con_capas=False, timeout_por_documento=valor)
+            self.assertFalse(r["ok"])
+            self.assertIn("timeout_por_documento", r["error"])
+
+    def test_no_numerico(self):
+        r = servidor.audit_folder(RAIZ, con_capas=False, max_documentos="muchos")
+        self.assertFalse(r["ok"])
+        self.assertIn("enteros", r["error"])
+
+    def test_valores_validos_siguen_pasando(self):
+        """La validación no puede haberse comido el camino bueno."""
+        r = servidor.audit_folder(RAIZ, con_capas=False, max_documentos=5,
+                                  timeout_por_documento=30)
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["mxd_encontrados"], 0)  # la raíz del repo no tiene .mxd
 
 
 class TestRespuestas(unittest.TestCase):

@@ -19,7 +19,8 @@ namespace ArcmapMcp.AddIn.Handlers
             IApplication app = ArcSession.App();
             IMxDocument doc = ArcSession.Doc(app);
             IMaps maps = doc.Maps;
-            string activo = doc.FocusMap != null ? doc.FocusMap.Name : null;
+            IMap mapaActivo = doc.FocusMap;
+            string activo = mapaActivo != null ? mapaActivo.Name : null;
 
             var dataFrames = new JArray();
             for (int i = 0; i < maps.Count; i++)
@@ -31,7 +32,11 @@ namespace ArcmapMcp.AddIn.Handlers
                 {
                     ["nombre"] = m.Name,
                     ["escala"] = escala,
-                    ["activo"] = string.Equals(m.Name, activo, StringComparison.Ordinal)
+                    // Por REFERENCIA, no por nombre: nada impide dos data frames
+                    // llamados "Layers" (es el nombre por defecto, así que pasa en
+                    // cuanto alguien añade uno), y entonces salían los dos marcados
+                    // como activo.
+                    ["activo"] = ReferenceEquals(m, mapaActivo)
                 });
             }
             return Protocol.Result(new JObject

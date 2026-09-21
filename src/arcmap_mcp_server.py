@@ -32,11 +32,52 @@ HOST = os.environ.get("ARCMAP_BRIDGE_HOST", "127.0.0.1")
 # los dos extremos. Es además la vía de escape cuando un ArcMap zombi deja cogido el
 # 27179 y ningún ArcMap nuevo puede levantar el puente.
 PORT = int(os.environ.get("ARCMAP_BRIDGE_PORT", "27179"))
-TIMEOUT = int(os.environ.get("ARCMAP_BRIDGE_TIMEOUT", "60"))  # tools rápidas
-# Timeout amplio para geoprocesos pesados (análisis ambiental, run_geoprocessing, LiDAR/TIN):
-# el puente los corre en el hilo principal de ArcMap y pueden tardar minutos. Si se
-# corta antes, el server reporta "timeout" pero el proceso sigue vivo en ArcMap.
-GP_TIMEOUT = int(os.environ.get("ARCMAP_GP_TIMEOUT", "1800"))  # 30 min
+
+# --------------------------------------------------------------------------- #
+# Presupuestos de espera.
+#
+# REGLA ÚNICA: el timeout de ESTE lado va SIEMPRE por encima del tope que el
+# add-in aplica a ese comando, con margen. El add-in, cuando se le acaba el
+# tiempo, devuelve un error que dice en qué FASE se quedó (importando arcpy,
+# abriendo documento, ejecutando código) y suelta el candado del puente; el
+# socket, cuando se le acaba a él, solo corta, deja el trabajo huérfano vivo
+# dentro de ArcMap y obliga a adivinar. Si los dos números EMPATAN gana el corte
+# mudo, que es el peor de los dos. Por eso ninguno es redondo: el redondo es el
+# del add-in, y aquí se le suma el margen.
+# --------------------------------------------------------------------------- #
+
+
+class _Espera(int):
+    """Segundos de espera que RECUERDAN de qué variable de entorno salen.
+
+    El mensaje de 'puente ocupado' tiene que decir qué variable subir, y no
+    siempre es ARCMAP_GP_TIMEOUT: nombrar la que no gobierna esa llamada manda a
+    tocar un número que no cambiará nada. Atando el nombre al valor no se pueden
+    separar. Es un `int` de verdad, así que `socket.settimeout` lo traga igual.
+    """
+
+    def __new__(cls, variable, defecto):
+        espera = super().__new__(cls, int(os.environ.get(variable, str(defecto))))
+        espera.variable = variable
+        return espera
+
+
+TIMEOUT = _Espera("ARCMAP_BRIDGE_TIMEOUT", 60)  # tools rápidas
+# Comandos LARGOS que el add-in atiende en el hilo de ArcMap (exports de layout,
+# run_geoprocessing, calculate_geometry): allí su tope es LongHandlerTimeout, 1800 s.
+# 1860 = 1800 + un minuto de margen. Antes valía 1800 clavados y el empate lo ganaba
+# el socket.
+GP_TIMEOUT = _Espera("ARCMAP_GP_TIMEOUT", 1860)  # 30 min + margen
+# Comandos que el add-in despacha a un handler de FONDO (las 3 de Data Driven Pages
+# y las 5 ambientales): ahí el peor caso legítimo no es un solo tope, es una suma.
+# DDP paga snapshot del documento (hasta 600 s) + subprocess del runner (1800 s) =
+# 2400 s; las ambientales, subprocess (1800 s) + el paso STA de añadir-al-mapa (60 s).
+# Por encima de todo eso el add-in tiene un techo de seguridad de 2700 s
+# (FondoTimeout) que SIEMPRE responde algo, así que el margen se cuenta sobre él.
+FONDO_TIMEOUT = _Espera("ARCMAP_FONDO_TIMEOUT", 2760)  # 2700 del add-in + margen
+# Guardar el documento: el add-in le da 600 s (un .mxd con decenas de capas y ráster
+# pesado no se escribe en 60).
+SAVE_TIMEOUT = _Espera("ARCMAP_SAVE_TIMEOUT", 630)
 # execute_arcpy es interactivo y NO debe esperar 30 min: a los 120 s el cliente MCP
 # ya ha dado la llamada por colgada, así que un techo alto solo sirve para que el
 # fallo no tenga forma de error (nos costó las sesiones del 27-jul y del 29-jul).
@@ -44,7 +85,13 @@ GP_TIMEOUT = int(os.environ.get("ARCMAP_GP_TIMEOUT", "1800"))  # 30 min
 # primero el timeout del add-in, que mata el subproceso y devuelve un error que dice
 # en qué FASE se quedó el runner, en vez de un corte mudo de socket que además deja
 # el runner huérfano vivo (y un runner huérfano impide cerrar ArcMap).
-EXEC_TIMEOUT = int(os.environ.get("ARCMAP_EXEC_TIMEOUT_CLIENTE", "930"))
+EXEC_TIMEOUT = _Espera("ARCMAP_EXEC_TIMEOUT_CLIENTE", 930)
+# El par 930/900 solo cuadra cuando la copia del documento es instantánea (copia del
+# .mxd del disco, el caso normal). Con `serializar_sesion=True` el add-in gasta hasta
+# 600 s (SnapshotTimeout) en SaveAsDocument ANTES de que empiecen a contar sus 900 s:
+# peor caso 1500 s, y con 930 aquí volvía a ganar el corte mudo de socket. Se le da
+# presupuesto propio en vez de subir el de todas las llamadas, que son interactivas.
+EXEC_SESION_TIMEOUT = _Espera("ARCMAP_EXEC_SESION_TIMEOUT_CLIENTE", 1560)  # 600 + 900 + margen
 
 
 class ArcMapClient:
@@ -57,7 +104,8 @@ class ArcMapClient:
 
     def send(self, ctype, params=None, timeout=None):
         """Envía un comando al puente. `timeout` (s) sobrescribe el del cliente para
-        esta llamada (los geoprocesos pesados pasan GP_TIMEOUT)."""
+        esta llamada: cada tool pasa el presupuesto (`_Espera`) que le corresponde
+        según el tope que el add-in aplique a ESE comando."""
         eff = timeout or self.timeout
         msg = json.dumps({"type": ctype, "params": params or {}}).encode("utf-8")
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -94,17 +142,28 @@ class ArcMapClient:
                     chunk = s.recv(65536)
                 except socket.timeout:
                     # PUENTE VIVO PERO SIN RESPONDER: la conexión se abrió, o sea que
-                    # el add-in está cargado; lo que no contesta es ArcMap, que atiende
-                    # el socket en su HILO PRINCIPAL y no puede hacerlo mientras corre
-                    # un geoproceso. Es el opuesto exacto de "puente_caido": aquí el
+                    # el add-in está cargado y su listener (que vive en un hilo de
+                    # fondo, no en el de ArcMap) sigue aceptando. Lo que no vuelve es
+                    # ESTE comando. Es el opuesto exacto de "puente_caido": aquí el
                     # trabajo sigue vivo dentro de ArcMap y matarlo es lo que no hay
                     # que hacer.
+                    #
+                    # El mensaje decía "ArcMap atiende el socket en su hilo principal"
+                    # y mandaba a subir ARCMAP_GP_TIMEOUT. Las dos cosas eran del
+                    # puente Python viejo: hoy `ping` contesta al instante aunque haya
+                    # un comando en curso, y la variable que gobierna la espera depende
+                    # de la llamada. Decirlo mal manda a tocar un número que no cambia
+                    # nada y a dar por muerto lo que solo estaba ocupado.
+                    variable = getattr(eff, "variable", TIMEOUT.variable)
                     return {"ok": False, "estado": "puente_ocupado", "error": (
                         "PUENTE VIVO PERO SIN RESPONDER en %ss: la conexión se abrió, "
-                        "así que el add-in está cargado y es ArcMap quien está ocupado "
-                        "(atiende en su hilo principal). Si era un geoproceso pesado "
-                        "SIGUE CORRIENDO dentro de ArcMap: no relances, mira la ventana "
-                        "y sube ARCMAP_GP_TIMEOUT si necesitas esperar más." % eff)}
+                        "así que el add-in está cargado; lo que no ha vuelto es este "
+                        "comando. Llama a `ping` AHORA: responde aunque el puente esté "
+                        "ocupado y trae `comando_en_curso` y `ocupado_desde_s`, que es "
+                        "lo que distingue 'lleva 8 s exportando' de 'lleva 1.400 s "
+                        "atascado'. Si hay un geoproceso, SIGUE CORRIENDO dentro de "
+                        "ArcMap: no lo relances. Para esperar más en llamadas como esta "
+                        "la variable es %s (ahora %ss)." % (eff, variable, eff))}
                 if not chunk:
                     break
                 buf += chunk
@@ -298,7 +357,19 @@ def get_arcmap_info() -> dict:
 
 @mcp.tool()
 def list_layers() -> dict:
-    """Lista las capas del data frame activo (nombre, visibilidad, fuente, def. query)."""
+    """
+    Lista las capas del data frame activo (nombre, visibilidad, fuente, def. query).
+
+    Cada capa trae además su `ruta` dentro de la TOC (`Grupo/Subgrupo/Capa`). Esa
+    ruta vale como identificador en CUALQUIER tool que pida una capa, y hace falta
+    cuando hay nombres repetidos: si `capa="Parcelas"` casa con dos capas, la tool
+    NO elige por ti (antes se quedaba con la primera en silencio, también en
+    `remove_layer`): falla listando las rutas candidatas, y repites con la ruta.
+    Dos capas homónimas dentro del MISMO grupo (el mismo shapefile añadido dos veces)
+    tendrían la misma ruta, así que se numeran en orden de TOC: `Parcelas#1`,
+    `Parcelas#2`. Usa la ruta tal cual la devuelve este listado.
+    Un data frame vacío devuelve `num: 0`, no un error.
+    """
     return _client.send("list_layers")
 
 
@@ -309,19 +380,39 @@ def zoom_to_layer(nombre: str) -> dict:
 
 
 @mcp.tool()
-def export_pdf(salida: str, dpi: int = 300) -> dict:
-    """Exporta el layout actual de ArcMap a un PDF en la ruta `salida`."""
-    return _client.send("export_pdf", {"salida": salida, "dpi": dpi})
+def export_pdf(salida: str, dpi: int = 300, sobrescribir: bool = True) -> dict:
+    """
+    Exporta el layout actual de ArcMap a un PDF en la ruta `salida`.
+
+    `salida` debe ser una ruta ABSOLUTA a una carpeta que exista; `dpi` entre 24 y
+    600. `sobrescribir` (True por defecto, que es lo que necesita una serie de
+    planos que se regenera) decide qué pasa si el fichero ya existe: con False se
+    devuelve error sin tocarlo. La respuesta trae `sobrescrito` para que pisar un
+    plano nunca sea silencioso. Se exporta a un temporal y solo al final se mueve,
+    así que cancelar con ESC ya no se lleva por delante el PDF que había.
+
+    Un layout denso a dpi alto se va a minutos: el add-in lo trata como comando
+    largo y la espera de aquí la gobierna ARCMAP_GP_TIMEOUT, no el timeout corto.
+    """
+    return _client.send("export_pdf", {"salida": salida, "dpi": dpi,
+                                       "sobrescribir": sobrescribir},
+                        timeout=GP_TIMEOUT)
 
 
 @mcp.tool()
-def export_jpg(salida: str, dpi: int = 230) -> dict:
+def export_jpg(salida: str, dpi: int = 230, sobrescribir: bool = True) -> dict:
     """
     Exporta el layout actual de ArcMap a un JPG en la ruta `salida` (`dpi` 230 por
     defecto, calidad JPEG 95). Útil para adjuntar planos por correo o incrustarlos
     en documentos sin el peso de un PDF.
+
+    Mismas reglas que `export_pdf`: ruta absoluta, `dpi` 24-600, `sobrescribir` y
+    `sobrescrito` en la respuesta. Vale `.jpg` o `.jpeg`. La espera la gobierna
+    ARCMAP_GP_TIMEOUT.
     """
-    return _client.send("export_jpg", {"salida": salida, "dpi": dpi})
+    return _client.send("export_jpg", {"salida": salida, "dpi": dpi,
+                                       "sobrescribir": sobrescribir},
+                        timeout=GP_TIMEOUT)
 
 
 @mcp.tool()
@@ -384,6 +475,11 @@ def execute_arcpy(code: str, usar_documento: bool | None = None,
     datos. Para inspeccionar sin abrir nada, `describe_mxd` (milisegundos, sin arcpy
     y sin licencia).
 
+    NO uses `sys.exit()` ni `exit()`: el resultado se devuelve asignando `RESULT`.
+    Si aun así sales, se te responde igual —con el `RESULT` que ya hubieras asignado
+    y un `aviso_salida`, o con un error que lo explica si no había ninguno—, pero
+    antes el proceso moría sin escribir nada y la llamada parecía colgada.
+
     Si tu código no usa `mxd` ni `df`, pasa `usar_documento=False`: te ahorras el
     riesgo entero, no solo unos segundos. Pasado `ARCMAP_EXEC_TIMEOUT` (900 s por
     defecto) el add-in mata el subproceso y devuelve un error que dice en qué fase
@@ -401,7 +497,8 @@ def execute_arcpy(code: str, usar_documento: bool | None = None,
         params["usar_documento"] = usar_documento
     if serializar_sesion:
         params["serializar_sesion"] = True
-    return _client.send("execute_code", params, timeout=EXEC_TIMEOUT)
+    return _client.send("execute_code", params,
+                        timeout=EXEC_SESION_TIMEOUT if serializar_sesion else EXEC_TIMEOUT)
 
 
 # --------------------------------------------------------------------------- #
@@ -418,8 +515,12 @@ def list_ddp(max_valores: int = 500) -> dict:
     página actual. Útil como primer paso antes de exportar una serie.
     `max_valores` acota la lista de valores devuelta (500 por defecto); si se
     trunca, la respuesta lo indica con `valores_truncados=true`.
+
+    Se resuelve sobre una COPIA del documento, y copiarlo puede costar minutos en
+    una sesión cargada: la espera de aquí la gobierna ARCMAP_FONDO_TIMEOUT.
     """
-    return _client.send("list_ddp", {"max_valores": max_valores})
+    return _client.send("list_ddp", {"max_valores": max_valores},
+                        timeout=FONDO_TIMEOUT)
 
 
 @mcp.tool()
@@ -437,11 +538,19 @@ def export_ddp(salida: str, modo: str = "ALL", rango: str = None,
                             se convierten a IDs de página automáticamente.
     `un_pdf_por_pagina=False` -> un único PDF multipágina; True -> un PDF por página
     (nombrado por el valor del índice). `dpi` resolución (300 por defecto).
+
+    Con `valores`, los que NO existan en la capa índice vuelven listados en
+    `valores_no_encontrados` y con un `aviso`: la exportación sigue con los que sí
+    casan, pero nunca en silencio (un expediente mal tecleado daba un PDF más corto
+    y ninguna señal).
+
+    Es de las llamadas más lentas del puente —copia del documento más exportación
+    página a página—: la espera la gobierna ARCMAP_FONDO_TIMEOUT, no el timeout corto.
     """
     return _client.send("export_ddp", {
         "salida": salida, "modo": modo, "rango": rango, "valores": valores,
         "un_pdf_por_pagina": un_pdf_por_pagina, "dpi": dpi,
-    })
+    }, timeout=FONDO_TIMEOUT)
 
 
 @mcp.tool()
@@ -458,17 +567,30 @@ def list_layout_elements(tipo: str = None, patron: str = None) -> dict:
 
 
 @mcp.tool()
-def set_text_element(texto: str, nombre: str = None, buscar: str = None) -> dict:
+def set_text_element(texto: str, nombre: str = None, buscar: str = None,
+                     grupo: str = None, indice: int = None) -> dict:
     """
     Cambia el contenido de un elemento de texto del layout (título, fecha, nº de
-    expediente...). Indica el `texto` nuevo y UN selector:
+    expediente...), también si está DENTRO de un grupo (el cajetín agrupado). Indica
+    el `texto` nuevo y UN selector:
 
       - `nombre`: el .name del elemento (si está nombrado en ArcMap).
       - `buscar`: su texto ACTUAL (find-and-replace). Coincidencia exacta y, si no,
         por subcadena. Útil cuando los textos del layout no están nombrados (lo
-        habitual). Si hay varias coincidencias, el error las lista para afinar.
+        habitual).
+
+    Si el selector casa con VARIOS elementos no se elige por ti: el error los lista
+    numerados, con su texto y su grupo. Se desempata con `grupo` (nombre del grupo que
+    lo contiene; `""` para los sueltos) o, como último recurso, con `indice` (el número
+    de esa lista). Hace falta de verdad: un cajetín copiado de otro plano arrastra
+    nombre Y texto, y sus elementos son idénticos en todo lo demás.
     """
-    return _client.send("set_text_element", {"nombre": nombre, "buscar": buscar, "texto": texto})
+    params = {"nombre": nombre, "buscar": buscar, "texto": texto}
+    if grupo is not None:
+        params["grupo"] = grupo
+    if indice is not None:
+        params["indice"] = indice
+    return _client.send("set_text_element", params)
 
 
 @mcp.tool()
@@ -477,8 +599,12 @@ def goto_ddp_page(pagina: int = None, valor: str = None) -> dict:
     Sitúa el atlas en una página y refresca la vista. Indica `pagina` (ID 1-based)
     o `valor` (un valor del campo índice; se resuelve a su página). Devuelve el ID,
     el valor de la página y la escala resultante.
+
+    Resuelve la página sobre una COPIA del documento y aplica el encuadre a la
+    sesión viva: la espera la gobierna ARCMAP_FONDO_TIMEOUT.
     """
-    return _client.send("goto_ddp_page", {"pagina": pagina, "valor": valor})
+    return _client.send("goto_ddp_page", {"pagina": pagina, "valor": valor},
+                        timeout=FONDO_TIMEOUT)
 
 
 @mcp.tool()
@@ -501,19 +627,25 @@ def set_layer_visibility(capa: str, visible: bool) -> dict:
 
 @mcp.tool()
 def export_view_png(salida: str, dpi: int = 150, ancho: int = None,
-                    alto: int = None, modo: str = "vista") -> dict:
+                    alto: int = None, modo: str = "vista",
+                    sobrescribir: bool = True) -> dict:
     """
     Exporta a un PNG en disco la vista del mapa (`modo="vista"`, data frame activo)
     o la página de layout completa (`modo="layout"`).
 
-    Genera un ARCHIVO (artefacto reutilizable). `dpi` 150 por defecto; `ancho`/`alto`
-    en píxeles opcionales. Para que el agente VEA el mapa al instante sin abrir el
-    archivo, usa `get_canvas_screenshot`. Para el entregable final usa `export_pdf` /
-    `export_ddp`.
+    Genera un ARCHIVO (artefacto reutilizable). `dpi` 150 por defecto (24-600);
+    `ancho`/`alto` en píxeles opcionales (hasta 10000). `salida` absoluta;
+    `sobrescribir` y `sobrescrito` como en `export_pdf`. Para que el agente VEA el
+    mapa al instante sin abrir el archivo, usa `get_canvas_screenshot`. Para el
+    entregable final usa `export_pdf` / `export_ddp`.
+
+    El add-in lo trata como comando largo (un layout a dpi alto no se renderiza en
+    60 s): la espera la gobierna ARCMAP_GP_TIMEOUT.
     """
     return _client.send("export_view_png", {
         "salida": salida, "dpi": dpi, "ancho": ancho, "alto": alto, "modo": modo,
-    })
+        "sobrescribir": sobrescribir,
+    }, timeout=GP_TIMEOUT)
 
 
 @mcp.tool()
@@ -556,13 +688,20 @@ def clear_selection(capa: str = None) -> dict:
 
 
 @mcp.tool()
-def get_unique_values(capa: str, campo: str, where: str = None) -> dict:
+def get_unique_values(capa: str, campo: str, where: str = None,
+                      max_valores: int = 1000) -> dict:
     """
     Devuelve los valores únicos (ordenados) de un campo de una capa. Respeta la
     definition query. `where` opcional para acotar. Útil para iterar planos por
     categoría (un plano por estrato, por municipio, etc.).
+
+    `max_valores` (1000 por defecto, hasta 100000) corta el recorrido: la tabla se
+    lee en el hilo de ArcMap, y pedir un campo casi único (OBJECTID, una coordenada)
+    sobre una capa regional lo dejaba congelado hasta el final. Si se corta, la
+    respuesta trae `truncado: true`: nunca se recorta en silencio.
     """
-    return _client.send("get_unique_values", {"capa": capa, "campo": campo, "where": where})
+    return _client.send("get_unique_values", {"capa": capa, "campo": campo,
+                                              "where": where, "max_valores": max_valores})
 
 
 @mcp.tool()
@@ -646,8 +785,9 @@ def apply_symbology_from_layer(capa: str, lyr_file: str) -> dict:
 @mcp.tool()
 def set_graduated_symbology(capa: str, campo: str, num_clases: int = 5,
                             metodo: str = "natural_breaks",
-                            color_desde: list = None, color_hasta: list = None,
-                            tamano: float = None) -> dict:
+                            color_desde: list | str = None,
+                            color_hasta: list | str = None,
+                            tamano: float = None, algoritmo: str = None) -> dict:
     """
     Simboliza una capa VIVA con colores graduados (class breaks) por un campo
     NUMÉRICO, directamente sobre la sesión de ArcMap (persiste; se guarda con
@@ -660,14 +800,21 @@ def set_graduated_symbology(capa: str, campo: str, num_clases: int = 5,
       hay variación suficiente.
     - `metodo`: natural_breaks (defecto) | quantile | equal_interval |
       geometrical_interval | standard_deviation.
-    - `color_desde` / `color_hasta`: RGB [r,g,b] 0-255 de los extremos de la rampa
-      (defecto amarillo claro -> rojo oscuro).
+    - `color_desde` / `color_hasta`: extremos de la rampa, como RGB [r,g,b] 0-255 o
+      como "#RRGGBB" (defecto amarillo claro -> rojo oscuro). Un color mal formado
+      es ERROR: antes se ignoraba y salía la rampa por defecto sin decir nada.
     - `tamano`: grosor de línea / tamaño de punto / grosor de borde de polígono en
       puntos (defecto según geometría).
+    - `algoritmo`: cómo se interpola entre los dos extremos. `cielab` (defecto) |
+      `lablch` | `hsv`. Mismos valores que en `set_raster_symbology`, y por el mismo
+      motivo: HSV interpola el TONO y entre amarillo y rojo se pasea por verde, azul
+      y magenta, o sea un arcoíris donde se pedía una rampa secuencial. Hasta la
+      2.11.0 el defecto aquí era HSV; pasa `hsv` solo si necesitas reproducir
+      exactamente los colores de una serie ya entregada.
 
     El histograma usa TODOS los valores del campo en la fuente (ignora definition
     query y selección); para clasificar un subconjunto, fíjalo con una definition
-    query permanente antes.
+    query permanente antes. Admite campos de una tabla unida (join).
     """
     params = {"capa": capa, "campo": campo, "num_clases": num_clases, "metodo": metodo}
     if color_desde is not None:
@@ -676,6 +823,8 @@ def set_graduated_symbology(capa: str, campo: str, num_clases: int = 5,
         params["color_hasta"] = color_hasta
     if tamano is not None:
         params["tamano"] = tamano
+    if algoritmo is not None:
+        params["algoritmo"] = algoritmo
     return _client.send("set_graduated_symbology", params)
 
 
@@ -763,7 +912,9 @@ def set_raster_symbology(capa: str, modo: str = "clasificado", num_clases: int =
 
 @mcp.tool()
 def set_unique_values_symbology(capa: str, campo: str, tamano: float = None,
-                                color_desde: list = None, color_hasta: list = None) -> dict:
+                                color_desde: list | str = None,
+                                color_hasta: list | str = None,
+                                algoritmo: str = None) -> dict:
     """
     Simboliza una capa de entidades por VALORES ÚNICOS del campo (categórica).
 
@@ -776,10 +927,19 @@ def set_unique_values_symbology(capa: str, campo: str, tamano: float = None,
     categórico: lo que importa es DISTINGUIR, no ordenar. Es reproducible, así
     que la misma capa con el mismo campo sale siempre igual (importa al
     reexportar una serie de planos). Si pasas `color_desde` y `color_hasta` se
-    usa esa rampa en su lugar.
+    usa esa rampa en su lugar ([r,g,b] o "#RRGGBB"), interpolada con `algoritmo`
+    (`cielab` por defecto | `lablch` | `hsv`, como en `set_graduated_symbology`).
 
-    Tope de **100 categorías**: por encima, falla diciendo cuántas hay. Una
-    leyenda de miles de entradas no es una leyenda. Los NULL se omiten.
+    Las categorías son las que la capa DIBUJA: se respeta su definition query, así
+    que una capa regional filtrada a un municipio da la leyenda del municipio. La
+    selección NO se tiene en cuenta, a propósito: una leyenda que solo cubriera lo
+    seleccionado dejaría el resto de la capa sin pintar. Admite campos de una tabla
+    unida (join), y ordena numéricamente cuando el campo es numérico.
+
+    Tope de **100 categorías**: por encima, falla diciendo que las supera (no cuántas
+    hay: contarlas obligaría a recorrer la tabla entera, que es el cuelgue que el
+    tope evita). Una leyenda de miles de entradas no es una leyenda. Los NULL se
+    omiten.
     """
     params: dict = {"capa": capa, "campo": campo}
     if tamano is not None:
@@ -788,6 +948,8 @@ def set_unique_values_symbology(capa: str, campo: str, tamano: float = None,
         params["color_desde"] = color_desde
     if color_hasta is not None:
         params["color_hasta"] = color_hasta
+    if algoritmo is not None:
+        params["algoritmo"] = algoritmo
     return _client.send("set_unique_values_symbology", params)
 
 
@@ -838,40 +1000,61 @@ def save_mxd() -> dict:
     Guarda el documento .mxd abierto en su ruta actual. Devuelve la ruta guardada.
     Útil para persistir los cambios que han hecho otras tools (def. query, textos,
     simbología). Para guardar en otra ruta sin tocar el original usa save_mxd_as.
+
+    Escribir un documento con decenas de capas y ráster pesado no cabe en el timeout
+    corto: la espera la gobierna ARCMAP_SAVE_TIMEOUT.
     """
-    return _client.send("save_mxd")
+    return _client.send("save_mxd", timeout=SAVE_TIMEOUT)
 
 
 @mcp.tool()
-def save_mxd_as(salida: str) -> dict:
+def save_mxd_as(salida: str, sobrescribir: bool = False) -> dict:
     """
     Guarda una COPIA del .mxd en `salida` (no cambia el documento activo ni su ruta).
-    `salida` es la ruta de destino (.mxd). Equivale a `mxd.saveACopy(...)`.
+    `salida` es la ruta de destino (.mxd), ABSOLUTA y en una carpeta que exista.
+    Equivale a `mxd.saveACopy(...)`.
+
+    `sobrescribir` es False por defecto, al revés que en los export: un PDF pisado
+    se regenera, un .mxd pisado es trabajo de alguien. Si el destino existe, la
+    llamada falla sin tocarlo y dice cómo forzarlo. Al REGENERAR una serie de .mxd
+    (uno por capa, p. ej.) pasa `sobrescribir=True`. La respuesta trae `sobrescrito`.
+
+    Como `save_mxd`, la espera la gobierna ARCMAP_SAVE_TIMEOUT.
     """
-    return _client.send("save_mxd_as", {"salida": salida})
+    return _client.send("save_mxd_as", {"salida": salida, "sobrescribir": sobrescribir},
+                        timeout=SAVE_TIMEOUT)
 
 
 @mcp.tool()
 def list_broken_data_sources() -> dict:
     """
     Lista las capas/tablas con la fuente de datos ROTA (rutas que ArcMap no encuentra,
-    muy común con unidades de red X:/Y:/G:). Para cada una devuelve nombre, ruta rota y
-    workspace si es accesible. Primer paso antes de `repair_data_source`.
+    muy común con unidades de red X:/Y:/G:). Recorre TODOS los data frames, no solo
+    el activo. Para cada una devuelve nombre, `ruta` de grupo, `data_frame`, ruta rota
+    y workspace si es accesible. Primer paso antes de `repair_data_source`.
     """
     return _client.send("list_broken_data_sources")
 
 
 @mcp.tool()
 def repair_data_source(capa: str, ruta_antigua: str, ruta_nueva: str,
-                       validar: bool = True) -> dict:
+                       validar: bool = True, data_frame: str = None) -> dict:
     """
     Reapunta la fuente de una capa sustituyendo su workspace (`ruta_antigua` ->
     `ruta_nueva`), p. ej. cuando una carpeta de red ha cambiado de letra/ubicación.
     Con `validar=True` el cambio solo se aplica si la ruta nueva es válida. Devuelve
     si la capa estaba/queda rota.
+
+    Busca la capa en TODOS los data frames, igual que el listado (antes solo miraba
+    el activo, y una capa rota de un data frame secundario se listaba pero no se
+    podía reparar). `data_frame` acota la búsqueda a uno; si el nombre casa en más
+    de un sitio y no lo indicas, la llamada falla listando los candidatos.
     """
-    return _client.send("repair_data_source", {"capa": capa, "ruta_antigua": ruta_antigua,
-                                                "ruta_nueva": ruta_nueva, "validar": validar})
+    params = {"capa": capa, "ruta_antigua": ruta_antigua,
+              "ruta_nueva": ruta_nueva, "validar": validar}
+    if data_frame is not None:
+        params["data_frame"] = data_frame
+    return _client.send("repair_data_source", params)
 
 
 @mcp.tool()
@@ -888,6 +1071,13 @@ def run_geoprocessing(tool: str, params: list = None,
     query y selección); los strings con pinta de ruta o de SQL nunca se sustituyen.
     Pasa `resolver_capas=False` si algún parámetro textual (un nombre de campo, una
     keyword) colisiona con el nombre de una capa.
+
+    MULTIVALOR: un parámetro que admite varias entradas (Merge, Union, Intersect...)
+    se pasa como LISTA dentro de `params`: `[["capaA", "capaB"], r"C:\\out.shp"]`. Se
+    une con ';', que es lo que el geoproceso espera. OJO con la diferencia: una capa
+    de la TOC DENTRO de una lista entra por la RUTA de su fuente, así que pierde su
+    definition query y su selección (en un multivalor viaja una cadena, no el objeto
+    Layer). Si necesitas respetarlas, expórtala antes o pásala como argumento suelto.
 
     Nota: un geoproceso largo congela la GUI de ArcMap (hilo único, limitación conocida);
     se usa un timeout amplio (ARCMAP_GP_TIMEOUT) para no cortar la espera.
@@ -908,8 +1098,9 @@ def get_layer_features(capa: str, where: str = None, campos: list = None,
     """
     Devuelve FILAS de atributos de una capa (respeta su definition query y selección).
     `campos` = lista de campos a traer (None = todos salvo geometría). `where` opcional.
-    `limite` = máximo de filas (50 por defecto) para no inflar la respuesta. Complementa
-    a get_unique_values / count_features cuando necesitas ver registros concretos.
+    `limite` = máximo de filas (50 por defecto, entre 1 y 5000; fuera de rango es error)
+    para no inflar la respuesta. Complementa a get_unique_values / count_features cuando
+    necesitas ver registros concretos. Admite campos de una tabla unida (join).
     """
     return _client.send("get_layer_features", {"capa": capa, "where": where,
                                                 "campos": campos, "limite": limite})
@@ -996,15 +1187,22 @@ def list_rasters(workspace: str = None) -> dict:
 # Análisis ambiental y teledetección (geoprocesos pesados).
 #
 # Requieren las extensiones Spatial Analyst o 3D Analyst y operan sobre datos EN
-# DISCO. Son LENTOS: usan el timeout amplio (ARCMAP_GP_TIMEOUT, 30 min) y, mientras
-# corren, CONGELAN la GUI de ArcMap (el puente ejecuta en el hilo principal). Por
-# defecto añaden el resultado al data frame activo (anadir_al_mapa=True).
+# DISCO. Son LENTOS: los corre el runner en un proceso aparte y la espera de aquí la
+# gobierna ARCMAP_FONDO_TIMEOUT (ver los presupuestos de arriba). Por defecto añaden
+# el resultado al data frame activo (anadir_al_mapa=True), y ese último paso sí ocupa
+# el hilo de ArcMap unos segundos.
+#
+# Las cinco llevan `sobrescribir` (False por defecto). Con él en False, si la salida
+# ya existe la operación falla ANTES de calcular nada, en vez de gastar el geoproceso
+# entero para morir al guardar (arcpy.env.overwriteOutput llega a False en un proceso
+# nuevo). Ponerlo en True activa el overwrite para esa llamada — y solo para esa.
 # --------------------------------------------------------------------------- #
 
 @mcp.tool()
 def raster_index(indice: str, bandas: dict, salida: str,
                  L: float = 0.5, anadir_al_mapa: bool = True,
-                 banda_a: str = None, banda_b: str = None) -> dict:
+                 banda_a: str = None, banda_b: str = None,
+                 sobrescribir: bool = False) -> dict:
     """
     Calcula un ÍNDICE ESPECTRAL de teledetección desde bandas ráster (Spatial Analyst).
 
@@ -1035,15 +1233,19 @@ def raster_index(indice: str, bandas: dict, salida: str,
 
     `L` ajusta SAVI. Para un índice arbitrario: indice="CUSTOM" + banda_a/banda_b
     -> (banda_a - banda_b)/(banda_a + banda_b). `salida` = ruta del ráster resultante.
+
+    `sobrescribir=False` (defecto): si `salida` ya existe, falla antes de calcular.
     """
     return _client.send("raster_index", {
         "indice": indice, "bandas": bandas, "salida": salida, "L": L,
         "anadir_al_mapa": anadir_al_mapa, "banda_a": banda_a, "banda_b": banda_b,
-    }, timeout=GP_TIMEOUT)
+        "sobrescribir": sobrescribir,
+    }, timeout=FONDO_TIMEOUT)
 
 
 @mcp.tool()
-def hydrology(operacion: str, parametros: dict, anadir_al_mapa: bool = True) -> dict:
+def hydrology(operacion: str, parametros: dict, anadir_al_mapa: bool = True,
+              sobrescribir: bool = False) -> dict:
     """
     Análisis hidrológico sobre un MDT (Spatial Analyst). `operacion` + `parametros`:
 
@@ -1058,57 +1260,74 @@ def hydrology(operacion: str, parametros: dict, anadir_al_mapa: bool = True) -> 
             {mdt, nivel, salida}
 
     Rutas en `parametros` apuntan a datos en disco. Geoproceso pesado.
+
+    `sobrescribir=False` (defecto): si `salida` ya existe, falla antes de calcular.
+    En "cuenca" cuentan también los `fdir` y `facc` que deja en `salida_dir`, que
+    llevan nombre fijo y por eso chocan al repetir la operación en la misma carpeta.
     """
     return _client.send("hydrology", {
         "operacion": operacion, "parametros": parametros,
-        "anadir_al_mapa": anadir_al_mapa,
-    }, timeout=GP_TIMEOUT)
+        "anadir_al_mapa": anadir_al_mapa, "sobrescribir": sobrescribir,
+    }, timeout=FONDO_TIMEOUT)
 
 
 @mcp.tool()
 def contours(mdt: str, salida: str, intervalo: float, base: float = 0,
-             dxf: str = None, anadir_al_mapa: bool = True) -> dict:
+             dxf: str = None, anadir_al_mapa: bool = True,
+             sobrescribir: bool = False) -> dict:
     """
     Genera curvas de nivel desde un MDT (3D Analyst). `intervalo` = equidistancia
     (en unidades Z del MDT), `base` = cota base (0 por defecto). Si pasas `dxf`
     (ruta), exporta además las curvas a DXF (entrega CAD). `salida` = feature class
     de líneas. Geoproceso pesado.
+
+    `sobrescribir=False` (defecto): si `salida` (o el `dxf`) ya existe, falla antes
+    de calcular.
     """
     return _client.send("contours", {
         "mdt": mdt, "salida": salida, "intervalo": intervalo, "base": base,
-        "dxf": dxf, "anadir_al_mapa": anadir_al_mapa,
-    }, timeout=GP_TIMEOUT)
+        "dxf": dxf, "anadir_al_mapa": anadir_al_mapa, "sobrescribir": sobrescribir,
+    }, timeout=FONDO_TIMEOUT)
 
 
 @mcp.tool()
 def topographic_profile(superficie: str, lineas: str, salida: str,
-                        anadir_al_mapa: bool = True) -> dict:
+                        anadir_al_mapa: bool = True,
+                        sobrescribir: bool = False) -> dict:
     """
     Perfil topográfico: interpola una capa de LÍNEAS 2D sobre una `superficie`
     (MDT ráster o TIN) y devuelve líneas 3D con la Z del terreno (3D Analyst,
     InterpolateShape). Útil para perfiles longitudinales de caminos, cauces o
     transectos. `salida` = feature class de líneas 3D. Geoproceso pesado.
+
+    `sobrescribir=False` (defecto): si `salida` ya existe, falla antes de calcular.
     """
     return _client.send("topographic_profile", {
         "superficie": superficie, "lineas": lineas, "salida": salida,
-        "anadir_al_mapa": anadir_al_mapa,
-    }, timeout=GP_TIMEOUT)
+        "anadir_al_mapa": anadir_al_mapa, "sobrescribir": sobrescribir,
+    }, timeout=FONDO_TIMEOUT)
 
 
 @mcp.tool()
 def least_cost_path(coste: str, origen: str, destino: str, salida: str,
-                    salida_dir: str = None, anadir_al_mapa: bool = True) -> dict:
+                    salida_dir: str = None, anadir_al_mapa: bool = True,
+                    sobrescribir: bool = False) -> dict:
     """
     Ruta de mínimo coste (Spatial Analyst): calcula CostDistance desde `origen`
     sobre el ráster de fricción `coste` y traza CostPath hasta `destino`.
     `origen`/`destino` = features (puntos/polígonos) o ráster; `coste` = ráster de
     fricción (mayor valor = más difícil de atravesar). `salida` = ráster con la ruta
     óptima. Útil para trazado de pistas, cortafuegos o accesos. Geoproceso pesado.
+
+    `sobrescribir=False` (defecto): si `salida` ya existe, falla antes de calcular.
+    El ráster de backlink que deja como subproducto lleva nombre único por llamada,
+    así que dos rutas seguidas en la misma carpeta ya no chocan entre sí.
     """
     return _client.send("least_cost_path", {
         "coste": coste, "origen": origen, "destino": destino, "salida": salida,
         "salida_dir": salida_dir, "anadir_al_mapa": anadir_al_mapa,
-    }, timeout=GP_TIMEOUT)
+        "sobrescribir": sobrescribir,
+    }, timeout=FONDO_TIMEOUT)
 
 
 @mcp.tool()
@@ -1125,11 +1344,14 @@ def calculate_geometry(entrada: str, propiedades, unidad_longitud: str = "",
     LINE_START_MID_END. `unidad_longitud` (ej. METERS, KILOMETERS) y `unidad_area`
     (ej. SQUARE_METERS, HECTARES) opcionales; `crs` opcional para medidas en otro
     sistema. Añade las columnas calculadas a la tabla de atributos.
+
+    Recorre la tabla entera fila a fila, así que sobre una capa de decenas de miles
+    de registros es un geoproceso largo: la espera la gobierna ARCMAP_GP_TIMEOUT.
     """
     return _client.send("calculate_geometry", {
         "entrada": entrada, "propiedades": propiedades,
         "unidad_longitud": unidad_longitud, "unidad_area": unidad_area, "crs": crs,
-    })
+    }, timeout=GP_TIMEOUT)
 
 
 def _version_arcmap_local():
@@ -1289,9 +1511,34 @@ def audit_folder(ruta: str, con_capas: bool = True, timeout_por_documento: int =
     para tener el mapa de versiones al instante.
 
     `max_documentos` corta la lista (por defecto 200) y **lo dice** en la
-    respuesta: nunca trunca en silencio.
+    respuesta: nunca trunca en silencio. `max_documentos` y `timeout_por_documento`
+    tienen que ser enteros >= 1; con 0 o negativos la auditoría se devuelve vacía o
+    recortada por el final y parece completa, así que se rechazan con un error.
     """
     import subprocess  # local: solo esta herramienta lo necesita
+
+    # Los dos números se validan ANTES de listar nada, porque un valor absurdo no
+    # falla: MIENTE. `max_documentos=0` devuelve una auditoría vacía con cara de
+    # completa; en negativo, `encontrados[:-5]` recorta los ÚLTIMOS cinco y el aviso
+    # de truncado dice "los -5 primeros"; y un `timeout_por_documento` <= 0 hace que
+    # subprocess corte al instante y TODOS los documentos salgan como timeout.
+    try:
+        max_documentos = int(max_documentos)
+        timeout_por_documento = int(timeout_por_documento)
+    except (TypeError, ValueError):
+        return {"ok": False, "error":
+                "max_documentos y timeout_por_documento deben ser enteros (recibidos: "
+                "%r y %r)." % (max_documentos, timeout_por_documento)}
+    if max_documentos < 1:
+        return {"ok": False, "error":
+                "max_documentos debe ser >= 1 (recibido: %d). Con 0 o negativo la "
+                "auditoría saldría vacía o recortada por el final sin decirlo."
+                % max_documentos}
+    if timeout_por_documento < 1:
+        return {"ok": False, "error":
+                "timeout_por_documento debe ser >= 1 segundo (recibido: %d). Con 0 o "
+                "negativo cada documento agotaría su timeout al instante y la "
+                "auditoría diría que todos están colgados." % timeout_por_documento}
 
     carpeta = os.path.abspath(os.path.expandvars(ruta))
     if not os.path.isdir(carpeta):

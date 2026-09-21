@@ -44,15 +44,21 @@ namespace ArcmapMcp.AddIn.Handlers
         // tiene que sobrevivir a eso. Sirven para un caso concreto: al cerrarse ArcMap,
         // un runner vivo IMPIDE que el proceso acabe de salir, y ArcMap se queda sin
         // ventana pero vivo, sujetando el puerto (incidente del 2026-08-27).
-        private static readonly System.Collections.Generic.HashSet<int> _runnersVivos =
-            new System.Collections.Generic.HashSet<int>();
+        //
+        // Con cada PID va su HORA DE ARRANQUE, y no es adorno: Windows reutiliza los
+        // PID, y desde que al parar se mata el ÁRBOL entero (taskkill /T), acertar con
+        // un PID reciclado ya no se lleva un proceso ajeno sino su jerarquía completa.
+        // Un PID solo es "el runner" si además arrancó cuando arrancó el runner.
+        private static readonly System.Collections.Generic.Dictionary<int, DateTime> _runnersVivos =
+            new System.Collections.Generic.Dictionary<int, DateTime>();
 
         private static int RegistrarRunner(Process p)
         {
             try
             {
                 int pid = p.Id;
-                lock (_runnersVivos) _runnersVivos.Add(pid);
+                DateTime arranque = p.StartTime;
+                lock (_runnersVivos) _runnersVivos[pid] = arranque;
                 return pid;
             }
             catch { return 0; }   // proceso ya muerto: nada que registrar
@@ -73,22 +79,35 @@ namespace ArcmapMcp.AddIn.Handlers
         /// </summary>
         public static int MatarRunnersVivos()
         {
-            int[] pids;
+            var pids = new System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<int, DateTime>>();
             lock (_runnersVivos)
             {
-                pids = new int[_runnersVivos.Count];
-                _runnersVivos.CopyTo(pids);
+                pids.AddRange(_runnersVivos);
                 _runnersVivos.Clear();
             }
             int muertos = 0;
-            foreach (int pid in pids)
+            foreach (var registrado in pids)
             {
+                int pid = registrado.Key;
                 try
                 {
                     using (Process p = Process.GetProcessById(pid))
                     {
                         if (p.HasExited) continue;
-                        p.Kill();
+                        // ¿Sigue siendo NUESTRO runner, o Windows ya le dio ese PID a otro?
+                        // Si no se puede leer la hora de arranque, no se mata: ante la duda,
+                        // un runner huérfano es peor que molesto pero mejor que matar un
+                        // árbol ajeno.
+                        if (p.StartTime != registrado.Value)
+                        {
+                            Log.Info("PID " + pid + " ya no es el runner arcpy (arrancó a otra hora):"
+                                     + " Windows lo ha reutilizado. No se toca.");
+                            continue;
+                        }
+                        // Árbol entero y no solo el hijo: los procesos auxiliares de arcpy
+                        // son justo los que dejan a ArcMap a medio salir. Ver MatarArbol.
+                        MatarArbol(pid, "runner arcpy");
+                        try { if (!p.HasExited) p.Kill(); } catch { /* ya lo mató taskkill */ }
                         muertos++;
                         Log.Info("Runner arcpy (PID " + pid + ") terminado al parar el puente.");
                     }
@@ -96,6 +115,62 @@ namespace ArcmapMcp.AddIn.Handlers
                 catch { /* ya no existe, o no se deja: no hay nada mejor que hacer */ }
             }
             return muertos;
+        }
+
+        // Margen para que taskkill haga su recorrido. Es un proceso que vive milisegundos;
+        // el tope solo existe para que un taskkill colgado no bloquee a quien lo llamó.
+        private static readonly TimeSpan TaskkillTimeout = TimeSpan.FromSeconds(15);
+
+        /// <summary>
+        /// Mata el proceso y TODA su descendencia. `Process.Kill()` mata solo al hijo —en
+        /// net45 no existe `Kill(true)`— y arcpy lanza procesos auxiliares que quedan
+        /// huérfanos sujetando los pipes de salida: es el mismo nieto del que habla el
+        /// comentario largo de RunJob, y no es hipotético.
+        ///
+        /// Reproducido en aislado sobre .NET Framework 4.0.30319 el 2026-09-20 (cmd → cmd
+        /// → ping): con `p.Kill()` del padre el ping seguía vivo; con
+        /// `taskkill /PID n /T /F` desapareció el árbol entero, exit 0.
+        ///
+        /// taskkill en vez de recorrer WMI o Toolhelp: viene con Windows desde XP, hace el
+        /// recorrido de padres él solo y no añade dependencias. Se llama SIEMPRE ANTES del
+        /// Kill del hijo, que es cuando el árbol aún está entero: matando primero al padre,
+        /// el nieto queda reparentado y /T ya no sabría encontrarlo.
+        /// Sin redirección de salida a propósito: redirigir y no leer los pipes es
+        /// exactamente la forma de colgarse, y ArcMap no tiene consola donde ensuciar.
+        /// </summary>
+        private static void MatarArbol(int pid, string quien)
+        {
+            if (pid <= 0) return;
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = Path.Combine(Environment.SystemDirectory, "taskkill.exe"),
+                    Arguments = "/PID " + pid + " /T /F",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                using (Process t = Process.Start(psi))
+                {
+                    if (!t.WaitForExit((int)TaskkillTimeout.TotalMilliseconds))
+                    {
+                        Log.Error("taskkill sobre " + quien + " (PID " + pid + ") no terminó en "
+                                  + TaskkillTimeout.TotalSeconds + " s; se sigue con el Kill del hijo.");
+                        return;
+                    }
+                    // 128 = "no hay tal proceso": murió por su cuenta mientras tanto, no es fallo.
+                    if (t.ExitCode != 0 && t.ExitCode != 128)
+                        Log.Error("taskkill sobre " + quien + " (PID " + pid + ") devolvió "
+                                  + t.ExitCode + ": puede quedar vivo algún proceso auxiliar de arcpy.");
+                    else
+                        Log.Info("Árbol de procesos de " + quien + " (PID " + pid
+                                 + ") terminado con taskkill /T /F.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error("No se pudo lanzar taskkill sobre " + quien + " (PID " + pid + ")", ex);
+            }
         }
 
         // execute_arcpy es INTERACTIVO: al otro lado hay alguien esperando la
@@ -141,17 +216,20 @@ namespace ArcmapMcp.AddIn.Handlers
             + "si has cambiado algo en la sesión y no lo has guardado, ese cambio no está aquí. "
             + "Para incluirlo, guarda el documento (save_mxd) o repite con serializar_sesion=true.";
 
-        private static string PythonExe()
-        {
-            string exe = Environment.GetEnvironmentVariable("ARCMAP_PYTHON27");
-            if (string.IsNullOrEmpty(exe))
-                exe = @"C:\Python27\ArcGIS10.5\python.exe";
-            if (!File.Exists(exe))
-                throw new InvalidOperationException(
-                    "No se encuentra el Python 2.7 de ArcGIS (" + exe + "). "
-                    + "Define ARCMAP_PYTHON27 con la ruta correcta.");
-            return exe;
-        }
+        // Cómo se ha obtenido la copia. Viaja al resultado en `snapshot_via` porque no es
+        // un detalle de implementación: decide si las capas del snapshot resuelven o no.
+        public const string ViaDiscoTemp = "disco_temp";
+        public const string ViaDiscoJunto = "disco_junto_al_original";
+        public const string ViaSesion = "sesion_serializada";
+
+        // Prefijo de los snapshots que se dejan JUNTO AL ORIGINAL. Empieza por '~' para
+        // que ordene al final y se lea como lo que es, y lleva el nombre del add-in para
+        // que quien encuentre uno huérfano sepa de dónde salió.
+        private const string PrefijoJunto = "~arcmap-mcp-snap_";
+
+        // La ruta del intérprete la resuelve Python27: estaba escrita a mano aquí
+        // (C:\Python27\ArcGIS10.5\python.exe) y en otros dos sitios, y en 10.6-10.8
+        // execute_arcpy fallaba siempre salvo con ARCMAP_PYTHON27 definida a mano.
 
         private static string WorkDir()
         {
@@ -160,47 +238,178 @@ namespace ArcmapMcp.AddIn.Handlers
             return dir;
         }
 
-        /// <summary>Extrae el runner embebido a %TEMP%\arcmap-mcp\runner.py (cada
-        /// llamada: barato y a prueba de versiones de DLL conviviendo).</summary>
+        // Ruta del runner ya extraído en esta sesión. El nombre lleva el hash del
+        // contenido, así que una vez escrito no hay nada que rehacer.
+        private static string _runnerExtraido;
+
+        /// <summary>
+        /// Extrae el runner embebido a %TEMP%\arcmap-mcp\runner_&lt;hash8&gt;.py.
+        ///
+        /// El nombre lleva el HASH DEL CONTENIDO y no es fijo porque %TEMP% es del
+        /// usuario, no del add-in: con dos ArcMap abiertos (10.5 y 10.8, por ejemplo) con
+        /// versiones distintas del add-in, un `runner.py` fijo reescrito en cada llamada
+        /// es una carrera — el segundo pisa el fichero justo cuando el primero lo va a
+        /// ejecutar, y uno acaba corriendo el runner del otro. Con el hash en el nombre,
+        /// dos contenidos distintos son dos ficheros distintos y no se estorban.
+        ///
+        /// Y no se reescribe si ya está: File.Create TRUNCA el destino al abrirlo, así que
+        /// el fichero pasa por 0 bytes en cada llamada aunque el contenido sea el mismo.
+        /// </summary>
         private static string ExtraerRunner()
         {
-            string destino = Path.Combine(WorkDir(), "runner.py");
+            if (_runnerExtraido != null && File.Exists(_runnerExtraido))
+                return _runnerExtraido;
+
+            byte[] datos;
             Assembly asm = Assembly.GetExecutingAssembly();
             using (Stream s = asm.GetManifestResourceStream("ArcmapMcp.AddIn.Python.runner.py"))
             {
                 if (s == null)
                     throw new InvalidOperationException(
                         "Recurso embebido Python\\runner.py ausente del ensamblado (bug de build).");
-                using (FileStream f = File.Create(destino))
-                    s.CopyTo(f);
+                using (var ms = new MemoryStream())
+                {
+                    s.CopyTo(ms);
+                    datos = ms.ToArray();
+                }
             }
+
+            string destino = Path.Combine(WorkDir(), "runner_" + Hash8(datos) + ".py");
+            if (!MismoContenido(destino, datos))
+            {
+                // Escritura en dos pasos: un fichero temporal propio y un Move, que en el
+                // mismo volumen es atómico y FALLA si el destino ya existe. Así, si otro
+                // ArcMap llega a la vez, gana uno y el otro se queda con su fichero — que
+                // tiene el mismo hash, o sea el mismo contenido.
+                string temporal = destino + "." + Guid.NewGuid().ToString("N").Substring(0, 8) + ".tmp";
+                File.WriteAllBytes(temporal, datos);
+                try { File.Move(temporal, destino); }
+                catch (IOException) { Borrar(temporal); }
+            }
+            _runnerExtraido = destino;
             return destino;
         }
 
-        /// <summary>Copia del documento vivo a %TEMP% (SaveAsDocument en STA).
-        /// Se cronometra siempre: si un documento tarda, el log lo dice en vez de
-        /// dejar la impresion de que el puente se ha caido.</summary>
-        private static string Snapshot(bool serializarSesion)
+        /// <summary>Huella corta del recurso, solo para nombrar el fichero. No es
+        /// seguridad: es identidad de contenido.</summary>
+        private static string Hash8(byte[] datos)
         {
-            string ruta = Path.Combine(WorkDir(), "snap_" + Guid.NewGuid().ToString("N") + ".mxd");
-
-            // Vía barata y SEGURA por defecto: copiar el .mxd del disco.
-            // SaveAsDocument es la única parte de execute_arcpy que corre DENTRO de
-            // ArcMap, y serializar un documento con capas pesadas o fuentes rotas
-            // puede tumbar el proceso entero (el subproceso arcpy, en cambio, muere
-            // solo). Copiar un fichero no puede hacer eso. El precio: no incluye los
-            // cambios que la sesión aún no ha guardado, y eso se avisa al llamante.
-            string origen = serializarSesion ? null : SnapshotDesdeDisco();
-            if (origen != null)
+            using (var sha = System.Security.Cryptography.SHA1.Create())
             {
+                byte[] h = sha.ComputeHash(datos);
+                var sb = new StringBuilder(8);
+                for (int i = 0; i < 4; i++) sb.Append(h[i].ToString("x2"));
+                return sb.ToString();
+            }
+        }
+
+        private static bool MismoContenido(string ruta, byte[] datos)
+        {
+            try
+            {
+                if (!File.Exists(ruta)) return false;
+                byte[] actual = File.ReadAllBytes(ruta);
+                if (actual.Length != datos.Length) return false;
+                for (int i = 0; i < datos.Length; i++)
+                    if (actual[i] != datos[i]) return false;
+                return true;
+            }
+            catch { return false; }   // ilegible (otro proceso escribiéndolo): se reescribe
+        }
+
+        /// <summary>La copia del documento y por qué vía se consiguió.</summary>
+        private sealed class Instantanea
+        {
+            public readonly string Ruta;
+            public readonly string Via;
+            public Instantanea(string ruta, string via) { Ruta = ruta; Via = via; }
+        }
+
+        /// <summary>El .mxd tal y como está en disco, con la casilla de rutas relativas.</summary>
+        private sealed class DocumentoEnDisco
+        {
+            public string Ruta;
+            public string Carpeta;
+            public bool RutasRelativas;
+        }
+
+        /// <summary>
+        /// Copia del documento vivo. Se cronometra siempre: si un documento tarda, el log
+        /// lo dice en vez de dejar la impresión de que el puente se ha caído.
+        ///
+        /// Vía barata y SEGURA por defecto: copiar el .mxd del disco. SaveAsDocument es la
+        /// única parte de execute_arcpy que corre DENTRO de ArcMap, y serializar un
+        /// documento con capas pesadas o fuentes rotas puede tumbar el proceso entero (el
+        /// subproceso arcpy, en cambio, muere solo). Copiar un fichero no puede hacer eso.
+        /// El precio: no incluye los cambios que la sesión aún no ha guardado, y eso se
+        /// avisa al llamante.
+        ///
+        /// PERO dónde se deja la copia no da igual. Si el documento guarda RUTAS RELATIVAS
+        /// (Propiedades del documento &gt; "Store relative pathnames"), copiarlo a %TEMP%
+        /// deja TODAS sus capas rotas, porque cada fuente se resuelve desde la carpeta del
+        /// .mxd. Probado en aislado con arcpy el 2026-09-20: un mxd con relativePaths=True
+        /// copiado a otra carpeta devuelve la lista entera en ListBrokenDataSources; con
+        /// rutas absolutas, ninguna. Y no falla ruidosamente: export_ddp sacaría el atlas
+        /// completo, con su leyenda y sus marcos, y sin un solo dato dentro.
+        /// Por eso, con rutas relativas la copia se deja JUNTO AL ORIGINAL (mismo
+        /// directorio, nombre propio y oculta, borrada en el finally de RunJobConSnapshot),
+        /// y si esa carpeta no deja escribir se cae a SaveAsDocument — que sí recalcula las
+        /// rutas al guardar — pero NUNCA a %TEMP%, que se sabe roto.
+        /// </summary>
+        private static Instantanea Snapshot(bool serializarSesion)
+        {
+            DocumentoEnDisco doc = serializarSesion ? null : LeerDocumentoEnDisco();
+            BarrerRestos(doc == null ? null : doc.Carpeta);
+
+            if (doc != null && !doc.RutasRelativas)
+            {
+                string destino = Path.Combine(WorkDir(), "snap_" + Guid.NewGuid().ToString("N") + ".mxd");
                 var relojDisco = Stopwatch.StartNew();
-                File.Copy(origen, ruta, true);
+                File.Copy(doc.Ruta, destino, true);
                 relojDisco.Stop();
-                Log.Info("Documento copiado del disco en " + relojDisco.Elapsed.TotalSeconds.ToString("0.0")
-                         + " s (sin ocupar ArcMap): " + origen);
-                return ruta;
+                Log.Info("Documento copiado del disco a %TEMP% en "
+                         + relojDisco.Elapsed.TotalSeconds.ToString("0.0") + " s (sin ocupar ArcMap): "
+                         + doc.Ruta + ". Vía '" + ViaDiscoTemp + "': el documento guarda rutas"
+                         + " ABSOLUTAS, así que sus capas resuelven desde cualquier carpeta.");
+                return new Instantanea(destino, ViaDiscoTemp);
             }
 
+            if (doc != null)
+            {
+                string junto = Path.Combine(doc.Carpeta, PrefijoJunto + Guid.NewGuid().ToString("N") + ".mxd");
+                try
+                {
+                    var relojJunto = Stopwatch.StartNew();
+                    File.Copy(doc.Ruta, junto, true);
+                    relojJunto.Stop();
+                    // Oculto para no ensuciar la carpeta de trabajo del usuario mientras
+                    // dura el job. Se ASIGNAN los atributos, no se añade Hidden a los que
+                    // haya: File.Copy hereda el ReadOnly del original —un .mxd traído de
+                    // red o de un CD lo trae a menudo— y un fichero de solo lectura no se
+                    // puede borrar. Comprobado en aislado el 2026-09-20: con
+                    // `GetAttributes(x) | Hidden` el File.Delete de después lanza
+                    // UnauthorizedAccessException y la copia se queda en la carpeta del
+                    // usuario en CADA llamada; asignando Hidden a secas, se borra.
+                    // Que no se deje tocar los atributos no es un fallo: Borrar() insiste.
+                    try { File.SetAttributes(junto, FileAttributes.Hidden); }
+                    catch { }
+                    Log.Info("Documento copiado JUNTO AL ORIGINAL en "
+                             + relojJunto.Elapsed.TotalSeconds.ToString("0.0") + " s: " + junto
+                             + ". Vía '" + ViaDiscoJunto + "', porque el documento guarda rutas"
+                             + " RELATIVAS y una copia en %TEMP% dejaría todas sus capas rotas.");
+                    return new Instantanea(junto, ViaDiscoJunto);
+                }
+                catch (Exception ex)
+                {
+                    Borrar(junto);
+                    Log.Error("No se ha podido dejar la copia junto al original (" + doc.Carpeta + "): "
+                              + ex.Message + ". El documento guarda rutas RELATIVAS, así que NO se cae"
+                              + " a %TEMP% (rompería todas sus capas): se serializa desde ArcMap, que"
+                              + " recalcula las rutas al guardar, aunque cueste minutos.");
+                }
+            }
+
+            string ruta = Path.Combine(WorkDir(), "snap_" + Guid.NewGuid().ToString("N") + ".mxd");
             Log.Info("Copiando el documento a " + ruta + " (ArcMap queda ocupado mientras dura)");
             var reloj = Stopwatch.StartNew();
             JObject r = StaDispatcher.Invoke(delegate
@@ -208,7 +417,7 @@ namespace ArcmapMcp.AddIn.Handlers
                 IApplication app = ArcSession.App();
                 app.SaveAsDocument(ruta, true); // true = copia: el doc activo no cambia
                 return Protocol.Result(new JObject());
-            }, SnapshotTimeout);
+            }, SnapshotTimeout, "copiar el documento (SaveAsDocument)");
             reloj.Stop();
 
             if (!(bool)r["ok"])
@@ -224,32 +433,153 @@ namespace ArcmapMcp.AddIn.Handlers
 
             long mb = 0;
             try { mb = new FileInfo(ruta).Length / (1024 * 1024); } catch { }
-            Log.Info("Documento copiado en " + reloj.Elapsed.TotalSeconds.ToString("0.0") + " s (" + mb + " MB)");
-            return ruta;
+            Log.Info("Documento copiado en " + reloj.Elapsed.TotalSeconds.ToString("0.0") + " s (" + mb + " MB)"
+                     + ". Vía '" + ViaSesion + "'.");
+            return new Instantanea(ruta, ViaSesion);
         }
 
         /// <summary>
-        /// Ruta del .mxd tal y como está EN DISCO, si existe. ArcObjects no permite
-        /// consultar si el documento tiene cambios sin guardar (IDocumentDirty2 solo
-        /// deja marcarlo), así que la diferencia se comunica en el aviso del
-        /// resultado en vez de intentar adivinarla.
+        /// El .mxd tal y como está EN DISCO, si existe, y si guarda rutas relativas.
+        /// ArcObjects no permite consultar si el documento tiene cambios sin guardar
+        /// (IDocumentDirty2 solo deja marcarlo), así que esa diferencia se comunica en el
+        /// aviso del resultado en vez de intentar adivinarla.
+        ///
+        /// `IMxDocument.RelativePaths` es la MISMA casilla que Propiedades del documento
+        /// &gt; "Store relative pathnames" (bool de lectura/escritura; también accesible
+        /// como IDocumentInfo2.RelativePaths sobre el mismo objeto).
         /// </summary>
-        private static string SnapshotDesdeDisco()
+        private static DocumentoEnDisco LeerDocumentoEnDisco()
         {
             JObject r = StaDispatcher.Invoke(delegate
             {
                 IApplication app = ArcSession.App();
-                return Protocol.Result(new JObject { ["ruta"] = ArcSession.MxdPath(app) });
-            }, StaStepTimeout);
+                var o = new JObject { ["ruta"] = ArcSession.MxdPath(app) };
+                try
+                {
+                    IMxDocument doc = app.Document as IMxDocument;
+                    if (doc != null) o["relativas"] = doc.RelativePaths;
+                }
+                catch (Exception ex)
+                {
+                    o["relativas_error"] = ex.Message;
+                }
+                return Protocol.Result(o);
+            }, StaStepTimeout, "leer la ruta del documento");
 
             if (!(bool)r["ok"]) return null;
-            string mxd = (string)r["result"]["ruta"];
+            JObject res = (JObject)r["result"];
+            string mxd = (string)res["ruta"];
             if (string.IsNullOrEmpty(mxd) || !File.Exists(mxd))
             {
                 Log.Info("El documento no está guardado en disco: hay que serializarlo desde ArcMap.");
                 return null;
             }
-            return mxd;
+
+            string carpeta = null;
+            try { carpeta = Path.GetDirectoryName(mxd); } catch { }
+            if (string.IsNullOrEmpty(carpeta)) return null;
+
+            JToken rel = res["relativas"];
+            bool relativas;
+            if (rel != null && rel.Type == JTokenType.Boolean)
+            {
+                relativas = (bool)rel;
+            }
+            else
+            {
+                // No se ha podido leer la casilla: se asume que SÍ son relativas, que es
+                // la suposición segura. Si acierta, perfecto; si se equivoca, lo único que
+                // pasa es que la copia se deja junto al original en vez de en %TEMP%. Al
+                // revés —asumir absolutas— se entregaría un documento con TODAS las capas
+                // rotas sin que nada fallara por el camino.
+                relativas = true;
+                Log.Error("No se ha podido leer si el documento usa rutas relativas ("
+                          + ((string)res["relativas_error"] ?? "documento no accesible")
+                          + "): se asume que SÍ, que es lo seguro.");
+            }
+
+            return new DocumentoEnDisco { Ruta = mxd, Carpeta = carpeta, RutasRelativas = relativas };
+        }
+
+        // Carpetas de documento ya barridas en esta sesión, y si %TEMP% ya lo está. El
+        // barrido se hace UNA vez por carpeta y no en cada Snapshot: en una carpeta de red
+        // con miles de ficheros, listar no es gratis y esto está en el camino caliente.
+        private static readonly System.Collections.Generic.HashSet<string> _carpetasBarridas =
+            new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private static bool _tempBarrido;
+
+        /// <summary>
+        /// Borra restos de sesiones anteriores. Si ArcMap muere a mitad de un
+        /// execute_arcpy, el `finally` que borra el snapshot no llega a correr y queda un
+        /// fichero suelto — y desde que la copia puede caer JUNTO AL ORIGINAL, en la
+        /// carpeta de trabajo del usuario, que es donde molesta de verdad. En %TEMP% se
+        /// acumula además la evidencia que se conserva a propósito ante una salida
+        /// ilegible, y esa evidencia incluye el CÓDIGO DEL USUARIO: no puede crecer sin
+        /// límite.
+        ///
+        /// Los umbrales no son decorativos. 1 día junto al original porque un snapshot
+        /// recién creado puede ser de otro ArcMap trabajando ahora mismo, y borrárselo en
+        /// mitad del job le rompería la ejecución. 7 días en %TEMP% porque ahí vive la
+        /// evidencia de diagnóstico y una semana es lo que tarda alguien en mirarla.
+        ///
+        /// Best-effort absoluto: un barrido que falle no puede tumbar el snapshot que va
+        /// detrás.
+        /// </summary>
+        private static void BarrerRestos(string carpetaDocumento)
+        {
+            try
+            {
+                bool barrerTemp;
+                lock (_carpetasBarridas)
+                {
+                    barrerTemp = !_tempBarrido;
+                    _tempBarrido = true;
+                }
+                if (barrerTemp)
+                {
+                    DateTime limite = DateTime.UtcNow.AddDays(-7);
+                    string temp = WorkDir();
+                    foreach (string patron in new[] { "snap_*.mxd", "job_*.json", "out_*.json", "out_*.json.fase" })
+                        BorrarViejos(temp, patron, limite);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Info("Barrido de %TEMP% fallido (se sigue igual): " + ex.Message);
+            }
+
+            if (string.IsNullOrEmpty(carpetaDocumento)) return;
+            try
+            {
+                bool primeraVez;
+                lock (_carpetasBarridas) primeraVez = _carpetasBarridas.Add(carpetaDocumento);
+                if (!primeraVez) return;
+                BorrarViejos(carpetaDocumento, PrefijoJunto + "*.mxd", DateTime.UtcNow.AddDays(-1));
+            }
+            catch (Exception ex)
+            {
+                Log.Info("Barrido junto al documento fallido (se sigue igual): " + ex.Message);
+            }
+        }
+
+        private static void BorrarViejos(string carpeta, string patron, DateTime limiteUtc)
+        {
+            if (!Directory.Exists(carpeta)) return;
+            int borrados = 0;
+            foreach (string f in Directory.GetFiles(carpeta, patron))
+            {
+                try
+                {
+                    if (File.GetLastWriteTimeUtc(f) >= limiteUtc) continue;
+                    File.SetAttributes(f, FileAttributes.Normal);  // los de junto al original van ocultos
+                    File.Delete(f);
+                    borrados++;
+                }
+                catch { /* en uso por otro ArcMap, o sin permiso: ya se intentará mañana */ }
+            }
+            if (borrados > 0)
+                Log.Info("Limpieza: " + borrados + " resto(s) '" + patron + "' anteriores a "
+                         + limiteUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm") + " borrados de " + carpeta);
         }
 
         /// <summary>Lanza el runner con el job y devuelve su JSON de salida.
@@ -281,7 +611,7 @@ namespace ArcmapMcp.AddIn.Handlers
             {
                 var psi = new ProcessStartInfo
                 {
-                    FileName = PythonExe(),
+                    FileName = Python27.Exe(),
                     Arguments = "\"" + runner + "\" \"" + jobPath + "\" \"" + outPath + "\"",
                     UseShellExecute = false,
                     CreateNoWindow = true,
@@ -330,10 +660,15 @@ namespace ArcmapMcp.AddIn.Handlers
                             ? "no llegó a anotar ninguna fase (murió al arrancar el intérprete)"
                             : "atascado en la fase '" + fase + "' desde hace "
                               + (reloj.Elapsed - faseDesde).TotalSeconds.ToString("0") + " s";
-                        try { p.Kill(); } catch { /* ya muerto */ }
+                        // El ÁRBOL, no solo el hijo: arcpy lanza procesos auxiliares que
+                        // sobreviven a un p.Kill() pelado y se quedan sujetando los pipes
+                        // heredados. Primero taskkill /T (que necesita al padre vivo para
+                        // encontrar la descendencia) y después el Kill como red.
+                        MatarArbol(PidCrudo(p), "runner '" + op + "'");
+                        try { if (!p.HasExited) p.Kill(); } catch { /* ya muerto */ }
                         Log.Error("runner '" + op + "' superó el timeout de " + tope.TotalSeconds
                                   + " s: " + donde + ". Proceso " + PidSeguro(p)
-                                  + " terminado. Evidencia: " + jobPath);
+                                  + " y su árbol terminados. Evidencia: " + jobPath);
                         conservarEvidencia = true;
                         return Protocol.Error("Timeout (" + tope.TotalSeconds
                             + " s) del subprocess arcpy en '" + op + "': " + donde
@@ -466,23 +801,46 @@ namespace ArcmapMcp.AddIn.Handlers
             try { return "PID " + p.Id; } catch { return "(PID desconocido)"; }
         }
 
-        private static void Borrar(string ruta)
+        /// <summary>El PID como número, o 0 si ya no se puede leer.</summary>
+        private static int PidCrudo(Process p)
         {
-            try { if (ruta != null && File.Exists(ruta)) File.Delete(ruta); } catch { }
+            try { return p.Id; } catch { return 0; }
         }
 
-        /// <summary>Job de documento: snapshot + runner + limpieza del snapshot.</summary>
+        /// <summary>Borra un fichero de trabajo. Limpia antes los atributos porque
+        /// File.Copy hereda el ReadOnly del original, y un .mxd de solo lectura hacía que
+        /// su copia —en %TEMP% o junto al original— no se pudiera borrar nunca.</summary>
+        private static void Borrar(string ruta)
+        {
+            if (ruta == null) return;
+            try
+            {
+                if (!File.Exists(ruta)) return;
+                try { File.SetAttributes(ruta, FileAttributes.Normal); } catch { }
+                File.Delete(ruta);
+            }
+            catch { }
+        }
+
+        /// <summary>Job de documento: snapshot + runner + limpieza del snapshot.
+        /// Añade al resultado `snapshot_via`, que dice de dónde salió la copia: con
+        /// rutas relativas la vía decide si las capas del snapshot resuelven o no, y eso
+        /// no se puede dejar solo en el log.</summary>
         private static JObject RunJobConSnapshot(string op, JObject parameters, bool serializarSesion = false,
                                                  TimeSpan? timeout = null)
         {
-            string snap = Snapshot(serializarSesion);
+            Instantanea snap = Snapshot(serializarSesion);
             try
             {
-                return RunJob(op, parameters, snap, timeout);
+                JObject r = RunJob(op, parameters, snap.Ruta, timeout);
+                JObject res = r["result"] as JObject;
+                if (res != null)
+                    res["snapshot_via"] = snap.Via;
+                return r;
             }
             finally
             {
-                Borrar(snap);
+                Borrar(snap.Ruta);
             }
         }
 
@@ -499,7 +857,7 @@ namespace ArcmapMcp.AddIn.Handlers
                 doc.UpdateContents();
                 doc.ActiveView.Refresh();
                 return Protocol.Result(new JObject());
-            }, StaStepTimeout);
+            }, StaStepTimeout, "añadir la salida al mapa");
             if (!(bool)r["ok"])
                 Log.Info("anadir_al_mapa best-effort falló para '" + ruta + "': " + (string)r["error"]);
             return (bool)r["ok"];
@@ -508,6 +866,21 @@ namespace ArcmapMcp.AddIn.Handlers
         // ------------------------------------------------------------------ //
         // Handlers (nombre de comando y contrato JSON de los schemas del servidor MCP).
         // ------------------------------------------------------------------ //
+
+        // Las cuatro señales son, exactamente, los nombres que el runner inyecta en el
+        // namespace del código del usuario cuando hay snapshot: arcpy, MAP/mapping, mxd
+        // y df. Si el código no nombra ninguno, no puede estar usando el documento.
+        //
+        // `mxd` NO cuenta detrás de un punto: ahí es la EXTENSIÓN de un fichero
+        // (r"C:\planos\hoja.mxd", f.endswith(".mxd")), no la variable inyectada. Un
+        // código que solo AUDITA otros .mxd del disco forzaba copiar el documento vivo
+        // para nada, y en un mxd pesado eso son minutos. El resto de señales se dejan
+        // tal cual, incluidas las que van tras punto — `arcpy.mapping` es la forma normal
+        // de escribirlo—: el sesgo sigue siendo hacia el FALSO POSITIVO, porque copiar de
+        // más solo cuesta tiempo y copiar de menos rompe el código del usuario con un
+        // NameError.
+        private static readonly Regex SenalDocumento = new Regex(
+            @"\b(df|MAP|mapping)\b|(?<!\.)\bmxd\b", RegexOptions.Compiled);
 
         /// <summary>
         /// ¿El código necesita el documento? Solo si menciona `mxd`, `df` o el módulo
@@ -518,7 +891,7 @@ namespace ArcmapMcp.AddIn.Handlers
         private static bool NecesitaDocumento(string code)
         {
             if (string.IsNullOrEmpty(code)) return false;
-            return Regex.IsMatch(code, @"\b(mxd|df|MAP|mapping)\b");
+            return SenalDocumento.IsMatch(code);
         }
 
         public static JObject ExecuteArcpy(JObject parameters)
@@ -569,8 +942,15 @@ namespace ArcmapMcp.AddIn.Handlers
 
             if ((bool)r["ok"])
             {
+                // El aviso lo decide la vía REAL, no lo que se pidió: con rutas relativas
+                // y la carpeta del documento sin permiso de escritura, un
+                // serializar_sesion=false acaba en SaveAsDocument, y decirle entonces al
+                // llamante que la copia salió del disco sería mentirle sobre si sus
+                // cambios sin guardar están dentro.
+                string via = (string)r["result"]["snapshot_via"];
+                bool copiaDeDisco = via == ViaDiscoTemp || via == ViaDiscoJunto;
                 r["result"]["aviso"] = conDocumento
-                    ? (serializarSesion ? AvisoSnapshot : AvisoSnapshot + AvisoSnapshotDisco)
+                    ? (copiaDeDisco ? AvisoSnapshot + AvisoSnapshotDisco : AvisoSnapshot)
                     : "Ejecutado SIN copiar el documento (el código no usa mxd ni df): más rápido y sin "
                       + "ocupar ArcMap. Si necesitas la sesión, pasa usar_documento=true.";
 
@@ -641,7 +1021,7 @@ namespace ArcmapMcp.AddIn.Handlers
                 ((IActiveView)map).Extent = env;
                 doc.ActiveView.Refresh();
                 return Protocol.Result(new JObject { ["escala"] = map.MapScale });
-            }, StaStepTimeout);
+            }, StaStepTimeout, "aplicar el encuadre de la página DDP");
             if (!(bool)aplicado["ok"])
                 return aplicado;
 
@@ -650,6 +1030,9 @@ namespace ArcmapMcp.AddIn.Handlers
                 ["page_id"] = info["page_id"],
                 ["valor"] = info["valor"],
                 ["escala"] = aplicado["result"]["escala"],
+                // Se reexpide: este handler construye un resultado nuevo y el
+                // `snapshot_via` que puso RunJobConSnapshot se quedaría en el camino.
+                ["snapshot_via"] = info["snapshot_via"],
                 ["aviso"] = "Aproximación: se aplica el ENCUADRE de la página al data frame "
                     + "vivo, pero el atlas de la sesión no cambia de página (DDP solo existe en "
                     + "arcpy): textos dinámicos y queries por página no se actualizan. Para "

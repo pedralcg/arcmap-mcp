@@ -40,12 +40,13 @@ y añade el bloque `arcmap` a la configuración de cada cliente sin tocar el res
 copia de seguridad antes de escribir). Es idempotente: repítelo tras cada actualización
 del add-in.
 
-Después, abre ArcMap y marca la casilla **Autoarranque** de la barra `arcmap-mcp`: el
-puente se levantará solo en cada sesión. Para comprobar que todo responde:
+Después, abre ArcMap, activa la barra `arcmap-mcp` en *Customize ▸ Toolbars* (no
+aparece sola) y pon su desplegable **Autoarranque** en **Sí**: el puente se levantará
+solo en cada sesión. Para comprobar que todo responde:
 
 ```powershell
-.\install.ps1 -SoloVerificar       # estado del entorno + ping real al puente
-.\install.ps1 -Desinstalar         # retira add-in, venv y entradas de los clientes
+.\install.ps1 -SoloVerificar       # entorno, versión del add-in instalado y ping real al puente
+.\install.ps1 -Desinstalar         # retira add-in, venv, entradas de los clientes y restos locales
 ```
 
 Si algo no encaja en tu equipo, los pasos manuales equivalentes son los de abajo.
@@ -137,7 +138,8 @@ Esto deja el intérprete en:
 1. **Cierra ArcMap** (el instalador de add-ins no actualiza una sesión abierta).
 2. Doble clic en `addin\dist\arcmap-mcp.esriaddin` ▸ **Install**.
 3. Abre ArcMap y activa la barra **arcmap-mcp** en *Customize ▸ Toolbars ▸ arcmap-mcp*.
-   Trae 4 botones: **Iniciar / Detener / Estado / Acerca de**.
+   Trae 6 controles: **Iniciar · Detener · Estado · Autoarranque · Reportar ·
+   Acerca de** (*Autoarranque* es un **desplegable** Sí/No, no una casilla).
 
    > **Desde la 2.8.2 la barra no aparece sola tras instalar, y es deliberado.** El
    > add-in declaraba `showInitially="true"`, que fuerza la barra visible en **cada**
@@ -151,16 +153,21 @@ el `.esriaddin` es un ZIP — extráelo a
 `%USERPROFILE%\Documents\ArcGIS\AddIns\Desktop10.5\{51f4ce63-6bcf-49b2-ae3a-ba2c79ea3e1a}\`
 (la carpeta debe contener `Config.xml` e `Install\`) y reabre ArcMap.
 
-4. Pulsa **Iniciar** → MessageBox «Puente iniciado». O marca la casilla
-   **Autoarranque** y el puente se levantará solo en cada sesión de ArcMap (la
-   preferencia se guarda por usuario en `HKCU\Software\pedralcg\arcmap-mcp`).
+4. Pulsa **Iniciar** → MessageBox «Puente iniciado». O pon el desplegable
+   **Autoarranque** en **Sí** y el puente se levantará solo en cada sesión de ArcMap
+   (la preferencia se guarda por usuario en `HKCU\Software\pedralcg\arcmap-mcp`).
    El add-in escucha en
    `127.0.0.1:27179` y registra su actividad en `C:\MCP_Logs\arcmap-mcp.log`
    (si algo no va, ese log es el primer sitio donde mirar).
 
-> **Una sola instancia de ArcMap.** Con dos ArcMap abiertos a la vez, el segundo
-> puede arrancar **sin el add-in** y sin avisar (el primero bloquea la DLL). Trabaja
-> con una única instancia.
+> **Una sola instancia de ArcMap.** El add-in **sí se carga en todas las ventanas** —
+> eso no es el problema. Lo que es único es el **puerto**: lo agarra el primer ArcMap
+> donde pulses *Iniciar*, y en los demás el puente no levanta (queda anotado en
+> `C:\MCP_Logs\arcmap-mcp.log`, sin romper nada). Consecuencia práctica: con varios
+> ArcMap abiertos, el servidor MCP ve **uno solo**, el del puente, y los otros le son
+> invisibles. Trabaja con una única instancia; si de verdad necesitas dos puentes a la
+> vez, desde la 2.10.0 puedes darle otro puerto al segundo con `ARCMAP_BRIDGE_PORT`
+> (definida antes de abrir ese ArcMap) y apuntar allí a otro cliente.
 >
 > **Requisito del análisis arcpy:** las herramientas `execute_arcpy`, Data Driven
 > Pages y análisis ambiental usan el **Python 2.7 de ArcGIS Desktop**
@@ -275,21 +282,50 @@ y los exports sí ocupan la interfaz mientras duran. Tres cosas a tener en cuent
 
    Actívalas en ArcMap: *Customize ▸ Extensions*. Si falta la licencia, la tool
    devuelve un error claro.
-2. **Timeout.** Si un proceso es muy largo (rásters nacionales, atlas enormes) y el
-   server reporta *timeout*, sube `ARCMAP_GP_TIMEOUT` (segundos, 1800 por defecto) en
-   el bloque `env` de la config del cliente. El proceso sigue vivo aunque el server
-   deje de esperar.
-3. **Atlas grandes.** `export_ddp` con `paginas="ALL"` sobre cientos de páginas puede
-   superar el timeout estándar de 60 s: exporta por lista de valores o por rango.
+2. **Timeout.** Si el server reporta *timeout*, sube **la variable del grupo al que
+   pertenece esa tool** en el bloque `env` de la config del cliente (tabla completa
+   abajo, en *Variables de entorno*). El trabajo sigue vivo en ArcMap aunque el server
+   deje de esperar. Dos avisos que ahorran tiempo:
+   - `run_geoprocessing`, `calculate_geometry` y los export van por
+     `ARCMAP_GP_TIMEOUT`; **las DDP y las ambientales, no**: esas van por
+     `ARCMAP_FONDO_TIMEOUT`.
+   - **`execute_arcpy` tampoco va por `ARCMAP_GP_TIMEOUT`**, sino por
+     `ARCMAP_EXEC_TIMEOUT_CLIENTE` (930 s) en el server y `ARCMAP_EXEC_TIMEOUT`
+     (900 s) en el add-in. Subir `ARCMAP_GP_TIMEOUT` no alarga nada allí.
+3. **Atlas grandes.** `export_ddp` sobre cientos de páginas puede agotar la espera aun
+   con el timeout amplio: exporta por lista de `valores` o por `rango`. (No existe un
+   parámetro `paginas`; la firma es
+   `export_ddp(salida, modo, rango, valores, un_pdf_por_pagina, dpi)`.)
 
 ## Variables de entorno
 
-Todas son opcionales (hay valores por defecto). Están documentadas en
-[`../.env.example`](../.env.example): host/puerto/timeouts del servidor
-(`ARCMAP_BRIDGE_HOST`, `ARCMAP_BRIDGE_PORT`, `ARCMAP_BRIDGE_TIMEOUT`,
-`ARCMAP_GP_TIMEOUT`) y ruta del Python 2.7 del runner (`ARCMAP_PYTHON27`). El server
-las lee del entorno o del bloque `env` de la config MCP; el add-in, del entorno del
-usuario (defínelas antes de abrir ArcMap).
+Todas son opcionales (hay valores por defecto) y están documentadas una a una en
+[`../.env.example`](../.env.example). Lo que importa aquí es **quién lee cada cosa**,
+porque no es intercambiable:
+
+| Variable | La lee | Default | Para qué |
+|---|---|---|---|
+| `ARCMAP_BRIDGE_HOST` | server | `127.0.0.1` | Extremo local del túnel, si no es el loopback |
+| `ARCMAP_BRIDGE_PORT` | **server y add-in** | `27179` | Puerto del puente (1024-65535) |
+| `ARCMAP_BRIDGE_TIMEOUT` | server | `60` | Tools rápidas: consultas, capas, simbología, navegación |
+| `ARCMAP_GP_TIMEOUT` | server | `1860` | Lo que ocupa el hilo de ArcMap: `run_geoprocessing`, `calculate_geometry` y los 3 export |
+| `ARCMAP_FONDO_TIMEOUT` | server | `2760` | Handler de fondo: las 3 de Data Driven Pages y las 5 ambientales |
+| `ARCMAP_SAVE_TIMEOUT` | server | `630` | `save_mxd` y `save_mxd_as` |
+| `ARCMAP_EXEC_TIMEOUT_CLIENTE` | server | `930` | **Solo `execute_arcpy`** |
+| `ARCMAP_EXEC_SESION_TIMEOUT_CLIENTE` | server | `1560` | `execute_arcpy` con `serializar_sesion=True` (600 s de copia + 900 s de ejecución + margen) |
+| `ARCMAP_EXEC_TIMEOUT` | add-in | `900` | Tope del subproceso de `execute_arcpy` |
+| `ARCMAP_SUBPROCESS_TIMEOUT` | add-in | `1800` | Tope del resto de trabajos del runner (DDP, ambientales) |
+| `ARCMAP_PYTHON27` | add-in | `C:\Python27\ArcGIS10.5\python.exe` | Ruta del Python 2.7 del runner arcpy |
+
+Las del **server** van en el bloque `env` de la config MCP del cliente (o en el entorno
+desde el que ese cliente arranca). Las del **add-in** van en las **variables de usuario
+de Windows, definidas antes de abrir ArcMap**: el add-in corre dentro del proceso de
+ArcMap, que no ve nada del bloque `env` del cliente MCP — ponerlas ahí no hace nada.
+
+Los topes del server están **por encima** de los del add-in a propósito: así vence
+primero el del add-in, que mata el subproceso y devuelve un error diciendo en qué fase
+se quedó, en vez de un corte mudo de socket que además deja el runner huérfano vivo (y
+un runner huérfano impide cerrar ArcMap).
 
 `ARCMAP_BRIDGE_PORT` es la única que hay que poner **en los dos extremos**: el add-in y
 el servidor la leen con el mismo nombre, cada uno de su propio entorno, así que

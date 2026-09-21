@@ -8,7 +8,9 @@ esto EXIGE ArcMap abierto con el puente arrancado, y por eso no lleva prefijo
 Uso:  python tests/regresion_sesion_viva.py     (sale 1 si algo falla)
 
 Para que sirve: despues de tocar el add-in y reinstalarlo, confirmar que no se ha
-roto nada por el camino. Cubre 33 llamadas.
+roto nada por el camino. Cubre unas 70 comprobaciones; el ultimo bloque, "revision
+2026-09-20", es ademas la PRIMERA prueba real de unos arreglos que se escribieron
+con ArcMap cerrado.
 
 Solo tools de LECTURA o de efecto acotado y reversible sobre un documento de
 pruebas: nada de exports masivos, nada de guardar el .mxd, nada de tocar datos.
@@ -31,10 +33,12 @@ NOMBRE_VEC = "Áreas Naturales de Interés Turístico"
 
 # Raster CATEGORICO (mascara de visibilidad 0/1/2 con NoData 255) y su .lyr de
 # valores unicos: el caso que el modo clasificado no puede cubrir.
+#
+# Todos los fixtures viven bajo C:\temp a proposito: este repo es PUBLICO y aqui habia
+# una ruta con el nombre de un cliente y el arbol de carpetas de la empresa. Si cambias
+# de datos de prueba, copialos a C:\temp y apunta aqui; no pongas rutas de proyecto.
 VIS_DIR = "C:" + SEP + "temp" + SEP + "20260911_lyr_visibilidad_rcd"
-VIS_TIF = ("F:" + SEP + "Esteban Dropbox" + SEP + "Pedro Alcoba" + SEP
-           + "ID2026_035_Estudio Paisajistico RCD Rosi" + SEP + "01_GIS" + SEP + "01_Datos"
-           + SEP + "Visibilidad_plataformas" + SEP + "Vis_plataformas_acumulado_sin_pantalla.tif")
+VIS_TIF = VIS_DIR + SEP + "Vis_plataformas_acumulado_sin_pantalla.tif"
 VIS = "Vis_plataformas_acumulado_sin_pantalla.tif"
 LYR_VIS = VIS_DIR + SEP + "Vis_plataformas_acumulado_sin_pantalla.lyr"
 LYR_GRUPO = VIS_DIR + SEP + "05_Analisis_de_visibilidad.lyr"
@@ -139,9 +143,277 @@ t("list_fields", {"capa": "no_existe"}, espera_ok=False, nota="(capa inexistente
 t("set_raster_symbology", {"capa": NOMBRE_VEC}, espera_ok=False, nota="(raster sobre vectorial)")
 t("comando_inventado", {}, espera_ok=False, nota="(comando desconocido)")
 
+def comprobar(etiqueta, condicion, detalle=""):
+    """Comprobacion sobre el CONTENIDO de una respuesta, no solo sobre su `ok`."""
+    global ok_n
+    if condicion:
+        ok_n += 1
+    else:
+        fallos.append((etiqueta, detalle[:110]))
+    sys.stdout.write("  [%s] %-30s %s" % ("OK " if condicion else "FALLO", etiqueta, chr(10)))
+
+
+def res(r):
+    return (r or {}).get("result") or {}
+
+
+def rotas_en_sesion():
+    """Cuantas capas tiene ROTAS la sesion viva. Es la LINEA BASE: una copia con las
+    mismas rotas que el original no es una regresion, y exigir cero solo funciona en un
+    documento impecable -- el de pruebas no lo es (tiene 3 rotas de origen), asi que
+    'capas_rotas_en_copia == 0' daba FALLO con el arreglo funcionando perfectamente.
+    Comparar los NOMBRES seria mas fuerte que el recuento (tres rotas distintas dan el
+    mismo numero), pero el testigo solo trae el numero; los nombres van en la prosa de
+    'aviso_capas_rotas' y parsearla es mas fragil que lo que aporta."""
+    try:
+        return int((enviar("list_broken_data_sources", {}).get("result") or {}).get("num") or 0)
+    except Exception:
+        return None
+
+
+def borrar_fichero(ruta):
+    """Para salidas que NO son datasets (un PDF): management.Delete no las toca."""
+    try:
+        if os.path.exists(ruta):
+            os.remove(ruta)
+    except Exception:
+        pass
+
+
+def limpiar(*rutas):
+    """Borra salidas de pases anteriores SIN puntuar. El script se relanza a menudo, y
+    un CopyFeatures contra un destino que ya existe falla por eso, no por lo que se
+    esta probando: un fallo asi se lee como regresion y no lo es."""
+    for ruta in rutas:
+        try:
+            enviar("run_geoprocessing", {"tool": "management.Delete", "params": [ruta]})
+        except Exception:
+            pass
+
+
+sys.stdout.write("--- revision 2026-09-20 (2.12.0) ---" + chr(10))
+# Nada de esto se pudo probar al escribirlo (los arreglos se hicieron con ArcMap
+# cerrado): ESTE bloque es su primera prueba real. Las salidas van a una carpeta
+# propia de C:\temp y son copias o exports de un solo plano.
+SALIDAS = "C:" + SEP + "temp" + SEP + "arcmap-mcp-regresion"
+if not os.path.isdir(SALIDAS):
+    os.makedirs(SALIDAS)
+
+r = t("list_layers")
+comprobar("list_layers trae 'ruta'",
+          bool(res(r).get("capas")) and all("ruta" in c for c in res(r)["capas"]), str(r)[:110])
+
+# La MISMA capa dos veces: homonimas en el mismo contenedor. El nombre pelado debe
+# FALLAR (no se elige por el usuario) y la ruta numerada debe resolver a una sola.
+t("add_layer", {"fuente": VEC})
+t("list_fields", {"capa": NOMBRE_VEC}, espera_ok=False, nota="(nombre ambiguo: debe fallar)")
+t("list_fields", {"capa": NOMBRE_VEC + "#2"}, nota="(ruta numerada)")
+t("remove_layer", {"capa": NOMBRE_VEC + "#2"}, nota="(deshacer el duplicado)")
+t("list_fields", {"capa": NOMBRE_VEC}, nota="(vuelve a ser unica, sin sufijo)")
+t("run_geoprocessing", {"tool": "management.GetCount", "params": [NOMBRE_VEC]},
+  nota="(entero como int y capa suelta resuelta)")
+
+r = t("get_unique_values", {"capa": NOMBRE_VEC, "campo": "Municipio", "max_valores": 2})
+comprobar("max_valores corta y lo dice",
+          res(r).get("truncado") is True and len(res(r).get("valores", [])) == 2, str(r)[:110])
+t("get_layer_features", {"capa": NOMBRE_VEC, "limite": 0}, espera_ok=False, nota="(limite 0)")
+t("get_layer_features", {"capa": NOMBRE_VEC, "limite": 99999}, espera_ok=False, nota="(limite enorme)")
+
+t("set_graduated_symbology", {"capa": NOMBRE_VEC, "campo": "Superficie", "color_desde": "#FFFFB2",
+                              "color_hasta": "#BD0026"}, nota="(colores hex, rampa CIE Lab)")
+t("set_graduated_symbology", {"capa": NOMBRE_VEC, "campo": "Superficie", "algoritmo": "hsv"},
+  nota="(algoritmo hsv explicito)")
+t("set_graduated_symbology", {"capa": NOMBRE_VEC, "campo": "Superficie", "color_desde": [255, 0]},
+  espera_ok=False, nota="(color mal formado)")
+
+# El bug de la 2.4.3: un parametro invalido NO debe dejar el renderer cambiado.
+t("set_raster_symbology", {"capa": "real_NUEVO.tif", "num_clases": 3})
+t("set_raster_symbology", {"capa": "real_NUEVO.tif", "modo": "estirado", "transparencia": 150},
+  espera_ok=False, nota="(transparencia 150: debe fallar SIN mutar)")
+r = t("get_layer_info", {"capa": "real_NUEVO.tif"})
+sys.stdout.write("      -> comprobar A OJO que real_NUEVO.tif sigue CLASIFICADO en 3, no estirado" + chr(10))
+
+t("get_canvas_screenshot", {"dpi": None}, nota="(dpi null)")
+t("export_pdf", {"salida": "plano.pdf"}, espera_ok=False, nota="(ruta relativa)")
+t("export_pdf", {"salida": SALIDAS + SEP + "p.pdf", "dpi": 1200}, espera_ok=False, nota="(dpi 1200)")
+r = t("export_jpg", {"salida": SALIDAS + SEP + "plano.jpeg", "dpi": 72})
+comprobar("'.jpeg' no acaba en '.jpeg.jpg'",
+          str(res(r).get("salida", "")).lower().endswith("plano.jpeg"), str(r)[:110])
+r = t("export_jpg", {"salida": SALIDAS + SEP + "plano.jpeg", "dpi": 72})
+comprobar("segundo export dice 'sobrescrito'", res(r).get("sobrescrito") is True, str(r)[:110])
+t("export_jpg", {"salida": SALIDAS + SEP + "plano.jpeg", "dpi": 72, "sobrescribir": False},
+  espera_ok=False, nota="(sobrescribir=false con destino existente)")
+
+COPIA = SALIDAS + SEP + "copia_regresion.mxd"
+if os.path.exists(COPIA):
+    os.remove(COPIA)
+t("save_mxd_as", {"salida": COPIA})
+t("save_mxd_as", {"salida": COPIA}, espera_ok=False, nota="(ya existe y no se pide pisar)")
+r = t("save_mxd_as", {"salida": COPIA, "sobrescribir": True})
+comprobar("save_mxd_as dice 'sobrescrito'", res(r).get("sobrescrito") is True, str(r)[:110])
+
+# Merge RECHAZA la misma entrada dos veces (ERROR 000400), asi que el fixture necesita
+# dos datasets DISTINTOS. Con la capa duplicada, el 000400 quedaba TAPADO detras del
+# 000732 de la extension: se arreglo la extension y aparecio el siguiente error, que
+# llevaba ahi desde que se escribio el caso (2026-09-21).
+MV_A = SALIDAS + SEP + "mv_a.shp"
+MV_B = SALIDAS + SEP + "mv_b.shp"
+MV_OUT = SALIDAS + SEP + "mv_merge.shp"
+limpiar(MV_OUT, MV_A, MV_B)
+t("run_geoprocessing", {"tool": "management.CopyFeatures", "resolver_capas": False,
+                        "params": [VEC, MV_A]})
+t("run_geoprocessing", {"tool": "management.CopyFeatures", "resolver_capas": False,
+                        "params": [VEC, MV_B]})
+# gp.AddOutputsToMap: las dos salidas entran solas en la TOC como 'mv_a' y 'mv_b'.
+t("run_geoprocessing", {"tool": "management.Merge",
+                        "params": [["mv_a", "mv_b"], MV_OUT]},
+  nota="(multivalor: lista dentro de params)")
+t("run_geoprocessing", {"tool": "management.Merge", "params": [{"a": 1}, "x"]},
+  espera_ok=False, nota="(objeto JSON en params)")
+
+# --- multivalor: la extension del dataset (arreglo 2026-09-21) ---
+# El name object de un shapefile da "parcelas", no "parcelas.shp", y la ruta
+# compuesta NO se podia abrir: ERROR 000732 en Merge/Union/Intersect con capas del
+# mapa. Se comprueba sobre el ECO del geoprocesador ('mensajes'), que trae las
+# rutas ya resueltas: que la lista lleva ';' y que cada parte apunta a un dataset
+# de verdad. Sin mirar el eco, un Merge que casca por otro motivo daria igual.
+sys.stdout.write("--- multivalor y extension del dataset (2026-09-21) ---" + chr(10))
+MERGE_EXT = SALIDAS + SEP + "merge_ext.shp"
+limpiar(MERGE_EXT)
+r = t("run_geoprocessing", {"tool": "management.Merge",
+                            "params": [["mv_a", "mv_b"], MERGE_EXT]},
+      nota="(capas de la TOC en multivalor)")
+# Solo el tramo de ENTRADAS del eco: la ruta de salida tambien acaba en .shp y
+# contarla daria el verde sin que ninguna entrada se hubiera resuelto bien.
+eco = str(res(r).get("mensajes", ""))
+entradas = eco.split(MERGE_EXT)[0]
+comprobar("el multivalor resuelve con '.shp'", entradas.count(".shp") >= 2, eco[:110])
+comprobar("el multivalor va unido por ';'", ";" in entradas, eco[:110])
+
+# La 'fuente' de list_layers se copia y se pega en 'params': si vuelve sin
+# extension, el multivalor falla y la culpa parece del geoproceso.
+r = t("list_layers")
+fuentes = [c.get("fuente", "") for c in res(r).get("capas", [])]
+comprobar("list_layers da la fuente del .shp con extension",
+          any(f.lower().endswith(".shp") for f in fuentes), str(fuentes)[:110])
+
+# Una ruta SIN extension escrita a mano sigue fallando, y debe seguir fallando: es
+# la entrada explicita de quien llama, y adivinarle la extension seria inventar.
+t("run_geoprocessing", {"tool": "management.Merge", "resolver_capas": False,
+                        "params": [[VEC[:-4], VEC[:-4]], SALIDAS + SEP + "no.shp"]},
+  espera_ok=False, nota="(ruta sin extension a mano: debe fallar)")
+
+# Geodatabase: aqui NO hay extension que anadir (C:\x.gdb\fc no es un fichero), asi
+# que es el caso que un arreglo mal hecho rompe sin que el de shapefile se entere.
+GDB = SALIDAS + SEP + "multivalor.gdb"
+if not os.path.isdir(GDB):
+    t("run_geoprocessing", {"tool": "management.CreateFileGDB",
+                            "params": [SALIDAS, "multivalor.gdb"]})
+limpiar(GDB + SEP + "gfc_merge", GDB + SEP + "gfc_a", GDB + SEP + "gfc_b")
+t("run_geoprocessing", {"tool": "management.CopyFeatures", "resolver_capas": False,
+                        "params": [VEC, GDB + SEP + "gfc_a"]})
+t("run_geoprocessing", {"tool": "management.CopyFeatures", "resolver_capas": False,
+                        "params": [VEC, GDB + SEP + "gfc_b"]})
+# Las tres tools que pasan por AbrirWorkspace con una GEODATABASE. Fallaban las tres
+# con el mismo InvalidCastException de FileGDBWorkspaceFactory, en sesion limpia y a la
+# primera, desde siempre: ninguna version lo vio porque la regresion no cubria gdb.
+# Arreglado el 2026-09-21 activando la factory por ProgID en vez de con `new`.
+t("describe_data", {"ruta": GDB + SEP + "gfc_a"}, nota="(fc de geodatabase)")
+t("list_feature_classes", {"workspace": GDB}, nota="(workspace .gdb)")
+t("add_layer", {"fuente": GDB + SEP + "gfc_a", "nombre": "gdb_capa"},
+  nota="(add_layer de fc de geodatabase)")
+t("remove_layer", {"capa": "gdb_capa"})
+r = t("run_geoprocessing", {"tool": "management.Merge",
+                            "params": [["gfc_a", "gfc_b"], GDB + SEP + "gfc_merge"]},
+      nota="(feature class de .gdb en multivalor)")
+eco_gdb = str(res(r).get("mensajes", ""))
+comprobar("la fc de gdb no gana extension",
+          "gfc_a" in eco_gdb and "gfc_a.shp" not in eco_gdb, eco_gdb[:110])
+
+# Raster: su name YA trae el ".tif", asi que tiene que quedarse igual.
+COMPUESTO = SALIDAS + SEP + "compuesto.tif"
+limpiar(COMPUESTO)
+r = t("run_geoprocessing", {"tool": "management.CompositeBands",
+                            "params": [["real_NUEVO.tif", "real_NUEVO.tif"], COMPUESTO]},
+      nota="(raster en multivalor)")
+# Exigir que el eco traiga las DOS entradas: un "no contiene .tif.tif" a secas se
+# cumple tambien con el eco vacio de un geoproceso que ni arranco (verde vacuo).
+eco_ras = str(res(r).get("mensajes", ""))
+entradas_ras = eco_ras.split(COMPUESTO)[0]
+comprobar("el raster conserva su .tif una sola vez",
+          entradas_ras.count(".tif") >= 2 and ".tif.tif" not in entradas_ras,
+          eco_ras[:110])
+
+# CONTRATO documentado, no un bug: dentro de una lista viaja una cadena, no el
+# objeto Layer, asi que la definition query se PIERDE. Si el arreglo empezara a
+# honrarla sin querer, el docstring de la tool mentiria al reves.
+t("add_layer", {"fuente": VEC, "nombre": "conquery"})
+# count_features devuelve 'num'. Con la clave equivocada salian dos None, y
+# 'None == None' daba el contrato por bueno sin haber contado nada: verde falso.
+r = t("count_features", {"capa": "conquery"})
+total = res(r).get("num")
+# El parametro es 'query', NO 'where': con 'where' la tool ignora lo que le mandas y
+# aplica el defecto de 'query', que es null = LIMPIAR el filtro. Devolvia ok sin
+# filtrar nada y el test se lo creia. Y 'Lorca' existe en el dato (5 de 24); con
+# 'Murcia', que no existe, la comprobacion no distinguia un filtro vacio de uno no
+# aplicado.
+t("set_definition_query", {"capa": "conquery", "query": "\"Municipio\" = 'Lorca'"})
+r = t("count_features", {"capa": "conquery"})
+filtrado = res(r).get("num")
+comprobar("la def query filtra en la capa",
+          total is not None and filtrado is not None and 0 < filtrado < total,
+          "total=%s filtrado=%s" % (total, filtrado))
+MERGE_DQ = SALIDAS + SEP + "merge_dq.shp"
+limpiar(MERGE_DQ)
+t("run_geoprocessing", {"tool": "management.Merge", "params": [["conquery"], MERGE_DQ]})
+t("add_layer", {"fuente": MERGE_DQ, "nombre": "salida_dq"})
+r = t("count_features", {"capa": "salida_dq"})
+obtenido = res(r).get("num")
+comprobar("en multivalor la def query se pierde (contrato)",
+          total is not None and obtenido == total,
+          "esperado=%s obtenido=%s" % (total, obtenido))
+t("remove_layer", {"capa": "salida_dq"})
+t("remove_layer", {"capa": "conquery"})
+
+# La copia del documento: que via se tomo y si sus capas resuelven. Si esto da
+# capas rotas que la sesion NO tiene, ha vuelto el fallo de las rutas relativas.
+r = t("execute_code", {"code": "RESULT = len(MAP.ListLayers(mxd))", "usar_documento": True})
+sys.stdout.write("      -> snapshot_via=%s  capas_rotas_en_copia=%s%s"
+                 % (res(r).get("snapshot_via"), res(r).get("capas_rotas_en_copia"), chr(10)))
+base_rotas = rotas_en_sesion()
+rotas_copia = res(r).get("capas_rotas_en_copia")
+# El testigo 'capas_rotas_en_copia' NACE en la 2.12.0: en versiones anteriores no viene, y
+# comparar None con un int revienta el script a mitad. Si no esta, no hay nada que medir.
+comprobar("la copia no ANADE capas rotas",
+          rotas_copia is None
+          or (base_rotas is not None and rotas_copia <= base_rotas),
+          "copia=%s sesion=%s" % (rotas_copia, base_rotas))
+if rotas_copia is None:
+    sys.stdout.write("      -> sin testigo 'capas_rotas_en_copia': add-in anterior a la "
+                     "2.12.0, NO se ha medido" + chr(10))
+t("execute_code", {"code": "print 'N\\xc3\\xbamero'\nprint u'Operaci\\xf3n'\nRESULT = 1",
+                   "usar_documento": False}, nota="(print str + unicode mezclados)")
+t("execute_code", {"code": "import sys\nsys.exit(3)", "usar_documento": False},
+  espera_ok=False, nota="(sys.exit sin RESULT: error claro, no salida vacia)")
+
+# Las tres tools de Data Driven Pages (list_ddp, goto_ddp_page, export_ddp) NO se prueban
+# aqui: necesitan un documento con atlas habilitado, que es siempre uno de PRODUCCION, y
+# este script ANADE capas, cambia simbologia y lanza geoprocesos sobre el documento
+# abierto. Mezclarlo invitaria a lanzar todo esto contra un proyecto real. Viven en
+# tests/regresion_ddp.py, que es de solo lectura sobre el documento.
+
 sys.stdout.write("--- limpieza ---" + chr(10))
 t("remove_layer", {"capa": "real_NUEVO.tif"})
 t("remove_layer", {"capa": NOMBRE_VEC})
+# Las salidas de geoproceso entran solas en la TOC (AddOutputsToMap), asi que sin
+# esto cada pase deja ocho capas mas en el documento. Sin puntuar: que una no este
+# es normal si su geoproceso fallo, y contarlo como fallo seria ruido.
+for sobra in ("mv_a", "mv_b", "mv_merge", "merge_ext", "compuesto.tif",
+              "gfc_a", "gfc_b", "gfc_merge", "merge_dq"):
+    try:
+        enviar("remove_layer", {"capa": sobra})
+    except Exception:
+        pass
 
 sys.stdout.write(chr(10) + "RESULTADO: %d correctos, %d fallos" % (ok_n, len(fallos)) + chr(10))
 for nombre, det in fallos:

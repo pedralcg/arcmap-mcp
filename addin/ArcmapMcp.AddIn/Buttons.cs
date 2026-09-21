@@ -125,13 +125,15 @@ namespace ArcmapMcp.AddIn
             }
         }
 
-        /// <summary>Mismo criterio que el runner: variable de entorno y, si no, la
-        /// instalación estándar de ArcGIS. Sin él no hay execute_arcpy ni DDP.</summary>
+        /// <summary>El MISMO buscador que usa el runner (Python27), no una copia del
+        /// criterio: aquí había otra ruta 10.5 escrita a mano —la tercera del proyecto—
+        /// que informaba de "NO encontrado" con el Python bien instalado en 10.6-10.8.
+        /// Sin enmascarar el perfil, a diferencia del reporte de problemas: esto se ve en
+        /// la propia máquina del usuario y la ruta real es justo lo accionable.
+        /// Sin él no hay execute_arcpy ni DDP.</summary>
         private static string DescribirPython27()
         {
-            string exe = Environment.GetEnvironmentVariable("ARCMAP_PYTHON27");
-            if (string.IsNullOrEmpty(exe)) exe = @"C:\Python27\ArcGIS10.5\python.exe";
-            return File.Exists(exe) ? exe : "NO encontrado (" + exe + ")";
+            return Python27.Describir();
         }
 
         private static void AbrirLog()

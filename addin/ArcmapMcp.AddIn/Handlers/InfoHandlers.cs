@@ -69,28 +69,30 @@ namespace ArcmapMcp.AddIn.Handlers
                 throw new InvalidOperationException("No hay data frame activo.");
 
             var capas = new JArray();
-            // Recorrido recursivo (grupos incluidos), como arcpy ListLayers.
-            IEnumLayer enumLayer = map.get_Layers(null, true);
-            enumLayer.Reset();
-            ILayer lyr;
-            while ((lyr = enumLayer.Next()) != null)
+            // Recorrido recursivo (grupos incluidos), como arcpy ListLayers. Por el
+            // helper, que tolera el data frame VACÍO: get_Layers(null, true) lanza
+            // E_FAIL sin capas y list_layers fallaba en un mxd recién creado en vez
+            // de devolver num 0. 'ruta' da la ruta de grupo, que es lo único que
+            // distingue dos capas con el mismo nombre.
+            foreach (MapHandlers.CapaEnMapa c in MapHandlers.CapasConRuta(map))
             {
+                ILayer lyr = c.Capa;
                 var item = new JObject
                 {
-                    ["nombre"] = lyr.Name,
+                    ["nombre"] = c.Nombre,
+                    ["ruta"] = c.Ruta,
                     ["visible"] = lyr.Visible,
                     ["es_grupo"] = lyr is IGroupLayer
                 };
                 try
                 {
-                    IDataLayer2 dataLayer = lyr as IDataLayer2;
-                    if (dataLayer != null && dataLayer.DataSourceName is IDatasetName dsn)
-                    {
-                        IWorkspaceName wsn = dsn.WorkspaceName;
-                        item["fuente"] = wsn != null
-                            ? System.IO.Path.Combine(wsn.PathName ?? "", dsn.Name)
-                            : dsn.Name;
-                    }
+                    // Por DataAccess.RutaFuente, no componiendo la ruta aquí: esta 'fuente'
+                    // se copia y se pega en 'params' de run_geoprocessing, y sin la extensión
+                    // real el multivalor daba ERROR 000732 (regresión del 2026-09-21).
+                    string workspaceCapa;
+                    string fuenteCapa = DataAccess.RutaFuente(lyr, out workspaceCapa);
+                    if (fuenteCapa != null)
+                        item["fuente"] = fuenteCapa;
                 }
                 catch { /* capas sin fuente resoluble (rotas, servicios) */ }
 
@@ -121,24 +123,18 @@ namespace ArcmapMcp.AddIn.Handlers
             if (map == null)
                 throw new InvalidOperationException("No hay data frame activo.");
 
-            ILayer objetivo = null;
-            IEnumLayer enumLayer = map.get_Layers(null, true);
-            enumLayer.Reset();
-            ILayer lyr;
-            while ((lyr = enumLayer.Next()) != null)
-            {
-                if (string.Equals(lyr.Name, nombre, StringComparison.OrdinalIgnoreCase))
-                {
-                    objetivo = lyr;
-                    break;
-                }
-            }
-            if (objetivo == null)
-                throw new ArgumentException("Capa no encontrada: " + nombre);
+            // Misma búsqueda que el resto del add-in: tolera el data frame vacío y no
+            // elige a ciegas entre dos capas con el mismo nombre.
+            ILayer objetivo = MapHandlers.FindLayer(map, nombre);
 
             IEnvelope extent = objetivo.AreaOfInterest;
             if (extent == null || extent.IsEmpty)
                 throw new InvalidOperationException("La capa no tiene extent utilizable: " + nombre);
+
+            // AreaOfInterest viene en el CRS de la FUENTE y el setter de Extent no
+            // reproyecta: con la capa en geográficas y el data frame en UTM el
+            // encuadre se iba al origen.
+            extent = MapHandlers.ProyectarAlMapa(extent, map);
 
             IActiveView mapView = (IActiveView)map;
             mapView.Extent = extent;

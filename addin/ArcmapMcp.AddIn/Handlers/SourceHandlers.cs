@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Text.RegularExpressions;
 using ESRI.ArcGIS.ArcMapUI;
 using ESRI.ArcGIS.Carto;
@@ -29,35 +30,34 @@ namespace ArcmapMcp.AddIn.Handlers
             {
                 IMap m = maps.get_Item(i);
 
-                IEnumLayer enumLayer = null;
-                try { enumLayer = m.get_Layers(null, true); } catch { /* df vacío */ }
-                if (enumLayer != null)
+                foreach (MapHandlers.CapaEnMapa c in MapHandlers.CapasConRuta(m))
                 {
-                    enumLayer.Reset();
-                    ILayer lyr;
-                    while ((lyr = enumLayer.Next()) != null)
+                    ILayer lyr = c.Capa;
+                    if (lyr is IGroupLayer)
+                        continue; // los grupos no tienen fuente propia
+                    bool valido = true;
+                    try
                     {
-                        if (lyr is IGroupLayer)
-                            continue; // los grupos no tienen fuente propia
-                        bool valido = true;
-                        try
-                        {
-                            ILayer2 l2 = lyr as ILayer2;
-                            valido = l2 == null || l2.Valid;
-                        }
-                        catch { valido = false; }
-                        if (valido)
-                            continue;
-
-                        string workspace;
-                        string fuente = DataAccess.RutaFuente(lyr, out workspace);
-                        rotos.Add(new JObject
-                        {
-                            ["nombre"] = NombreSeguro(lyr),
-                            ["fuente_rota"] = fuente,
-                            ["workspace"] = workspace
-                        });
+                        ILayer2 l2 = lyr as ILayer2;
+                        valido = l2 == null || l2.Valid;
                     }
+                    catch { valido = false; }
+                    if (valido)
+                        continue;
+
+                    string workspace;
+                    string fuente = DataAccess.RutaFuente(lyr, out workspace);
+                    rotos.Add(new JObject
+                    {
+                        ["nombre"] = NombreSeguro(lyr),
+                        // El listado recorre TODOS los data frames, así que sin decir
+                        // en cuál está cada capa, repair_data_source no sabe dónde
+                        // buscarla. 'ruta' la desambigua si el nombre se repite.
+                        ["data_frame"] = NombreDeMapa(m),
+                        ["ruta"] = c.Ruta,
+                        ["fuente_rota"] = fuente,
+                        ["workspace"] = workspace
+                    });
                 }
 
                 // Tablas independientes del data frame, como ListBrokenDataSources.
@@ -74,6 +74,8 @@ namespace ArcmapMcp.AddIn.Handlers
                     var item = new JObject
                     {
                         ["nombre"] = "(tabla sin nombre)",
+                        ["data_frame"] = NombreDeMapa(m),
+                        ["ruta"] = null,
                         ["fuente_rota"] = null,
                         ["workspace"] = null
                     };
@@ -107,19 +109,80 @@ namespace ArcmapMcp.AddIn.Handlers
             try { return lyr.Name; } catch { return "(sin nombre)"; }
         }
 
+        private static string NombreDeMapa(IMap m)
+        {
+            try { return m.Name; } catch { return "(data frame sin nombre)"; }
+        }
+
+        /// <summary>
+        /// Busca la capa en TODOS los data frames, o solo en el que diga
+        /// 'data_frame'. list_broken_data_sources recorre el documento entero, así
+        /// que limitar la reparación al data frame activo dejaba sin arreglo
+        /// precisamente la mitad de lo que el listado enseñaba.
+        /// </summary>
+        private static ILayer BuscarCapa(IMxDocument doc, string capa, string dataFrame, out IMap mapa)
+        {
+            mapa = null;
+            IMaps maps = doc.Maps;
+            var candidatas = new List<string>();
+            var todas = new List<string>();
+            ILayer encontrada = null;
+            bool dfVisto = false;
+            var nombresDf = new List<string>();
+
+            for (int i = 0; i < maps.Count; i++)
+            {
+                IMap m = maps.get_Item(i);
+                string nombreDf = NombreDeMapa(m);
+                nombresDf.Add(nombreDf);
+                if (!string.IsNullOrEmpty(dataFrame)
+                    && !string.Equals(nombreDf, dataFrame, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                dfVisto = true;
+
+                List<MapHandlers.CapaEnMapa> capas = MapHandlers.CapasConRuta(m);
+                foreach (MapHandlers.CapaEnMapa c in capas)
+                    todas.Add(nombreDf + "/" + c.Ruta);
+                foreach (MapHandlers.CapaEnMapa c in MapHandlers.Coincidencias(capas, capa))
+                {
+                    candidatas.Add(nombreDf + "/" + c.Ruta);
+                    if (encontrada == null)
+                    {
+                        encontrada = c.Capa;
+                        mapa = m;
+                    }
+                }
+            }
+
+            if (!string.IsNullOrEmpty(dataFrame) && !dfVisto)
+                throw new ArgumentException("Data frame no encontrado: " + dataFrame
+                    + ". Disponibles: " + string.Join(", ", nombresDf));
+            if (candidatas.Count == 0)
+                throw new ArgumentException("Capa no encontrada: " + capa
+                    + ". Disponibles: " + string.Join(", ", todas));
+            if (candidatas.Count > 1)
+            {
+                mapa = null;
+                throw new ArgumentException("Hay " + candidatas.Count + " capas que casan con '" + capa
+                    + "'. Indica 'data_frame' o la ruta de grupo completa: " + string.Join(", ", candidatas));
+            }
+            return encontrada;
+        }
+
         public static JObject RepairDataSource(JObject parameters)
         {
             string capa = (string)parameters["capa"];
             string rutaAntigua = (string)parameters["ruta_antigua"];
             string rutaNueva = (string)parameters["ruta_nueva"];
-            bool validar = parameters["validar"] == null || parameters["validar"].Type == JTokenType.Null
-                ? true : (bool)parameters["validar"];
+            string dataFrame = (string)parameters["data_frame"];
+            bool validar = Parametros.LeerBool(parameters["validar"], "validar", true);
             if (string.IsNullOrEmpty(capa) || string.IsNullOrEmpty(rutaAntigua) || string.IsNullOrEmpty(rutaNueva))
                 throw new ArgumentException("Indica 'capa', 'ruta_antigua' y 'ruta_nueva'.");
 
-            IMxDocument doc;
-            IMap map = MapHandlers.FocusMap(out doc);
-            ILayer lyr = MapHandlers.FindLayer(map, capa);
+            IApplication appRep = ArcSession.App();
+            IMxDocument doc = ArcSession.Doc(appRep);
+            IMap map;
+            ILayer lyr = BuscarCapa(doc, capa, dataFrame, out map);
             IDataLayer dl = lyr as IDataLayer;
             if (dl == null)
                 throw new ArgumentException("La capa no tiene fuente de datos reapuntable: " + capa);
@@ -210,12 +273,15 @@ namespace ArcmapMcp.AddIn.Handlers
             }
 
             bool rotoDespues = EstaRota(lyr);
-            doc.UpdateContents();
-            doc.ActiveView.Refresh();
+            // Como el resto de mutadoras: ContentsChanged avisa a los map surrounds.
+            // Sin él, una leyenda se quedaba con el estado anterior a la reparación y
+            // el export salía con la capa todavía rota.
+            MapHandlers.NotificarCambioContenido(map, doc);
 
             var salida = new JObject
             {
                 ["capa"] = capa,
+                ["data_frame"] = NombreDeMapa(map),
                 ["roto_antes"] = rotoAntes,
                 ["roto_despues"] = rotoDespues,
                 ["ruta_antigua"] = rutaAntigua,

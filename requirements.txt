@@ -1,2 +1,8 @@
 # Host MCP — Python 3 (64 bits). NO instalar en el Python 2.7 de ArcMap.
-mcp>=1.2.0
+#
+# Techo de major a propósito. El instalador reinstala este fichero en CADA
+# actualización, así que un `mcp` 2.x publicado mañana entraría solo, en todas las
+# máquinas a la vez, y el servidor dejaría de arrancar por el import
+# `mcp.server.fastmcp` sin que nadie hubiera tocado nada. Cuando salga la 2.x se
+# prueba y se sube el techo aquí, a mano.
+mcp>=1.2.0,<2

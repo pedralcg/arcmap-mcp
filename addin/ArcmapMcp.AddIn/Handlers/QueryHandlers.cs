@@ -13,9 +13,25 @@ namespace ArcmapMcp.AddIn.Handlers
     /// esperan los schemas del servidor MCP. Las consultas honran definition query y selección
     /// como arcpy.da.SearchCursor sobre una capa de la TOC: si hay selección se
     /// recorre el ISelectionSet; si no, la display table (joins + def. query).
+    ///
+    /// TODO cursor que se abra aquí se cierra en un finally con ReleaseComObject:
+    /// un ICursor vivo deja lock sobre la fuente, y los caminos que se salían a
+    /// mitad de tabla —el límite de `get_layer_features`, el "campo no encontrado"
+    /// que se lanza con el cursor ya abierto— lo dejaban abierto para el resto de
+    /// la sesión de ArcMap.
     /// </summary>
     internal static class QueryHandlers
     {
+        /// <summary>Tope de filas de `get_layer_features`. La respuesta viaja por
+        /// JSON hasta el cliente MCP: unos miles de filas ya no son una consulta,
+        /// son un volcado.</summary>
+        private const int MaxLimiteFilas = 5000;
+
+        /// <summary>Tope por defecto de `get_unique_values`. El recorrido va en el
+        /// hilo STA, o sea que congela la GUI de ArcMap mientras dura: sin tope, un
+        /// campo de texto libre sobre una capa de un millón de filas no termina.</summary>
+        private const int MaxValoresPorDefecto = 1000;
+
         private static ILayer CapaRequerida(JObject parameters, IMap map)
         {
             string capa = (string)parameters["capa"];
@@ -24,14 +40,52 @@ namespace ArcmapMcp.AddIn.Handlers
             return MapHandlers.FindLayer(map, capa);
         }
 
+        /// <summary>Tabla consultable de la capa: la DISPLAY TABLE, que es la que
+        /// trae los campos de los joins. Se comprueba que exista en vez de dejar
+        /// que COM lance un E_FAIL mudo (ráster sin tabla, fuente rota).</summary>
+        internal static ITable TablaDeCapa(ILayer lyr)
+        {
+            IDisplayTable dt = lyr as IDisplayTable;
+            ITable tabla = null;
+            if (dt != null)
+            {
+                try { tabla = dt.DisplayTable; }
+                catch { tabla = null; }
+            }
+            if (tabla == null)
+                throw new ArgumentException("La capa no tiene tabla de atributos consultable"
+                    + " (¿ráster, o fuente rota?): " + MapHandlers.NombreSeguro(lyr));
+            return tabla;
+        }
+
         /// <summary>Cursor de lectura sobre la capa: selección si existe, display
         /// table si no. El where se combina con la definition query explícitamente
-        /// para no depender de si SearchDisplayTable la aplica por su cuenta.</summary>
-        private static ICursor CursorSobreCapa(ILayer lyr, string where, string subcampos)
+        /// para no depender de si SearchDisplayTable la aplica por su cuenta.
+        /// Quien lo abra DEBE soltarlo (DataAccess.SoltarCom) en un finally.</summary>
+        internal static ICursor CursorSobreCapa(ILayer lyr, string where, string subcampos)
         {
             IFeatureSelection fsel = lyr as IFeatureSelection;
             if (fsel != null && fsel.SelectionSet != null && fsel.SelectionSet.Count > 0)
             {
+                // Con un JOIN activo los nombres de campo van cualificados y solo
+                // existen en la selección de la DISPLAY table: la de la clase base no
+                // los conoce, así que un where o unos SubFields sobre un campo de la
+                // tabla unida fallaban. Sin join se sigue usando la selección de
+                // siempre, que para ese caso es la misma y está probada.
+                ISelectionSet conjunto = fsel.SelectionSet;
+                if (TieneJoin(lyr))
+                {
+                    IDisplayTable dtSel = lyr as IDisplayTable;
+                    ISelectionSet display = null;
+                    if (dtSel != null)
+                    {
+                        try { display = dtSel.DisplaySelectionSet; }
+                        catch { display = null; }
+                    }
+                    if (display != null)
+                        conjunto = display;
+                }
+
                 IQueryFilter filtroSel = null;
                 if (!string.IsNullOrEmpty(where) || !string.IsNullOrEmpty(subcampos))
                 {
@@ -40,13 +94,24 @@ namespace ArcmapMcp.AddIn.Handlers
                     if (!string.IsNullOrEmpty(subcampos)) filtroSel.SubFields = subcampos;
                 }
                 ICursor cursorSel;
-                fsel.SelectionSet.Search(filtroSel, true, out cursorSel);
+                conjunto.Search(filtroSel, true, out cursorSel);
                 return cursorSel;
             }
 
-            IDisplayTable dt = lyr as IDisplayTable;
-            if (dt == null)
-                throw new ArgumentException("La capa no admite consulta de atributos: " + lyr.Name);
+            return CursorDisplayTable(lyr, where, subcampos);
+        }
+
+        /// <summary>Cursor sobre la display table (joins + definition query) SIN
+        /// mirar la selección: es lo que necesita quien describe la capa entera,
+        /// como la simbología, donde honrar la selección daría una leyenda que solo
+        /// vale para lo que hubiera seleccionado en ese momento.
+        /// Cursor reciclado: aquí solo se leen atributos.</summary>
+        internal static ICursor CursorDisplayTable(ILayer lyr, string where, string subcampos)
+        {
+            // Valida que la capa tiene tabla consultable ANTES de pedir el cursor:
+            // un ráster sin tabla o una fuente rota devolvían un E_FAIL crudo.
+            TablaDeCapa(lyr);
+            IDisplayTable dt = (IDisplayTable)lyr;
 
             IFeatureLayerDefinition def = lyr as IFeatureLayerDefinition;
             string combinado = DataAccess.CombinarWhere(
@@ -61,14 +126,23 @@ namespace ArcmapMcp.AddIn.Handlers
             return dt.SearchDisplayTable(filtro, true);
         }
 
+        /// <summary>¿La capa tiene una tabla unida por join? Es lo que separa el caso
+        /// en que la display table y la clase base son la misma cosa del caso en que
+        /// no lo son.</summary>
+        private static bool TieneJoin(ILayer lyr)
+        {
+            IDisplayRelationshipClass drc = lyr as IDisplayRelationshipClass;
+            if (drc == null)
+                return false;
+            try { return drc.RelationshipClass != null; }
+            catch { return false; }
+        }
+
         /// <summary>Campos de la capa con joins incluidos (display table), como
         /// arcpy.ListFields sobre la capa.</summary>
-        private static IFields CamposDeCapa(ILayer lyr)
+        internal static IFields CamposDeCapa(ILayer lyr)
         {
-            IDisplayTable dt = lyr as IDisplayTable;
-            if (dt == null || dt.DisplayTable == null)
-                throw new ArgumentException("La capa no tiene tabla de atributos consultable: " + lyr.Name);
-            return dt.DisplayTable.Fields;
+            return TablaDeCapa(lyr).Fields;
         }
 
         /// <summary>Conteo con la semántica del GetCount de arcpy: selección si la hay;
@@ -84,21 +158,26 @@ namespace ArcmapMcp.AddIn.Handlers
                     return fsel.SelectionSet.Count;
                 int n = 0;
                 ICursor cur = CursorSobreCapa(lyr, where, null);
-                while (cur.NextRow() != null)
-                    n++;
+                try
+                {
+                    while (cur.NextRow() != null)
+                        n++;
+                }
+                finally
+                {
+                    DataAccess.SoltarCom(cur);
+                }
                 return n;
             }
 
-            IDisplayTable dt = lyr as IDisplayTable;
-            if (dt == null || dt.DisplayTable == null)
-                throw new ArgumentException("La capa no admite conteo de entidades: " + lyr.Name);
+            ITable tabla = TablaDeCapa(lyr);
             IFeatureLayerDefinition def = lyr as IFeatureLayerDefinition;
             string combinado = DataAccess.CombinarWhere(
                 def != null ? def.DefinitionExpression : null, where);
             IQueryFilter filtro = null;
             if (!string.IsNullOrEmpty(combinado))
                 filtro = new QueryFilterClass { WhereClause = combinado };
-            return dt.DisplayTable.RowCount(filtro);
+            return tabla.RowCount(filtro);
         }
 
         private static void RefrescarSeleccion(IMxDocument doc, IMap map)
@@ -148,10 +227,7 @@ namespace ArcmapMcp.AddIn.Handlers
             }
             else
             {
-                IEnumLayer enumLayer = map.get_Layers(null, true);
-                enumLayer.Reset();
-                ILayer lyr;
-                while ((lyr = enumLayer.Next()) != null)
+                foreach (ILayer lyr in MapHandlers.Capas(map))
                 {
                     IFeatureSelection fsel = lyr as IFeatureSelection;
                     if (fsel == null)
@@ -178,23 +254,44 @@ namespace ArcmapMcp.AddIn.Handlers
             if (string.IsNullOrEmpty(campo))
                 throw new ArgumentException("Indica 'campo'.");
             string where = (string)parameters["where"];
+            int maxValores = Parametros.LeerEntero(parameters["max_valores"], "max_valores",
+                MaxValoresPorDefecto, 1, 100000);
 
             IMxDocument doc;
             IMap map = MapHandlers.FocusMap(out doc);
             ILayer lyr = CapaRequerida(parameters, map);
 
-            ICursor cur = CursorSobreCapa(lyr, where, campo);
-            int idx = cur.Fields.FindField(campo);
-            if (idx < 0)
-                throw new ArgumentException("Campo no encontrado: " + campo
-                    + ". Disponibles: " + NombresDeCampos(CamposDeCapa(lyr)));
-
             var vistos = new HashSet<object>();
-            IRow row;
-            while ((row = cur.NextRow()) != null)
+            bool truncado = false;
+            ICursor cur = CursorSobreCapa(lyr, where, campo);
+            try
             {
-                object v = row.get_Value(idx);
-                vistos.Add(v is DBNull ? null : v);
+                int idx = cur.Fields.FindField(campo);
+                if (idx < 0)
+                    throw new ArgumentException("Campo no encontrado: " + campo
+                        + ". Disponibles: " + NombresDeCampos(CamposDeCapa(lyr)));
+
+                IRow row;
+                while ((row = cur.NextRow()) != null)
+                {
+                    object v = row.get_Value(idx);
+                    if (v is DBNull)
+                        v = null;
+                    if (vistos.Contains(v))
+                        continue;
+                    // Se corta al pasarse, no al llegar: el tope se anuncia en la
+                    // respuesta con 'truncado', nunca en silencio.
+                    if (vistos.Count >= maxValores)
+                    {
+                        truncado = true;
+                        break;
+                    }
+                    vistos.Add(v);
+                }
+            }
+            finally
+            {
+                DataAccess.SoltarCom(cur);
             }
 
             var lista = new List<object>(vistos);
@@ -213,6 +310,8 @@ namespace ArcmapMcp.AddIn.Handlers
                 ["capa"] = lyr.Name,
                 ["campo"] = campo,
                 ["num"] = valores.Count,
+                ["max_valores"] = maxValores,
+                ["truncado"] = truncado,
                 ["valores"] = valores
             });
         }
@@ -352,8 +451,7 @@ namespace ArcmapMcp.AddIn.Handlers
         {
             string where = (string)parameters["where"];
             JArray camposParam = parameters["campos"] as JArray;
-            int limite = parameters["limite"] != null && parameters["limite"].Type != JTokenType.Null
-                ? (int)parameters["limite"] : 50;
+            int limite = Parametros.LeerEntero(parameters["limite"], "limite", 50, 1, MaxLimiteFilas);
 
             IMxDocument doc;
             IMap map = MapHandlers.FocusMap(out doc);
@@ -382,24 +480,33 @@ namespace ArcmapMcp.AddIn.Handlers
                 }
             }
 
-            ICursor cur = CursorSobreCapa(lyr, where, subcampos);
-            var indices = new int[nombres.Count];
-            for (int i = 0; i < nombres.Count; i++)
-            {
-                indices[i] = cur.Fields.FindField(nombres[i]);
-                if (indices[i] < 0)
-                    throw new ArgumentException("Campo no encontrado: " + nombres[i]
-                        + ". Disponibles: " + NombresDeCampos(CamposDeCapa(lyr)));
-            }
-
             var filas = new JArray();
-            IRow row;
-            while (filas.Count < limite && (row = cur.NextRow()) != null)
+            ICursor cur = CursorSobreCapa(lyr, where, subcampos);
+            try
             {
-                var fila = new JObject();
+                var indices = new int[nombres.Count];
                 for (int i = 0; i < nombres.Count; i++)
-                    fila[nombres[i]] = DataAccess.ValorAJson(row.get_Value(indices[i]));
-                filas.Add(fila);
+                {
+                    indices[i] = cur.Fields.FindField(nombres[i]);
+                    if (indices[i] < 0)
+                        throw new ArgumentException("Campo no encontrado: " + nombres[i]
+                            + ". Disponibles: " + NombresDeCampos(CamposDeCapa(lyr)));
+                }
+
+                IRow row;
+                while (filas.Count < limite && (row = cur.NextRow()) != null)
+                {
+                    var fila = new JObject();
+                    for (int i = 0; i < nombres.Count; i++)
+                        fila[nombres[i]] = DataAccess.ValorAJson(row.get_Value(indices[i]));
+                    filas.Add(fila);
+                }
+            }
+            finally
+            {
+                // El camino normal de esta tool es SALIRSE al llegar al límite, con
+                // el cursor a mitad de tabla: sin este finally quedaba abierto.
+                DataAccess.SoltarCom(cur);
             }
 
             return Protocol.Result(new JObject

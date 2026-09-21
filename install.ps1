@@ -65,14 +65,74 @@ function Write-Aviso { param($m) Write-Host "   [!]  $m" -ForegroundColor Yellow
 function Write-Info  { param($m) Write-Host "        $m" -ForegroundColor DarkGray }
 
 # --------------------------------------------------------------------------- #
+# Llamadas a ejecutables externos
+# --------------------------------------------------------------------------- #
+
+<# Windows PowerShell 5.1 convierte en ErrorRecord cada linea que un ejecutable
+   NATIVO escribe en stderr cuando esa salida se redirige (2>&1 o 2>$null), y con
+   $ErrorActionPreference='Stop' eso LANZA aunque el programa haya terminado con
+   exito. PowerShell 7 no lo hace, asi que el fallo solo aparece en el equipo del
+   usuario, que es donde INSTALAR.bat arranca la 5.1.
+
+   Consecuencias reales que esto evitaba mal:
+     - `claude mcp remove arcmap` de una entrada que todavia no existe escribe en
+       stderr: en la PRIMERA instalacion el script moria ahi, con el add-in ya
+       instalado y ningun cliente registrado.
+     - Un `py -3` sin Python 3, o un python.exe que escupe un DeprecationWarning,
+       abortaban la deteccion en vez de pasar al siguiente candidato.
+
+   Aqui se baja $ErrorActionPreference a 'Continue' SOLO dentro de la funcion (el
+   global sigue en 'Stop'), se captura la salida combinada y se devuelve el codigo
+   de salida real para que decida quien llama. #>
+function Invoke-Nativo {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Exe,
+        [string[]] $Argumentos = @()
+    )
+    $ErrorActionPreference = 'Continue'   # local a esta funcion, no toca el global
+    $salida = ''
+    $codigo = -1
+    try {
+        $salida = (& $Exe @Argumentos 2>&1 | Out-String)
+        $codigo = $LASTEXITCODE
+    }
+    catch {
+        # El ejecutable no existe o no se pudo lanzar: no es un fallo del instalador.
+        $salida = $_.Exception.Message
+        $codigo = -1
+    }
+    if ($null -eq $codigo) { $codigo = -1 }
+    return [pscustomobject]@{ Codigo = $codigo; Salida = $salida }
+}
+
+<# De la salida combinada (stdout + stderr) de un ejecutable, la primera linea que
+   encaje con el patron. Hace falta porque con 2>&1 los avisos se mezclan con el
+   dato que se buscaba. #>
+function Select-LineaSalida {
+    param([string]$Salida, [string]$Patron)
+    foreach ($linea in ($Salida -split "`r?`n")) {
+        $t = $linea.Trim()
+        if ($t -and $t -match $Patron) { return $t }
+    }
+    return $null
+}
+
+# --------------------------------------------------------------------------- #
 # Deteccion del entorno
 # --------------------------------------------------------------------------- #
+
+<# Versiones que se BUSCAN y version minima que el add-in puede cargar de verdad.
+   El manifiesto declara <Target version="10.5"> y la DLL enlaza los ensamblados
+   ESRI 10.5: en 10.4 no carga, por mucho que el instalador la detecte. Se sigue
+   buscando la 10.4 para poder DECIRLO, no para instalar encima. #>
+$VersionesArcMap = @('10.8', '10.7', '10.6', '10.5', '10.4')
+$ArcMapMinimo = [Version]'10.5'
 
 <# ArcMap se busca por registro (la clave la escribe el instalador de Esri) y,
    como respaldo, por la carpeta de add-ins del usuario: en equipos donde el
    registro esta a medias, esa carpeta sigue delatando la version. #>
 function Find-ArcMap {
-    foreach ($v in @('10.8', '10.7', '10.6', '10.5', '10.4')) {
+    foreach ($v in $VersionesArcMap) {
         $claves = @(
             "HKLM:\SOFTWARE\WOW6432Node\ESRI\Desktop$v",
             "HKLM:\SOFTWARE\ESRI\Desktop$v"
@@ -80,13 +140,19 @@ function Find-ArcMap {
         foreach ($k in $claves) {
             if (Test-Path $k) {
                 $dir = (Get-ItemProperty $k -ErrorAction SilentlyContinue).InstallDir
-                return [pscustomobject]@{ Version = $v; InstallDir = $dir; Origen = 'registro' }
+                return [pscustomobject]@{
+                    Version = $v; InstallDir = $dir; Origen = 'registro'
+                    Soportada = ([Version]$v -ge $ArcMapMinimo)
+                }
             }
         }
     }
-    foreach ($v in @('10.8', '10.7', '10.6', '10.5', '10.4')) {
+    foreach ($v in $VersionesArcMap) {
         if (Test-Path (Join-Path $env:USERPROFILE "Documents\ArcGIS\AddIns\Desktop$v")) {
-            return [pscustomobject]@{ Version = $v; InstallDir = $null; Origen = 'carpeta de add-ins' }
+            return [pscustomobject]@{
+                Version = $v; InstallDir = $null; Origen = 'carpeta de add-ins'
+                Soportada = ([Version]$v -ge $ArcMapMinimo)
+            }
         }
     }
     return $null
@@ -104,9 +170,16 @@ function Find-Python27 {
         $p = Join-Path (Get-ItemProperty $k).'(default)' 'python.exe'
         if (Test-Path $p) { return $p }
     }
-    Get-ChildItem 'C:\Python27' -Directory -ErrorAction SilentlyContinue |
-        Sort-Object Name -Descending |
-        ForEach-Object { $p = Join-Path $_.FullName 'python.exe'; if (Test-Path $p) { return $p } }
+    # Con ForEach-Object, `return` sale SOLO del bloque de script del cmdlet, no de
+    # la funcion: la busqueda seguia y Find-Python27 devolvia un array cuyo ultimo
+    # elemento era el $null del `return` final. Con foreach, `return` sale de la
+    # funcion, que es lo que se pretendia.
+    $carpetas = Get-ChildItem 'C:\Python27' -Directory -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending
+    foreach ($carpeta in $carpetas) {
+        $p = Join-Path $carpeta.FullName 'python.exe'
+        if (Test-Path $p) { return $p }
+    }
     return $null
 }
 
@@ -118,14 +191,16 @@ $PythonMinimo = [Version]'3.10'
 function Test-Python3 {
     param([string]$Exe)
     if (-not $Exe -or -not (Test-Path $Exe)) { return $null }
-    try {
-        $v = & $Exe -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>$null
-        if ($LASTEXITCODE -ne 0 -or -not $v) { return $null }
-        $ver = [Version]$v
-        if ($ver -lt $PythonMinimo) { return $null }
-        return [pscustomobject]@{ Exe = $Exe; Version = $ver }
-    }
-    catch { return $null }
+    # Por Invoke-Nativo: un interprete que escribe un aviso en stderr (un
+    # DeprecationWarning de sitecustomize, tipico en los Python empaquetados con
+    # QGIS) quedaba descartado como "no valido" en 5.1, porque ese aviso lanzaba.
+    $r = Invoke-Nativo $Exe @('-c', "import sys; print('%d.%d' % sys.version_info[:2])")
+    if ($r.Codigo -ne 0) { return $null }
+    $v = Select-LineaSalida $r.Salida '^\d+\.\d+$'
+    if (-not $v) { return $null }
+    try { $ver = [Version]$v } catch { return $null }
+    if ($ver -lt $PythonMinimo) { return $null }
+    return [pscustomobject]@{ Exe = $Exe; Version = $ver }
 }
 
 <# Busca un Python 3 utilizable SIN exigir que este en el PATH: mucha gente del
@@ -135,9 +210,16 @@ function Test-Python3 {
 function Find-Python3 {
     $candidatos = New-Object System.Collections.Generic.List[string]
 
-    if (Get-Command py -ErrorAction SilentlyContinue) {
-        $exe = & py -3 -c "import sys; print(sys.executable)" 2>$null
-        if ($exe) { $candidatos.Add($exe) }
+    $py = Get-Command py -ErrorAction SilentlyContinue
+    if ($py) {
+        # Un py.exe presente pero SIN ningun Python 3 registrado escribe el error en
+        # stderr y sale con codigo != 0: antes eso abortaba la busqueda entera en vez
+        # de pasar al siguiente candidato.
+        $r = Invoke-Nativo $py.Source @('-3', '-c', 'import sys; print(sys.executable)')
+        if ($r.Codigo -eq 0) {
+            $exe = Select-LineaSalida $r.Salida '(?i)python(w)?\.exe$'
+            if ($exe) { $candidatos.Add($exe) }
+        }
     }
     $enPath = Get-Command python -ErrorAction SilentlyContinue
     # El "python" de la Microsoft Store es un stub que abre la tienda: se ignora.
@@ -259,6 +341,22 @@ function Install-AddIn {
     param($ArcMap)
 
     Write-Paso "Add-in .NET dentro de ArcMap $($ArcMap.Version)"
+
+    # Detectar 10.4 e instalar igualmente era mentir dos veces: se anunciaba
+    # "[OK] instalado" y luego ArcMap no cargaba nada, sin decir por que. El
+    # manifiesto declara Target 10.5 y la DLL enlaza ensamblados 10.5.
+    if (-not $ArcMap.Soportada) {
+        Write-Aviso ('ArcMap ' + $ArcMap.Version + ' NO esta soportado: el add-in se compila contra 10.5.')
+        Write-Info  'El manifiesto declara <Target version="10.5"> y la DLL enlaza ensamblados ESRI 10.5,'
+        Write-Info  'asi que en esta version ArcMap no lo cargaria (y no explica por que).'
+        Write-Info  'Para usarlo aqui hay que RECOMPILAR el add-in contra tu version:'
+        Write-Info  '  1) cambia el <Target> de addin\ArcmapMcp.AddIn\Config.xml,'
+        Write-Info  '  2) apunta las referencias del .csproj a tus ensamblados ESRI,'
+        Write-Info  '  3) ejecuta addin\build.ps1 y repite este instalador.'
+        Write-Info  'El servidor MCP y el registro en los clientes IA si se han preparado.'
+        return
+    }
+
     $paquete = Join-Path $Repo 'addin\dist\arcmap-mcp.esriaddin'
     if (-not (Test-Path $paquete)) {
         throw "No existe $paquete. Construyelo con addin\build.ps1 (necesita el dotnet CLI)."
@@ -282,8 +380,12 @@ function Install-AddIn {
     Get-ChildItem $destino -Recurse -File | Unblock-File -ErrorAction SilentlyContinue
 
     Write-Ok "Add-in $(Get-AddInVersion) instalado en $destino"
-    Write-Info 'Al abrir ArcMap veras la barra "arcmap-mcp" (si no: Customize > Toolbars > arcmap-mcp).'
-    Write-Info 'Marca "Autoarranque" una vez y el puente se levantara solo en las siguientes sesiones.'
+    # La barra NO se muestra sola: el add-in declara showInitially="false" desde la
+    # 2.8.2, a proposito (con "true" ArcMap recolocaba el resto de barras en cada
+    # arranque). Hay que activarla UNA vez y ArcMap recuerda la posicion.
+    Write-Info 'Al abrir ArcMap, activa la barra una vez en: Customize > Toolbars > arcmap-mcp.'
+    Write-Info 'En esa barra, pon el desplegable "Autoarranque" en SI y el puente se levantara'
+    Write-Info 'solo en las siguientes sesiones.'
 }
 
 function Uninstall-AddIn {
@@ -298,6 +400,78 @@ function Uninstall-AddIn {
     else { Write-Aviso 'El add-in no estaba instalado' }
 }
 
+<# Version del add-in REALMENTE instalado, leida del config.xml que el instalador de
+   Esri deja junto al .esriaddin en la carpeta del GUID. No sirve el Config.xml del
+   repo: ese dice lo que hay en el codigo fuente, no lo que ArcMap va a cargar, que
+   es justo la diferencia que se quiere ver al verificar tras una actualizacion. #>
+function Get-AddInVersionInstalada {
+    param([string]$Destino)
+    foreach ($nombre in @('config.xml', 'Config.xml')) {
+        $cfg = Join-Path $Destino $nombre
+        if (Test-Path $cfg) {
+            try { return ([xml](Get-Content $cfg -Raw)).'ESRI.Configuration'.Version }
+            catch { return $null }
+        }
+    }
+    return $null
+}
+
+<# Restos que la desinstalacion dejaba atras: la preferencia de autoarranque en el
+   registro y el runner extraido en %TEMP%. Lo que NO se borra —logs y copias de
+   seguridad de las configuraciones— se LISTA con su ruta, porque borrar el diario
+   de lo que paso y la unica copia de la config del usuario no le toca decidirlo a
+   un desinstalador. #>
+function Remove-RestosLocales {
+    Write-Paso 'Restos locales'
+
+    $clave = 'HKCU:\Software\pedralcg\arcmap-mcp'
+    if (Test-Path $clave) {
+        try {
+            Remove-Item $clave -Recurse -Force -ErrorAction Stop
+            Write-Ok 'Preferencias del add-in eliminadas (HKCU\Software\pedralcg\arcmap-mcp)'
+        }
+        catch { Write-Aviso "No se pudo borrar $clave : $($_.Exception.Message)" }
+    }
+    # La clave padre se queda si tiene mas cosas dentro: no es nuestra.
+    $padre = 'HKCU:\Software\pedralcg'
+    if ((Test-Path $padre) -and -not (Get-ChildItem $padre -ErrorAction SilentlyContinue)) {
+        Remove-Item $padre -Force -ErrorAction SilentlyContinue
+    }
+
+    $runner = Join-Path $env:TEMP 'arcmap-mcp'
+    if (Test-Path $runner) {
+        try {
+            Remove-Item $runner -Recurse -Force -ErrorAction Stop
+            Write-Ok "Runner y snapshots temporales eliminados: $runner"
+        }
+        catch { Write-Aviso "No se pudo borrar $runner (¿ArcMap abierto?): $($_.Exception.Message)" }
+    }
+
+    $log = 'C:\MCP_Logs\arcmap-mcp.log'
+    if (Test-Path $log) {
+        Write-Aviso 'El log NO se borra (puede hacer falta para diagnosticar):'
+        Write-Info  "  $log"
+    }
+
+    $configs = @(
+        (Join-Path $env:APPDATA 'Claude\claude_desktop_config.json'),
+        (Join-Path $env:USERPROFILE '.gemini\settings.json'),
+        (Join-Path $env:USERPROFILE '.gemini\antigravity\mcp_config.json'),
+        (Join-Path $env:USERPROFILE '.config\opencode\opencode.json')
+    )
+    $backups = @()
+    foreach ($cfg in $configs) {
+        $dir = Split-Path $cfg -Parent
+        if (-not (Test-Path $dir)) { continue }
+        $hoja = Split-Path $cfg -Leaf
+        $backups += Get-ChildItem $dir -Filter "$hoja*.bak" -File -ErrorAction SilentlyContinue
+    }
+    if ($backups) {
+        Write-Aviso 'Las copias de seguridad de las configuraciones NO se borran:'
+        foreach ($b in $backups) { Write-Info "  $($b.FullName)" }
+    }
+}
+
 # --------------------------------------------------------------------------- #
 # Paso 3 - registro en los clientes IA
 # --------------------------------------------------------------------------- #
@@ -308,11 +482,50 @@ function Set-Prop {
     else { $Obj | Add-Member -NotePropertyName $Nombre -NotePropertyValue $Valor }
 }
 
+<# Varios clientes (OpenCode, Antigravity, VS Code y derivados) admiten comentarios
+   en su config: JSONC, no JSON. Eso rompe de dos maneras DISTINTAS y las dos son
+   malas:
+     - PowerShell 5.1: ConvertFrom-Json lanza, y con $ErrorActionPreference='Stop'
+       se llevaba por delante la instalacion entera, incluidos los clientes que aun
+       no se habian tocado.
+     - PowerShell 7: parsea los comentarios... y al reescribir el fichero los BORRA,
+       en silencio. Se pierde documentacion del usuario sin que nadie se entere.
+   Asi que un fichero con comentarios NO se reescribe: se avisa y se imprime el
+   bloque a pegar a mano.
+
+   La deteccion es razonable, no perfecta: recorre el texto llevando la cuenta de si
+   esta dentro de una cadena (con escapes) y busca // o /* fuera de ella. Una URL
+   "https://..." dentro de una cadena no cuenta, que es el falso positivo que
+   importaba. #>
+function Test-JsonConComentarios {
+    param([string]$Texto)
+    $enCadena = $false
+    $escape = $false
+    for ($i = 0; $i -lt $Texto.Length; $i++) {
+        $c = $Texto[$i]
+        if ($enCadena) {
+            if ($escape) { $escape = $false }
+            elseif ($c -eq '\') { $escape = $true }
+            elseif ($c -eq '"') { $enCadena = $false }
+            continue
+        }
+        if ($c -eq '"') { $enCadena = $true; continue }
+        if ($c -eq '/' -and ($i + 1) -lt $Texto.Length) {
+            $sig = $Texto[$i + 1]
+            if ($sig -eq '/' -or $sig -eq '*') { return $true }
+        }
+    }
+    return $false
+}
+
 function Read-Json {
     param([string]$Ruta)
     if (-not (Test-Path $Ruta)) { return [pscustomobject]@{} }
     $texto = Get-Content $Ruta -Raw -Encoding UTF8
     if ([string]::IsNullOrWhiteSpace($texto)) { return [pscustomobject]@{} }
+    if (Test-JsonConComentarios $texto) {
+        throw 'el fichero tiene comentarios (// o /* */): es JSONC, no JSON. Reescribirlo los borraria.'
+    }
     return $texto | ConvertFrom-Json
 }
 
@@ -322,13 +535,41 @@ function Write-Json {
     param([string]$Ruta, $Objeto)
     $dir = Split-Path $Ruta -Parent
     if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force $dir | Out-Null }
+    $json = $Objeto | ConvertTo-Json -Depth 64
+
     if (Test-Path $Ruta) {
-        $backup = "$Ruta.bak"
+        # Instalador idempotente: si el JSON resultante es identico, no se toca el
+        # fichero ni se genera un backup. Antes, cada pasada dejaba un .bak nuevo.
+        $actual = Get-Content $Ruta -Raw -Encoding UTF8
+        if ($actual -eq $json) {
+            Write-Info "Sin cambios: $Ruta"
+            return
+        }
+        # Backup con marca de tiempo. El ".bak" unico se pisaba en cada ejecucion: a
+        # la segunda pasada el "backup" ya era el fichero modificado, es decir, no
+        # habia copia de la configuracion original.
+        $backup = $Ruta + '.' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.bak'
         Copy-Item $Ruta $backup -Force
         Write-Info "Copia de seguridad: $backup"
     }
-    $json = $Objeto | ConvertTo-Json -Depth 64
-    [System.IO.File]::WriteAllText($Ruta, $json, (New-Object System.Text.UTF8Encoding($false)))
+
+    # Escritura a temporal EN LA MISMA CARPETA + reemplazo atomico. Escribir directo
+    # sobre el destino lo trunca antes de tener el contenido nuevo: si algo falla a
+    # mitad, el usuario se queda sin config y sin backup util.
+    $tmp = $Ruta + '.tmp' + $PID
+    [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
+    try {
+        if (Test-Path $Ruta) { [System.IO.File]::Replace($tmp, $Ruta, $null) }
+        else { Move-Item -LiteralPath $tmp -Destination $Ruta -Force }
+    }
+    catch {
+        # File.Replace exige que origen y destino esten en el mismo volumen y que el
+        # destino exista; si por lo que sea no vale, Move-Item -Force hace el trabajo.
+        Move-Item -LiteralPath $tmp -Destination $Ruta -Force
+    }
+    finally {
+        if (Test-Path $tmp) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+    }
 }
 
 function Get-BloqueServidor {
@@ -388,19 +629,56 @@ function Register-ClaudeCode {
         Write-Info  "  claude mcp add arcmap --scope user -- `"$VenvPython`" `"$ServerPy`""
         return
     }
+    # Ojo: estas llamadas van por Invoke-Nativo. `claude mcp remove` de una entrada
+    # inexistente escribe en stderr, y en PowerShell 5.1 eso LANZA con
+    # $ErrorActionPreference='Stop': la primera instalacion moria justo aqui, con el
+    # add-in ya puesto y ningun cliente registrado.
     if ($Quitar) {
-        & claude mcp remove arcmap --scope user 2>&1 | Out-Null
+        [void](Invoke-Nativo $claude.Source @('mcp', 'remove', 'arcmap', '--scope', 'user'))
         Write-Ok 'Claude Code: entrada arcmap retirada'
         return
     }
-    & claude mcp remove arcmap --scope user 2>&1 | Out-Null   # idempotencia: re-registra limpio
-    & claude mcp add arcmap --scope user -- $VenvPython $ServerPy 2>&1 | Out-Null
+    [void](Invoke-Nativo $claude.Source @('mcp', 'remove', 'arcmap', '--scope', 'user'))  # idempotencia
+    $alta = Invoke-Nativo $claude.Source @('mcp', 'add', 'arcmap', '--scope', 'user', '--', $VenvPython, $ServerPy)
+    if ($alta.Codigo -ne 0) {
+        # Antes se anunciaba "[OK] registrado" pasara lo que pasara: un alta fallida
+        # se daba por buena y el usuario no lo descubria hasta que el cliente no veia
+        # el servidor.
+        Write-Aviso "Claude Code: la CLI devolvio codigo $($alta.Codigo); el servidor NO ha quedado registrado."
+        if ($alta.Salida.Trim()) { Write-Info $alta.Salida.Trim() }
+        Write-Info 'Registralo a mano con:'
+        Write-Info "  claude mcp add arcmap --scope user -- `"$VenvPython`" `"$ServerPy`""
+        return
+    }
     # Decir SIEMPRE que ruta ha quedado registrada. Antes solo se anunciaba "registrado",
     # y esa omision costo una sesion: el registro apuntaba a un ZIP de prueba borrado
     # despues, y el fallo no salio hasta la sesion siguiente como CONNECTION_CLOSED.
     Write-Ok 'Claude Code: servidor arcmap registrado (scope user)'
     Write-Info "  -> $ServerPy"
     Test-RepoEfimero
+}
+
+<# Cuando un fichero de configuracion no se puede reescribir sin riesgo (JSONC, JSON
+   invalido, permisos), se imprime el bloque exacto que hay que pegar. Es la
+   diferencia entre "no se pudo" y "no se pudo, haz esto". #>
+function Show-BloqueManual {
+    param([string]$Nombre, [string]$Ruta, [string]$ClaveRaiz, [string]$Formato)
+    $py = $VenvPython -replace '\\', '/'
+    $sv = $ServerPy -replace '\\', '/'
+    Write-Info "Pega este bloque dentro de `"$ClaveRaiz`" en: $Ruta"
+    if ($Formato -eq 'opencode') {
+        Write-Info '  "arcmap": {'
+        Write-Info '    "type": "local",'
+        Write-Info "    `"command`": [`"$py`", `"$sv`"],"
+        Write-Info '    "enabled": true'
+        Write-Info '  }'
+    }
+    else {
+        Write-Info '  "arcmap": {'
+        Write-Info "    `"command`": `"$py`","
+        Write-Info "    `"args`": [`"$sv`"]"
+        Write-Info '  }'
+    }
 }
 
 function Register-ClienteJson {
@@ -412,7 +690,17 @@ function Register-ClienteJson {
         [switch]$Quitar
     )
 
-    $cfg = Read-Json $Ruta
+    # Un cliente que falla NO debe tumbar a los demas: cada registro va en su propio
+    # try. Antes, un opencode.json con comentarios abortaba la instalacion completa.
+    try {
+        $cfg = Read-Json $Ruta
+    }
+    catch {
+        Write-Aviso "${Nombre}: no se toca su configuracion — $($_.Exception.Message)"
+        if (-not $Quitar) { Show-BloqueManual $Nombre $Ruta $ClaveRaiz $Formato }
+        else { Write-Info "Quita a mano la entrada `"arcmap`" de `"$ClaveRaiz`" en: $Ruta" }
+        return
+    }
     if (-not $cfg.PSObject.Properties[$ClaveRaiz]) {
         if ($Quitar) { Write-Aviso "${Nombre}: no habia nada que quitar"; return }
         Set-Prop $cfg $ClaveRaiz ([pscustomobject]@{})
@@ -478,24 +766,32 @@ function Register-Clientes {
 
     Write-Paso 'Registro del servidor en los clientes IA'
     foreach ($c in $Lista) {
-        switch ($c) {
-            'claude-code' { Register-ClaudeCode -Quitar:$Quitar }
-            'claude-desktop' {
-                Register-ClienteJson -Nombre 'Claude Desktop' -Quitar:$Quitar `
-                    -Ruta (Join-Path $env:APPDATA 'Claude\claude_desktop_config.json')
+        # Red de seguridad por cliente: cualquier imprevisto (permisos, fichero
+        # corrupto, CLI que no responde) se queda en ese cliente y los demas siguen.
+        try {
+            switch ($c) {
+                'claude-code' { Register-ClaudeCode -Quitar:$Quitar }
+                'claude-desktop' {
+                    Register-ClienteJson -Nombre 'Claude Desktop' -Quitar:$Quitar `
+                        -Ruta (Join-Path $env:APPDATA 'Claude\claude_desktop_config.json')
+                }
+                'gemini' {
+                    Register-ClienteJson -Nombre 'Gemini CLI' -Quitar:$Quitar `
+                        -Ruta (Join-Path $env:USERPROFILE '.gemini\settings.json')
+                }
+                'antigravity' {
+                    Register-ClienteJson -Nombre 'Antigravity' -Quitar:$Quitar `
+                        -Ruta (Join-Path $env:USERPROFILE '.gemini\antigravity\mcp_config.json')
+                }
+                'opencode' {
+                    Register-ClienteJson -Nombre 'OpenCode' -Quitar:$Quitar -ClaveRaiz 'mcp' -Formato 'opencode' `
+                        -Ruta (Join-Path $env:USERPROFILE '.config\opencode\opencode.json')
+                }
             }
-            'gemini' {
-                Register-ClienteJson -Nombre 'Gemini CLI' -Quitar:$Quitar `
-                    -Ruta (Join-Path $env:USERPROFILE '.gemini\settings.json')
-            }
-            'antigravity' {
-                Register-ClienteJson -Nombre 'Antigravity' -Quitar:$Quitar `
-                    -Ruta (Join-Path $env:USERPROFILE '.gemini\antigravity\mcp_config.json')
-            }
-            'opencode' {
-                Register-ClienteJson -Nombre 'OpenCode' -Quitar:$Quitar -ClaveRaiz 'mcp' -Formato 'opencode' `
-                    -Ruta (Join-Path $env:USERPROFILE '.config\opencode\opencode.json')
-            }
+        }
+        catch {
+            Write-Aviso "${c}: no se ha podido registrar — $($_.Exception.Message)"
+            Write-Info  'Los demas clientes continuan.'
         }
     }
     if (-not $Quitar) {
@@ -539,8 +835,9 @@ function Test-Puente {
     }
     catch {
         Write-Aviso 'El puente no responde.'
-        Write-Info 'Repasa, en este orden: 1) ArcMap abierto; 2) barra arcmap-mcp visible;'
-        Write-Info '3) boton "Iniciar MCP" pulsado (o casilla "Autoarranque" marcada);'
+        Write-Info 'Repasa, en este orden: 1) ArcMap abierto; 2) barra arcmap-mcp activada'
+        Write-Info '   (Customize > Toolbars > arcmap-mcp: no aparece sola);'
+        Write-Info '3) boton "Iniciar MCP" pulsado (o desplegable "Autoarranque" en SI);'
         Write-Info "4) el log: C:\MCP_Logs\arcmap-mcp.log"
         return $false
     }
@@ -554,7 +851,10 @@ function Show-Resumen {
     param($ArcMap, $Py27)
 
     $txtArcMap = 'NO detectado'
-    if ($ArcMap) { $txtArcMap = $ArcMap.Version + ' (detectado por ' + $ArcMap.Origen + ')' }
+    if ($ArcMap) {
+        $txtArcMap = $ArcMap.Version + ' (detectado por ' + $ArcMap.Origen + ')'
+        if (-not $ArcMap.Soportada) { $txtArcMap = $txtArcMap + '  [NO SOPORTADO: el add-in se compila contra 10.5]' }
+    }
 
     $txtVenv = $VenvPython
     if (-not (Test-Path $VenvPython)) { $txtVenv = $VenvPython + '  [ausente]' }
@@ -595,8 +895,23 @@ if ($SoloVerificar) {
     Show-Resumen $arcmap $py27
     if ($arcmap) {
         $destino = Join-Path (Get-AddInsDir $arcmap.Version) (Get-AddInId)
-        if (Test-Path $destino) { Write-Ok "Add-in instalado en $destino" }
+        if (Test-Path $destino) {
+            # La version INSTALADA, no la del repo: tras una actualizacion a medias
+            # (ArcMap abierto, copia fallida) son distintas, y ese es el dato que se
+            # viene a buscar aqui.
+            $vInst = Get-AddInVersionInstalada $destino
+            $txtInst = 'version desconocida (no se pudo leer su config.xml)'
+            if ($vInst) { $txtInst = 'version ' + $vInst }
+            Write-Ok "Add-in instalado ($txtInst) en $destino"
+            $vRepo = Get-AddInVersion
+            if ($vInst -and $vRepo -and $vInst -ne $vRepo) {
+                Write-Aviso "El repo trae la ${vRepo}: cierra ArcMap y repite el instalador para actualizarlo."
+            }
+        }
         else { Write-Aviso 'El add-in NO esta instalado' }
+        if (-not $arcmap.Soportada) {
+            Write-Aviso "ArcMap $($arcmap.Version) no esta soportado por este add-in (compilado contra 10.5)."
+        }
     }
     [void](Test-Puente)
     return
@@ -617,12 +932,13 @@ if ($Desinstalar) {
             Write-Info  "Cierralos y borra a mano: $VenvDir"
         }
     }
+    Remove-RestosLocales
     Write-Host "`nDesinstalacion completada.`n" -ForegroundColor White
     return
 }
 
 if (-not $arcmap) {
-    Write-Aviso 'No se detecta ninguna instalacion de ArcMap 10.4-10.8.'
+    Write-Aviso 'No se detecta ninguna instalacion de ArcMap 10.5-10.8.'
     Write-Info  'Se continuara con el servidor y los clientes, pero el add-in no se instalara.'
 }
 if (-not $py27) {
@@ -636,5 +952,6 @@ if (-not $SinAddIn -and $arcmap) { Install-AddIn $arcmap }
 Register-Clientes -Lista $Clientes
 
 Show-Resumen $arcmap $py27
-Write-Host "`nSiguiente paso: abre ArcMap, pulsa 'Iniciar MCP' (o marca 'Autoarranque')" -ForegroundColor White
+Write-Host "`nSiguiente paso: abre ArcMap, activa la barra en Customize > Toolbars > arcmap-mcp," -ForegroundColor White
+Write-Host "pulsa 'Iniciar MCP' (o pon el desplegable 'Autoarranque' en SI)" -ForegroundColor White
 Write-Host "y comprueba con:  .\install.ps1 -SoloVerificar`n" -ForegroundColor White
