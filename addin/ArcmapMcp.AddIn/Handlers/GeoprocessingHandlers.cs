@@ -91,11 +91,10 @@ namespace ArcmapMcp.AddIn.Handlers
             {
                 IMxDocument doc;
                 IMap map = MapHandlers.FocusMap(out doc);
-                IEnumLayer enumLayer = map.get_Layers(null, true);
-                enumLayer.Reset();
-                ILayer lyr;
-                while ((lyr = enumLayer.Next()) != null)
-                    capas.Add(lyr);
+                // Por el helper: get_Layers(null, true) lanza E_FAIL con la TOC
+                // vacía, así que un geoproceso puramente de disco fallaba por no
+                // tener capas cargadas, que no tiene nada que ver.
+                capas = MapHandlers.Capas(map);
             }
 
             IVariantArray valores = new VarArrayClass();
@@ -178,10 +177,27 @@ namespace ArcmapMcp.AddIn.Handlers
         {
             switch (a.Type)
             {
-                case JTokenType.Integer: return (long)a;
+                case JTokenType.Integer:
+                    // Un (long) mete un VT_I8 en el IVariantArray, y lo habitual con el
+                    // GeoProcessor es VT_I4. Se manda int siempre que quepa. OJO: es un
+                    // cambio PREVENTIVO (2026-09-20), no la cura de un fallo observado:
+                    // no consta ningún GP que fallara con long. Si tras esta versión un
+                    // geoproceso empieza a quejarse de un parámetro numérico, mirar aquí.
+                    long entero = (long)a;
+                    return entero >= int.MinValue && entero <= int.MaxValue
+                        ? (object)(int)entero : (object)entero;
                 case JTokenType.Float: return (double)a;
                 case JTokenType.Boolean: return (bool)a;
                 case JTokenType.Null: return "";
+                case JTokenType.Date:
+                    // Newtonsoft convierte SOLO un texto con pinta de fecha ISO completa
+                    // ("2026-09-20T10:00:00Z") en un token Date, así que para quien llama
+                    // sigue siendo un texto. Sin este caso caía en el `default`, que desde
+                    // la 2.12.0 lanza, con un mensaje que le negaba haber mandado texto
+                    // (probado sobre Newtonsoft 13 net45). Se devuelve en ISO invariante:
+                    // el ToString() a secas dependía de la cultura de la máquina.
+                    return ((DateTime)a).ToString("yyyy-MM-dd HH:mm:ss",
+                                                  System.Globalization.CultureInfo.InvariantCulture);
                 case JTokenType.String:
                     string s = (string)a;
                     if (resolverCapas && s.IndexOfAny(NoResolver) < 0)
@@ -191,9 +207,62 @@ namespace ArcmapMcp.AddIn.Handlers
                                 return lyr;
                     }
                     return s;
+                case JTokenType.Array:
+                    return Multivalor((JArray)a, resolverCapas, capas);
                 default:
-                    return a.ToString();
+                    // Un objeto JSON ({...}) no tiene traducción a parámetro de GP. Antes
+                    // se mandaba su texto tal cual y la tool fallaba con un 000732 que
+                    // hablaba de una "entrada" inexistente: el mismo defecto que tenían
+                    // las listas. Mejor decirlo aquí que dejar que lo adivinen.
+                    string crudo = a.ToString(Newtonsoft.Json.Formatting.None);
+                    if (crudo.Length > 120) crudo = crudo.Substring(0, 120) + "...";
+                    throw new ArgumentException(
+                        "Parámetro de geoproceso no admitido (" + a.Type + "): " + crudo
+                        + ". Cada elemento de 'params' debe ser texto, número, booleano, null"
+                        + " o una LISTA (multivalor, se une con ';'). Un value table se pasa como"
+                        + " texto con la sintaxis del geoproceso, p. ej. \"campo1 SUM;campo2 MEAN\".");
             }
+        }
+
+        /// <summary>
+        /// Lista JSON → MULTIVALOR del geoprocesador, que es una cadena con los
+        /// elementos unidos por ';' (["a","b"] → "a;b"). Antes caía en el `default`
+        /// y llegaba al GP el texto JSON entero (`["a","b"]`), que es exactamente el
+        /// ERROR 000732 de Merge/Union/Intersect: la tool no encontraba esa "entrada".
+        ///
+        /// Un elemento que se resuelve a una capa de la TOC entra por su RUTA DE
+        /// FUENTE, no por su nombre: en un multivalor no hay forma de pasar el objeto
+        /// ILayer (el IVariantArray recibe UNA cadena), y el GP tampoco resuelve
+        /// nombres de la TOC por su cuenta. El precio es que ahí se pierden la
+        /// definition query y la selección de esa capa; para respetarlas hay que
+        /// pasar la capa como argumento suelto, no dentro de una lista.
+        /// </summary>
+        private static string Multivalor(JArray arr, bool resolverCapas, List<ILayer> capas)
+        {
+            var partes = new List<string>();
+            foreach (JToken el in arr)
+            {
+                if (el.Type == JTokenType.Array)
+                    throw new ArgumentException("'params' no admite listas dentro de listas: "
+                        + "un multivalor del geoprocesador es una lista plana de valores.");
+                object v = ResolverArg(el, resolverCapas, capas);
+                ILayer capa = v as ILayer;
+                if (capa != null)
+                {
+                    string workspace;
+                    string ruta = DataAccess.RutaFuente(capa, out workspace);
+                    if (string.IsNullOrEmpty(ruta))
+                        throw new ArgumentException("La capa '" + capa.Name + "' va dentro de una lista "
+                            + "y su fuente en disco no es resoluble, así que el geoproceso no podría "
+                            + "abrirla. Pásale la ruta del dato en vez del nombre de la capa.");
+                    partes.Add(ruta);
+                }
+                else
+                {
+                    partes.Add(Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture));
+                }
+            }
+            return string.Join(";", partes);
         }
 
         private static string Mensajes(IGeoProcessor2 gp)

@@ -49,18 +49,24 @@ namespace ArcmapMcp.AddIn.Handlers
             if (fc == null)
                 throw new ArgumentException("La capa no tiene fuente de datos accesible (¿rota?): " + capa);
 
-            int idx = fc.FindField(campo);
+            // El campo se busca en la DISPLAY TABLE, no en la clase base: los campos
+            // de un join existen en la capa (y list_fields los ofrece) pero no en la
+            // feature class, así que categorizar por uno daba "Campo no encontrado".
+            IFields campos = QueryHandlers.CamposDeCapa(encontrada);
+            int idx = campos.FindField(campo);
             if (idx < 0)
-                throw new ArgumentException("Campo no encontrado en la capa '" + capa + "': " + campo);
+                throw new ArgumentException("Campo no encontrado en la capa '" + capa + "': " + campo
+                    + ". Disponibles: " + NombresDeCampos(campos));
+            bool esNumerico = EsCampoNumerico(campos.get_Field(idx).Type);
 
-            List<string> valores = ValoresUnicos(fc, campo);
+            bool excedeTope;
+            List<string> valores = ValoresUnicos(encontrada, campo, esNumerico, out excedeTope);
             if (valores.Count == 0)
                 throw new ArgumentException("El campo '" + campo + "' no tiene ningún valor: nada que categorizar.");
-            if (valores.Count > MaxCategorias)
-                throw new ArgumentException("El campo '" + campo + "' tiene " + valores.Count
-                    + " valores distintos, por encima del tope de " + MaxCategorias
-                    + ". Una leyenda así no es legible: agrupa el campo antes, o usa "
-                    + "set_graduated_symbology si el campo es numérico y continuo.");
+            if (excedeTope)
+                throw new ArgumentException("El campo '" + campo + "' tiene más de " + MaxCategorias
+                    + " valores distintos, por encima del tope. Una leyenda así no es legible: agrupa "
+                    + "el campo antes, o usa set_graduated_symbology si el campo es numérico y continuo.");
 
             esriGeometryType shp = fc.ShapeType;
             double tam = LeerDouble(parameters["tamano"],
@@ -100,11 +106,27 @@ namespace ArcmapMcp.AddIn.Handlers
             });
         }
 
-        /// <summary>Valores distintos del campo, vía IDataStatistics.</summary>
-        private static List<string> ValoresUnicos(IFeatureClass fc, string campo)
+        /// <summary>
+        /// Valores distintos del campo, vía IDataStatistics.
+        ///
+        /// El cursor sale de la capa (display table), no de `fc.Search(null, false)`:
+        /// así honra la definition query —una capa filtrada a un municipio no debe
+        /// sacar en la leyenda las categorías de toda la región—, ve los campos de
+        /// los joins, pide SOLO el campo con SubFields y recicla las filas, en vez de
+        /// arrastrar la geometría de toda la tabla. La SELECCIÓN no se honra a
+        /// propósito: una leyenda que solo cubriera lo seleccionado dejaría sin
+        /// pintar el resto de la capa.
+        ///
+        /// Se corta al pasar del tope en vez de recorrer la tabla entera para poder
+        /// decir el número exacto: sobre una tabla grande ese recuento exacto cuesta
+        /// el mismo cuelgue que se quería evitar.
+        /// </summary>
+        private static List<string> ValoresUnicos(ILayer lyr, string campo, bool esNumerico,
+            out bool excedeTope)
         {
             var salida = new List<string>();
-            ICursor cursor = (ICursor)fc.Search(null, false);
+            excedeTope = false;
+            ICursor cursor = QueryHandlers.CursorDisplayTable(lyr, null, campo);
             try
             {
                 IDataStatistics stats = new DataStatisticsClass
@@ -122,17 +144,54 @@ namespace ArcmapMcp.AddIn.Handlers
                     if (v == null || v == DBNull.Value)
                         continue;
                     salida.Add(Convert.ToString(v, CultureInfo.InvariantCulture));
+                    if (salida.Count > MaxCategorias)
+                    {
+                        excedeTope = true;
+                        break;
+                    }
                 }
             }
             finally
             {
                 // Los cursores de ArcObjects hay que soltarlos o dejan lock sobre la
                 // fuente; con shapefiles en red eso se nota enseguida.
-                if (cursor != null)
-                    System.Runtime.InteropServices.Marshal.ReleaseComObject(cursor);
+                DataAccess.SoltarCom(cursor);
             }
-            salida.Sort(StringComparer.OrdinalIgnoreCase);
+            // Un campo numérico se ordena como número: por texto salía 1, 10, 11, 2 y
+            // la leyenda quedaba ilegible justo donde más se nota (estratos, códigos).
+            if (esNumerico)
+                salida.Sort(CompararNumerico);
+            else
+                salida.Sort(StringComparer.OrdinalIgnoreCase);
             return salida;
+        }
+
+        private static int CompararNumerico(string a, string b)
+        {
+            double na, nb;
+            bool okA = double.TryParse(a, NumberStyles.Any, CultureInfo.InvariantCulture, out na);
+            bool okB = double.TryParse(b, NumberStyles.Any, CultureInfo.InvariantCulture, out nb);
+            if (okA && okB)
+                return na.CompareTo(nb);
+            if (okA != okB)
+                return okA ? -1 : 1; // lo que no parsea, al final
+            return string.Compare(a, b, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool EsCampoNumerico(esriFieldType tipo)
+        {
+            return tipo == esriFieldType.esriFieldTypeSmallInteger
+                || tipo == esriFieldType.esriFieldTypeInteger
+                || tipo == esriFieldType.esriFieldTypeSingle
+                || tipo == esriFieldType.esriFieldTypeDouble;
+        }
+
+        private static string NombresDeCampos(IFields campos)
+        {
+            var nombres = new List<string>();
+            for (int i = 0; i < campos.FieldCount; i++)
+                nombres.Add(campos.get_Field(i).Name);
+            return string.Join(", ", nombres);
         }
 
         /// <summary>
@@ -140,44 +199,40 @@ namespace ArcmapMcp.AddIn.Handlers
         /// cromático: en categórico lo que importa es DISTINGUIR, no ordenar, así
         /// que una rampa secuencial (la de la graduada) sería justo lo contrario.
         /// Si se pasan color_desde y color_hasta se respeta esa rampa.
+        ///
+        /// La rampa explícita se construye con el MISMO helper que el ráster y por
+        /// tanto en CIE Lab por defecto, no en HSV: HSV interpola el tono dando la
+        /// vuelta a la rueda de color y devuelve un arcoíris (medido el 2026-09-04,
+        /// ver RasterSymbologyHandlers.LeerAlgoritmo). `algoritmo` permite pedir hsv
+        /// a propósito, igual que en el ráster.
         /// </summary>
         private static IColor[] Paleta(JObject parameters, int n)
         {
-            var salida = new IColor[n];
-            bool rampaExplicita = parameters["color_desde"] != null || parameters["color_hasta"] != null;
+            bool rampaExplicita = EsDado(parameters["color_desde"]) || EsDado(parameters["color_hasta"]);
 
             if (rampaExplicita)
             {
-                IColor desde = LeerColor(parameters["color_desde"], 255, 255, 178);
-                IColor hasta = LeerColor(parameters["color_hasta"], 189, 0, 38);
-                IAlgorithmicColorRamp rampa = new AlgorithmicColorRampClass
-                {
-                    Algorithm = esriColorRampAlgorithm.esriHSVAlgorithm,
-                    FromColor = desde,
-                    ToColor = hasta,
-                    Size = n
-                };
-                bool ok;
-                rampa.CreateRamp(out ok);
-                if (ok)
-                {
-                    IEnumColors colores = rampa.Colors;
-                    colores.Reset();
-                    for (int i = 0; i < n; i++)
-                        salida[i] = colores.Next() ?? hasta;
-                    return salida;
-                }
+                IColor desde = Parametros.LeerColor(parameters["color_desde"], "color_desde", 255, 255, 178);
+                IColor hasta = Parametros.LeerColor(parameters["color_hasta"], "color_hasta", 189, 0, 38);
+                return RasterSymbologyHandlers.ConstruirRampa(desde, hasta, n,
+                    RasterSymbologyHandlers.LeerAlgoritmo(parameters["algoritmo"]));
             }
 
             // Tonos repartidos por el círculo, saturación y valor fijos. Reproducible
             // a propósito: la misma capa con el mismo campo sale siempre igual, que
             // es lo que se espera al reexportar una serie de planos.
+            var salida = new IColor[n];
             for (int i = 0; i < n; i++)
             {
                 double hue = (360.0 * i) / n;
                 salida[i] = DesdeHsv(hue, 0.65, 0.90);
             }
             return salida;
+        }
+
+        private static bool EsDado(JToken t)
+        {
+            return t != null && t.Type != JTokenType.Null;
         }
 
         private static IColor DesdeHsv(double h, double s, double v)
@@ -236,21 +291,6 @@ namespace ArcmapMcp.AddIn.Handlers
                     };
                     return (ISymbol)punto;
             }
-        }
-
-        private static IColor LeerColor(JToken t, int rDef, int gDef, int bDef)
-        {
-            int r = rDef, g = gDef, b = bDef;
-            JArray arr = t as JArray;
-            if (arr != null && arr.Count >= 3)
-            {
-                r = (int)arr[0];
-                g = (int)arr[1];
-                b = (int)arr[2];
-            }
-            if (r < 0 || r > 255 || g < 0 || g > 255 || b < 0 || b > 255)
-                throw new ArgumentException("Los colores van como [R, G, B] con valores 0-255.");
-            return new RgbColorClass { Red = r, Green = g, Blue = b };
         }
 
         private static double LeerDouble(JToken t, double porDefecto)

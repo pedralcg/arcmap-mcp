@@ -23,55 +23,117 @@ namespace ArcmapMcp.AddIn.Handlers
     {
         private const double ScreenDpi = 96.0;
 
+        /// <summary>Rango admitido de dpi. El techo no es capricho: 1200 dpi sobre un
+        /// A1 son ~2.000 millones de píxeles, y ArcMap es un proceso de 32 bits —
+        /// eso no es un export lento, es un OutOfMemory que se lleva la sesión por
+        /// delante. Mejor decirlo que intentarlo.</summary>
+        private const int DpiMin = 24;
+        private const int DpiMax = 600;
+
         public static JObject ExportPdf(JObject parameters)
         {
-            string salida = RutaSalida(parameters, ".pdf");
-            int dpi = parameters["dpi"] != null ? (int)parameters["dpi"] : 300;
-            string aviso = Exportar(new ExportPDFClass(), salida, dpi, true, 0, 0);
-            return Resultado(new JObject { ["salida"] = salida, ["dpi"] = dpi }, aviso);
+            string salida = Parametros.RutaDeSalida(parameters["salida"], "salida", new[] { ".pdf" });
+            int dpi = Parametros.LeerEntero(parameters["dpi"], "dpi", 300, DpiMin, DpiMax);
+            return Exportado(new ExportPDFClass(), parameters, salida, dpi, true, 0, 0, null);
         }
 
         public static JObject ExportJpg(JObject parameters)
         {
-            string salida = RutaSalida(parameters, ".jpg");
-            int dpi = parameters["dpi"] != null ? (int)parameters["dpi"] : 230;
+            string salida = Parametros.RutaDeSalida(parameters["salida"], "salida", new[] { ".jpg", ".jpeg" });
+            int dpi = Parametros.LeerEntero(parameters["dpi"], "dpi", 230, DpiMin, DpiMax);
             IExport export = new ExportJPEGClass();
             ((IExportJPEG)export).Quality = 95;
-            string aviso = Exportar(export, salida, dpi, true, 0, 0);
-            return Resultado(new JObject { ["salida"] = salida, ["dpi"] = dpi }, aviso);
+            return Exportado(export, parameters, salida, dpi, true, 0, 0, null);
         }
 
         public static JObject ExportViewPng(JObject parameters)
         {
-            string salida = RutaSalida(parameters, ".png");
-            int dpi = parameters["dpi"] != null ? (int)parameters["dpi"] : 150;
+            string salida = Parametros.RutaDeSalida(parameters["salida"], "salida", new[] { ".png" });
+            int dpi = Parametros.LeerEntero(parameters["dpi"], "dpi", 150, DpiMin, DpiMax);
             string modo = ((string)parameters["modo"] ?? "vista").ToLowerInvariant();
-            int ancho = parameters["ancho"] != null && parameters["ancho"].Type != JTokenType.Null
-                ? (int)parameters["ancho"] : 0;
-            int alto = parameters["alto"] != null && parameters["alto"].Type != JTokenType.Null
-                ? (int)parameters["alto"] : 0;
-            string aviso = Exportar(new ExportPNGClass(), salida, dpi, modo == "layout", ancho, alto);
-            return Resultado(new JObject { ["salida"] = salida, ["dpi"] = dpi, ["modo"] = modo }, aviso);
+            // 0 = derivar del aspect ratio del frame. El techo es por el mismo motivo
+            // que el de dpi: el bitmap se monta entero en memoria de 32 bits.
+            int ancho = Parametros.LeerEntero(parameters["ancho"], "ancho", 0, 0, 10000);
+            int alto = Parametros.LeerEntero(parameters["alto"], "alto", 0, 0, 10000);
+            return Exportado(new ExportPNGClass(), parameters, salida, dpi, modo == "layout", ancho, alto,
+                new JObject { ["modo"] = modo });
         }
 
-        private static JObject Resultado(JObject inner, string aviso)
+        /// <summary>
+        /// Envoltorio común de las tres tools: comprueba la sobrescritura, exporta a
+        /// un TEMPORAL junto al destino y solo al final lo mueve encima.
+        ///
+        /// El temporal es el arreglo de una pérdida de datos real: al cancelar con
+        /// ESC se hacía `File.Delete(salida)` sin mirar si ese fichero existía ANTES,
+        /// así que reexportar un plano y arrepentirse borraba el plano bueno. Con el
+        /// temporal, una cancelación no toca lo que había.
+        ///
+        /// `sobrescribir` va a TRUE por defecto en los export, a diferencia de
+        /// save_mxd_as: una serie de planos se reexporta encima una y otra vez, y
+        /// pedir permiso cada vez rompería ese flujo. Lo que sí cambia es que la
+        /// respuesta DICE si se pisó algo (`sobrescrito`).
+        /// </summary>
+        private static JObject Exportado(IExport export, JObject parameters, string salida, int dpi,
+                                         bool quierenLayout, int anchoPx, int altoPx, JObject extra)
         {
+            bool sobrescribir = Parametros.LeerBool(parameters["sobrescribir"], "sobrescribir", true);
+            bool sobrescrito = Parametros.ComprobarSobrescritura(salida, sobrescribir, "sobrescribir");
+
+            string tmp = TemporalJuntoA(salida);
+            string aviso;
+            try
+            {
+                aviso = Exportar(export, tmp, dpi, quierenLayout, anchoPx, altoPx);
+            }
+            catch
+            {
+                Borrar(tmp);
+                throw;
+            }
+
+            try
+            {
+                if (File.Exists(salida))
+                    File.Delete(salida);
+                File.Move(tmp, salida);
+            }
+            catch (Exception ex)
+            {
+                Borrar(tmp);
+                throw new InvalidOperationException("La exportación terminó pero no se pudo escribir "
+                    + salida + " (¿abierto en otro programa?): " + ex.Message, ex);
+            }
+
+            var inner = new JObject
+            {
+                ["salida"] = salida,
+                ["dpi"] = dpi,
+                ["sobrescrito"] = sobrescrito
+            };
+            if (extra != null)
+                foreach (var prop in extra)
+                    inner[prop.Key] = prop.Value;
             if (aviso != null)
                 inner["aviso"] = aviso;
             return Protocol.Result(inner);
         }
 
-        private static string RutaSalida(JObject parameters, string extension)
+        /// <summary>Temporal en la MISMA carpeta que el destino: así el movimiento
+        /// final es un rename dentro del volumen (atómico y sin copiar gigas), y si
+        /// la carpeta no admitiera escritura se vería al empezar, no al terminar.</summary>
+        private static string TemporalJuntoA(string salida)
         {
-            string salida = (string)parameters["salida"];
-            if (string.IsNullOrEmpty(salida))
-                throw new ArgumentException("Indica 'salida' (ruta del archivo de destino).");
-            if (!salida.ToLowerInvariant().EndsWith(extension))
-                salida += extension;
-            string carpeta = System.IO.Path.GetDirectoryName(salida);
-            if (!string.IsNullOrEmpty(carpeta) && !Directory.Exists(carpeta))
-                throw new ArgumentException("La carpeta de salida no existe: " + carpeta);
-            return salida;
+            string carpeta = System.IO.Path.GetDirectoryName(salida) ?? "";
+            string nombre = System.IO.Path.GetFileNameWithoutExtension(salida)
+                + ".mcp-" + Guid.NewGuid().ToString("N").Substring(0, 8)
+                + System.IO.Path.GetExtension(salida);
+            return System.IO.Path.Combine(carpeta, nombre);
+        }
+
+        private static void Borrar(string ruta)
+        {
+            try { if (File.Exists(ruta)) File.Delete(ruta); }
+            catch { }
         }
 
         /// <summary>
@@ -84,7 +146,6 @@ namespace ArcmapMcp.AddIn.Handlers
         private static string Exportar(IExport export, string salida, int dpi,
                                        bool quierenLayout, int anchoPx, int altoPx)
         {
-            if (dpi < 24) dpi = 24;
             IApplication app = ArcSession.App();
             IMxDocument doc = ArcSession.Doc(app);
 
@@ -141,7 +202,9 @@ namespace ArcmapMcp.AddIn.Handlers
 
                 if (!cancel.Continue())
                 {
-                    try { File.Delete(salida); } catch { }
+                    // 'salida' aquí es el TEMPORAL (ver Exportado): borrarlo no toca
+                    // el fichero de destino, que es justo lo que antes se perdía.
+                    Borrar(salida);
                     throw new OperationCanceledException("Export cancelado por el usuario (ESC) en ArcMap.");
                 }
             }
