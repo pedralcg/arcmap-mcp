@@ -22,13 +22,21 @@ namespace ArcmapMcp.AddIn.Handlers
             return Protocol.Result(new JObject { ["guardado"] = true, ["ruta"] = ruta });
         }
 
+        /// <summary>
+        /// save_mxd_as: copia del documento en otra ruta.
+        ///
+        /// `sobrescribir` va a FALSE por defecto, al revés que en los export: aquí no
+        /// hay ninguna serie que reexportar encima, y pisar un .mxd ajeno sin avisar
+        /// se lleva por delante un montaje de horas. Se valida además que la carpeta
+        /// exista y que la ruta sea absoluta, como ya hacía el hermano RutaSalida de
+        /// los export: sin eso, SaveAsDocument escribía donde le pillara el
+        /// directorio de trabajo de ArcMap.
+        /// </summary>
         public static JObject SaveMxdAs(JObject parameters)
         {
-            string salida = (string)parameters["salida"];
-            if (string.IsNullOrEmpty(salida))
-                throw new ArgumentException("Indica 'salida' (ruta de destino .mxd).");
-            if (!salida.ToLowerInvariant().EndsWith(".mxd"))
-                salida += ".mxd";
+            string salida = Parametros.RutaDeSalida(parameters["salida"], "salida", new[] { ".mxd" });
+            bool sobrescribir = Parametros.LeerBool(parameters["sobrescribir"], "sobrescribir", false);
+            bool sobrescrito = Parametros.ComprobarSobrescritura(salida, sobrescribir, "sobrescribir");
 
             IApplication app = ArcSession.App();
             string origen = ArcSession.MxdPath(app);
@@ -37,7 +45,8 @@ namespace ArcmapMcp.AddIn.Handlers
             {
                 ["guardado"] = true,
                 ["salida"] = salida,
-                ["origen"] = origen
+                ["origen"] = origen,
+                ["sobrescrito"] = sobrescrito
             });
         }
     }

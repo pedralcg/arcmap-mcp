@@ -3,7 +3,7 @@
 
 Ejecuta en Python 2.7 standalone (C:\\Python27\\ArcGIS10.5\\python.exe) las
 operaciones que ArcObjects .NET no cubre: execute_code (arcpy arbitrario), las
-3 de Data Driven Pages (solo existen en arcpy) y las 6 ambientales (lógica
+3 de Data Driven Pages (solo existen en arcpy) y las 5 ambientales (lógica
 arcpy pura, sin añadir-al-mapa: eso lo hace el add-in nativamente sobre la
 sesión viva al volver).
 
@@ -23,7 +23,7 @@ import os
 import sys
 import time
 import traceback
-import StringIO
+import uuid
 
 # --------------------------------------------------------------------------- #
 # Traza de fase.
@@ -86,6 +86,49 @@ def _u(x):
     return unicode(x)
 
 
+class _BufferUnicode(object):
+    """stdout de reemplazo que guarda TODO como unicode, coaccionando en cada write.
+
+    `StringIO.StringIO` acumula lo que le echen sin mirar, y solo al final, en
+    `getvalue()`, intenta juntarlo: si el codigo del usuario mezcla
+    `print "Numero"` (str, bytes) con `print u"..."` (unicode), esa union
+    concatena bytes y unicode con el codec ascii y lanza UnicodeDecodeError.
+    El dano es desproporcionado: el codigo habia ido BIEN y tenia su RESULT
+    asignado, y se perdia entero por una linea de traza. Coaccionando con `_u`
+    en cada write el problema no llega a existir.
+    """
+
+    def __init__(self):
+        self._partes = []
+        # El `print` de Python 2 lee y escribe este atributo en el fichero de
+        # salida (StringIO tambien lo define). Sin el, print funciona igual
+        # -CPython se traga el fallo del getattr- pero deja de separar los
+        # `print a, b` con un espacio.
+        self.softspace = 0
+
+    def write(self, dato):
+        self._partes.append(_u(dato))
+
+    def writelines(self, lineas):
+        for linea in lineas:
+            self.write(linea)
+
+    def flush(self):
+        pass
+
+    def getvalue(self):
+        return u"".join(p for p in self._partes if p is not None)
+
+
+def _resumen_stdout(stdout, maximo=500):
+    """Cola del stdout capturado, para no perderlo cuando la respuesta es un error."""
+    if not stdout:
+        return u""
+    if len(stdout) <= maximo:
+        return u" Salida capturada: %s" % stdout
+    return u" Ultimos %d caracteres de la salida: ...%s" % (maximo, stdout[-maximo:])
+
+
 def _abrir_mxd(job):
     """Abre el snapshot del documento; error accionable si el job no lo trae.
 
@@ -104,7 +147,49 @@ def _abrir_mxd(job):
     _fase(u"abriendo documento", detalle)
     doc = MAP.MapDocument(_u(ruta))
     _fase(u"documento abierto", detalle)
+    _contar_rotas(doc)
     return doc
+
+
+# Fuentes rotas de la COPIA del documento. None = no se abrió ningún documento (o no
+# se pudieron contar). Lo rellena _abrir_mxd y main() lo adjunta al resultado.
+_ROTAS_EN_COPIA = None
+
+
+def _contar_rotas(doc):
+    """Cuenta las capas con la fuente rota EN LA COPIA. Nunca rompe el job.
+
+    Red de seguridad de un fallo que fue silencioso de la 2.6.0 a la 2.11.0: la copia
+    del .mxd se hacía en %TEMP%, y un documento de RUTAS RELATIVAS copiado a otra
+    carpeta abre con todas sus capas rotas (reproducido en aislado el 2026-09-20).
+    `export_ddp` exportaba entonces un atlas con leyenda y sin datos, sin un solo
+    error. El add-in ya copia junto al original en ese caso; esto es el testigo que
+    lo haría visible si volviera por otro camino. Es un contador, no un veredicto:
+    el documento original también puede tener capas rotas de antes.
+    """
+    global _ROTAS_EN_COPIA
+    try:
+        _fase(u"comprobando fuentes de la copia")
+        _ROTAS_EN_COPIA = [_u(l.name) for l in MAP.ListBrokenDataSources(doc)]
+    except Exception:
+        _ROTAS_EN_COPIA = None
+
+
+def _adjuntar_rotas(resultado):
+    """Añade al resultado el testigo de fuentes rotas de la copia, si lo hay."""
+    if _ROTAS_EN_COPIA is None or not isinstance(resultado, dict):
+        return resultado
+    resultado["capas_rotas_en_copia"] = len(_ROTAS_EN_COPIA)
+    if _ROTAS_EN_COPIA:
+        resultado["aviso_capas_rotas"] = (
+            u"La copia del documento sobre la que se ha trabajado tiene %d capa(s) con la "
+            u"fuente ROTA: %s%s. Lo que dependa de ellas (un export, un recuento) sale sin "
+            u"esos datos. Comprueba con list_broken_data_sources si ya estaban rotas en la "
+            u"sesión; si allí están bien, el fallo es de la copia: mira `snapshot_via` en "
+            u"esta misma respuesta y repite con serializar_sesion=true si la tool lo admite."
+            % (len(_ROTAS_EN_COPIA), u", ".join(_ROTAS_EN_COPIA[:10]),
+               u"..." if len(_ROTAS_EN_COPIA) > 10 else u""))
+    return resultado
 
 
 def _get_ddp(mxd):
@@ -147,6 +232,68 @@ def _checkout(ext):
     arcpy.CheckOutExtension(ext)
 
 
+def _existe(ruta):
+    """¿Hay ya algo escrito en esa ruta? `arcpy.Exists` es el unico que ve
+    dentro de una geodatabase (una feature class no es un fichero para
+    os.path); os.path.exists queda de respaldo por si arcpy se atraganta."""
+    if not ruta:
+        return False
+    try:
+        if arcpy.Exists(_u(ruta)):
+            return True
+    except Exception:
+        pass
+    try:
+        return os.path.exists(_u(ruta))
+    except Exception:
+        return False
+
+
+def _preparar_salidas(params, rutas):
+    """Decide QUE hacer si la salida ya existe, ANTES de gastar el geoproceso.
+
+    `arcpy.env.overwriteOutput` viene a False en un proceso nuevo, asi que la
+    segunda ejecucion de la misma operacion sobre la misma ruta moria con un
+    ERROR 000725 despues de haber calculado el resultado entero: minutos de
+    geoproceso tirados para acabar sin nada. Activarlo a ciegas seria peor: es
+    global al proceso, y con el puesto una ruta mal tecleada borra en silencio
+    el resultado de ayer. De ahi el parametro explicito `sobrescribir`, que por
+    defecto NO sobrescribe y avisa antes de empezar.
+    """
+    sobrescribir = bool(params.get("sobrescribir", False))
+    arcpy.env.overwriteOutput = sobrescribir
+    if sobrescribir:
+        return True
+    ya_estan = [r for r in rutas if r and _existe(r)]
+    if ya_estan:
+        raise ValueError(u"La salida ya existe: %s. Borrala, cambia la ruta o "
+                         u"repite con sobrescribir=true."
+                         % u"; ".join(_u(r) for r in ya_estan))
+    return False
+
+
+def _es_geodatabase(carpeta):
+    """¿La ruta de salida cae dentro de una gdb/mdb/sde? Cambia las reglas de
+    nombrado: en carpeta, un raster sin extension es un GRID de Esri (nombre
+    de 13 caracteres como mucho y sin espacios); en gdb no hay tal limite."""
+    partes = _u(carpeta or u"").replace(u"/", u"\\").split(u"\\")
+    return any(p.lower().endswith((u".gdb", u".mdb", u".sde")) for p in partes)
+
+
+def _ruta_backlink(out_dir):
+    """Ruta del raster de backlink (subproducto de CostDistance), con nombre UNICO.
+
+    Con el nombre fijo `lcp_backlink` la segunda ruta de minimo coste calculada
+    en la misma carpeta chocaba con el backlink de la primera y moria sin haber
+    tocado la salida que el usuario pidio. En carpeta se escribe .tif a
+    proposito: un GRID corta el nombre a 13 caracteres y ahi no cabe el sufijo.
+    """
+    marca = uuid.uuid4().hex[:8]
+    if _es_geodatabase(out_dir):
+        return os.path.join(_u(out_dir), u"lcp_backlink_%s" % marca)
+    return os.path.join(_u(out_dir), u"lcp_bl_%s.tif" % marca)
+
+
 # --------------------------------------------------------------------------- #
 # Operaciones de documento (necesitan snapshot).
 # --------------------------------------------------------------------------- #
@@ -161,7 +308,7 @@ def op_execute_code(job):
     """
     code = job["params"].get("code", u"")
     mxd = _abrir_mxd(job) if job.get("mxd") else None
-    buff = StringIO.StringIO()
+    buff = _BufferUnicode()
     old_stdout = sys.stdout
     sys.stdout = buff
     ns = {"arcpy": arcpy, "MAP": MAP, "mapping": MAP, "RESULT": None}
@@ -169,12 +316,52 @@ def op_execute_code(job):
         ns["mxd"] = mxd
         ns["df"] = mxd.activeDataFrame
     _fase(u"ejecutando codigo")
+    # `sys.exit()`, `exit()` y Ctrl-C NO son Exception (SystemExit y
+    # KeyboardInterrupt cuelgan de BaseException): se escapaban del `except
+    # Exception` de main(), el runner moria sin escribir el out.json y el add-in
+    # solo podia decir "salida vacia" de un codigo que, en el caso del exit(),
+    # habia corrido entero. Se capturan aqui, donde todavia se ve el RESULT.
+    interrumpido = None
     try:
         exec(code, ns)
+    except SystemExit as ex:
+        interrumpido = ex
+    except KeyboardInterrupt as ex:
+        interrumpido = ex
     finally:
         sys.stdout = old_stdout
         del mxd
-    return {"result": ns.get("RESULT"), "stdout": buff.getvalue()}
+    stdout = buff.getvalue()
+    if interrumpido is None:
+        return {"result": ns.get("RESULT"), "stdout": stdout}
+
+    if isinstance(interrumpido, KeyboardInterrupt):
+        raise ValueError(u"El codigo fue interrumpido (KeyboardInterrupt) antes de "
+                         u"terminar, asi que no hay RESULT que devolver.%s"
+                         % _resumen_stdout(stdout))
+
+    codigo = getattr(interrumpido, "code", None)
+    if codigo is None:
+        codigo, mensaje = 0, None
+    elif isinstance(codigo, int):
+        mensaje = None
+    else:
+        # sys.exit("texto") imprime el texto y sale con codigo 1.
+        codigo, mensaje = 1, _u(codigo)
+    resultado = ns.get("RESULT")
+    if codigo == 0 and resultado is not None:
+        # La clave NO puede ser "aviso": el handler ExecuteArcpy del add-in
+        # sobrescribe `result.aviso` sin mirar (ahi pone el aviso del snapshot),
+        # asi que esta nota no llegaria nunca al llamante.
+        return {"result": resultado, "stdout": stdout,
+                "aviso_salida": u"El codigo llamo a sys.exit() y se ha devuelto el "
+                                u"RESULT que ya tenia asignado. En execute_arcpy no "
+                                u"hace falta salir: basta con asignar RESULT."}
+    raise ValueError(u"El codigo termino con sys.exit(%s)%s y no dejo RESULT "
+                     u"asignado, asi que no hay nada que devolver. En "
+                     u"execute_arcpy no se sale con sys.exit: se asigna RESULT.%s"
+                     % (codigo, u" -> %s" % mensaje if mensaje else u"",
+                        _resumen_stdout(stdout)))
 
 
 def op_list_ddp(job):
@@ -228,12 +415,20 @@ def op_export_ddp(job):
         un_por_pagina = bool(params.get("un_pdf_por_pagina", False))
 
         page_range_string = u""
+        no_encontrados = []
         if valores:
             ids = []
             for v in valores:
                 pid = ddp.getPageIDFromName(_u(v))
                 if pid:
                     ids.append(pid)
+                else:
+                    # Un valor que no casa con ninguna pagina se descartaba EN
+                    # SILENCIO: pedias 12 expedientes, recibias un PDF de 9 y
+                    # nada en la respuesta decia cuales faltaban. Un error de
+                    # tecleo o un expediente que ya no esta en la capa indice se
+                    # leian igual que un exito.
+                    no_encontrados.append(_u(v))
             if not ids:
                 raise ValueError(u"Ningún valor coincide con páginas del atlas: %s"
                                  % u", ".join(_u(v) for v in valores))
@@ -256,9 +451,17 @@ def op_export_ddp(job):
             num = 1
         else:
             num = _contar_paginas_rango(page_range_string)
-        return {"salida": salida, "modo_efectivo": range_type,
-                "page_range": page_range_string, "num": num,
-                "un_pdf_por_pagina": un_por_pagina, "dpi": dpi}
+        out = {"salida": salida, "modo_efectivo": range_type,
+               "page_range": page_range_string, "num": num,
+               "un_pdf_por_pagina": un_por_pagina, "dpi": dpi,
+               "valores_no_encontrados": no_encontrados}
+        if no_encontrados:
+            out["aviso"] = (u"%d de los %d valores pedidos NO existen en la capa "
+                            u"índice y no están en el PDF: %s. Revisa list_ddp "
+                            u"para ver los valores reales del atlas."
+                            % (len(no_encontrados), len(valores),
+                               u", ".join(no_encontrados)))
+        return out
     finally:
         del mxd
 
@@ -320,6 +523,7 @@ def op_raster_index(job):
     banda_b = params.get("banda_b")
     if not salida:
         raise ValueError(u"Indica 'salida' (ruta del ráster de índice).")
+    _preparar_salidas(params, [salida])
     _checkout("Spatial")
     try:
         from arcpy.sa import Raster, Float
@@ -374,6 +578,14 @@ def op_hydrology(job):
     params = job["params"]
     op = (params.get("operacion") or u"").lower()
     p = params.get("parametros") or {}
+    # Las salidas se conocen ANTES de tocar la licencia: el aviso de "ya existe"
+    # no debe costar un checkout de Spatial Analyst. `cuenca` escribe ademas fdir
+    # y facc con nombre fijo en salida_dir, y esos chocan igual en la 2ª pasada.
+    salidas = [p.get("salida")]
+    if op == "cuenca" and p.get("salida_dir"):
+        salidas.append(os.path.join(_u(p["salida_dir"]), "fdir"))
+        salidas.append(os.path.join(_u(p["salida_dir"]), "facc"))
+    _preparar_salidas(params, salidas)
     _checkout("Spatial")
     try:
         from arcpy.sa import (Raster, Fill, FlowDirection, FlowAccumulation,
@@ -431,6 +643,7 @@ def op_contours(job):
     dxf = params.get("dxf")
     if not (mdt and salida and intervalo is not None):
         raise ValueError(u"Indica 'mdt', 'salida' e 'intervalo' (equidistancia).")
+    _preparar_salidas(params, [salida, dxf])
     _checkout("3D")
     try:
         arcpy.ddd.Contour(_u(mdt), _u(salida), float(intervalo), float(base))
@@ -450,6 +663,7 @@ def op_topographic_profile(job):
     salida = params.get("salida")
     if not (superficie and lineas and salida):
         raise ValueError(u"Indica 'superficie' (ráster/TIN), 'lineas' (2D) y 'salida'.")
+    _preparar_salidas(params, [salida])
     _checkout("3D")
     try:
         arcpy.ddd.InterpolateShape(_u(superficie), _u(lineas), _u(salida))
@@ -467,11 +681,12 @@ def op_least_cost_path(job):
     salida_dir = params.get("salida_dir")
     if not (coste and origen and destino and salida):
         raise ValueError(u"Indica 'coste' (ráster de fricción), 'origen', 'destino' y 'salida'.")
+    _preparar_salidas(params, [salida])
     _checkout("Spatial")
     try:
         from arcpy.sa import CostDistance, CostPath, Raster
         out_dir = salida_dir or os.path.dirname(_u(salida)) or arcpy.env.scratchFolder
-        backlink = os.path.join(_u(out_dir), "lcp_backlink")
+        backlink = _ruta_backlink(out_dir)
         cdist = CostDistance(_u(origen), _u(coste), out_backlink_raster=backlink)
         lcp = CostPath(_u(destino), cdist, Raster(backlink), "EACH_CELL")
         lcp.save(_u(salida))
@@ -505,6 +720,44 @@ def _json_default(o):
         return repr(o)
 
 
+def _clave(k):
+    """Clave de diccionario como texto. json.dumps de Py2 revienta con
+    "keys must be a string" ante una tupla o un objeto; degradarla a texto es
+    peor que tenerla bien, pero infinitamente mejor que perder el job entero."""
+    if isinstance(k, unicode):
+        return k
+    if isinstance(k, str):
+        return _u(k)
+    try:
+        return unicode(k)
+    except Exception:
+        return _u(repr(k))
+
+
+def _sanear(valor):
+    """Todo `str` a unicode, recursivamente, ANTES de json.dumps.
+
+    Con ensure_ascii=False, json.dumps decodifica cada `str` que encuentra como
+    UTF-8, y en Windows hay `str` que NO son UTF-8: `os.listdir()` sobre una
+    ruta `str` devuelve los nombres en la codepage ANSI, asi que un RESULT con
+    "Cartografia" acentuada reventaba con UnicodeDecodeError y se perdia el
+    trabajo entero por el nombre de un fichero. `_u` prueba utf-8 y cae a
+    latin-1, que nunca falla.
+
+    Solo se tocan `str` y contenedores: numeros, booleanos y None pasan
+    intactos (coaccionarlos convertiria un 42 en "42" y mentiria sobre el tipo
+    del resultado). Lo que no es ninguna de esas cosas lo sigue resolviendo
+    `_json_default` al serializar.
+    """
+    if isinstance(valor, str):
+        return _u(valor)
+    if isinstance(valor, dict):
+        return dict((_clave(k), _sanear(v)) for k, v in valor.items())
+    if isinstance(valor, (list, tuple)):
+        return [_sanear(v) for v in valor]
+    return valor
+
+
 def _serializar(respuesta):
     """JSON como UNICODE, siempre.
 
@@ -514,8 +767,11 @@ def _serializar(respuesta):
     "write() argument 1 must be unicode" → el fichero de salida quedaba VACÍO y el
     add-in fallaba con "Error reading JObject ... line 0, position 0". La coerción
     explícita es obligatoria: no la quites.
+
+    El saneo previo es de la misma familia: json.dumps no sabe que hacer con un
+    `str` que no sea UTF-8, y arcpy y os devuelven unos cuantos.
     """
-    texto = json.dumps(respuesta, ensure_ascii=False, default=_json_default)
+    texto = json.dumps(_sanear(respuesta), ensure_ascii=False, default=_json_default)
     if isinstance(texto, str):
         texto = texto.decode("utf-8")
     return texto
@@ -549,7 +805,7 @@ def main():
         if op is None:
             raise ValueError(u"Operación desconocida: %s" % _u(job.get("op")))
         _fase(u"ejecutando op", _u(job.get("op")))
-        respuesta = {"ok": True, "result": op(job)}
+        respuesta = {"ok": True, "result": _adjuntar_rotas(op(job))}
     except Exception as ex:
         respuesta = {"ok": False,
                      "error": _u(ex.message if getattr(ex, "message", None) else ex),
