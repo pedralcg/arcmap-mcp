@@ -19,7 +19,21 @@ namespace ArcmapMcp.AddIn
         private const string LinkedIn = "https://www.linkedin.com/in/pedro-alcoba-gomez/";
         private const string Lugar = "Bullas, Murcia";
         private const string Repo = "https://github.com/pedralcg/arcmap-mcp";
-        private const int NumHerramientas = 48;
+
+        // Tools que el servidor MCP resuelve SIN el puente: describe_mxd y audit_folder
+        // leen .mxd del disco con el arcpy standalone y no necesitan ArcMap abierto, así
+        // que no tienen comando en McpServer. Son el +2 sobre los comandos del puente.
+        private const int ToolsSinPuente = 2;
+
+        // Derivado y no escrito a mano: estaba en 48 cuando ya eran 57, porque un número
+        // suelto en un literal no se actualiza al añadir una tool. La correspondencia es
+        // 1:1 — cada comando del puente es una @mcp.tool de src/arcmap_mcp_server.py
+        // (execute_code es la de execute_arcpy) — y verificada el 2026-09-20:
+        // 46 nativos + 9 de fondo + 2 sin puente = 57 tools.
+        private static int NumHerramientas
+        {
+            get { return McpServer.NumComandos + ToolsSinPuente; }
+        }
 
         private const string SvgWeb =
             @"<svg viewBox=""0 0 24 24"" width=""22"" height=""22"" fill=""none"" stroke=""#1e5631"" stroke-width=""2""><circle cx=""12"" cy=""12"" r=""9""/><path d=""M3 12h18M12 3c2.5 2.7 2.5 15.3 0 18M12 3c-2.5 2.7-2.5 15.3 0 18""/></svg>";

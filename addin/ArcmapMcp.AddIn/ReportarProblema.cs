@@ -42,7 +42,7 @@ namespace ArcmapMcp.AddIn
                 "## Qué esperabas que pasara\r\n(describe aquí)\r\n\r\n"
                 + "## Qué pasó en realidad\r\n(describe aquí)\r\n\r\n"
                 + "## Pasos para reproducirlo\r\n1. \r\n2. \r\n\r\n"
-                + "## Diagnóstico (generado automáticamente — sin datos de proyecto)\r\n"
+                + "## Diagnóstico (generado automáticamente — entorno y contadores, sin datos de proyecto)\r\n"
                 + "```\r\n" + diagnostico + "\r\n```\r\n";
         }
 
@@ -129,9 +129,14 @@ namespace ArcmapMcp.AddIn
 
             var intro = new Label
             {
+                // El texto decía "no incluye rutas" y el bloque traía la del intérprete
+                // Python, que puede llevar el nombre del usuario. Ahora se enmascara el
+                // perfil (%USERPROFILE%) y la promesa dice lo que de verdad sale: la
+                // diferencia entre una promesa y una promesa que se cumple.
                 Text = "Se enviará SOLO este diagnóstico (versiones, entorno y contadores de "
-                       + "sesión). No incluye nombres de capas ni rutas de tu proyecto. Elige "
-                       + "cómo reportar; se abrirá con el texto ya rellenado.",
+                       + "sesión). No incluye el documento, ni nombres de capas, ni rutas de tus "
+                       + "datos; sí aparece la ruta del Python de ArcGIS, con tu carpeta de usuario "
+                       + "enmascarada. Léelo abajo antes de enviarlo.",
                 Location = new Point(12, 12),
                 Size = new Size(536, 48),
                 AutoSize = false

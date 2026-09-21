@@ -17,7 +17,49 @@ del JSON, para que el que llama pueda distinguir "documento roto" de
 "proceso muerto".
 """
 import json
+import os
 import sys
+
+
+def ruta_unicode(bruto):
+    """La ruta del argumento, a unicode, decidiendo la codificacion UNA vez.
+
+    En Python 2 sobre Windows `sys.argv` llega en BYTES, y con una tilde o una
+    ñ esos bytes NO son UTF-8: desde cmd/PowerShell son los de la codepage ANSI
+    (cp1252 aqui). Si se arrastran tal cual hasta el `json.dumps` final, el
+    encoder los decodifica como UTF-8 y lanza UnicodeDecodeError FUERA de todo
+    try: el proceso muere con traceback por stderr, stdout sale VACIO y
+    `audit_folder` marca "sin salida" en todos los documentos de la carpeta.
+    Reproducido el 2026-09-20 con "...\\Cartografia\\plano.mxd": byte 0xed.
+
+    No hay una sola respuesta correcta, porque el mismo `str` puede venir en
+    cp1252 (cmd, PowerShell, el subprocess de audit_folder) o en UTF-8 (un
+    shell tipo MSYS / Git Bash). Se prueban las dos y MANDA LA QUE EXISTE EN
+    DISCO: es el unico arbitro fiable. Si ninguna existe -el caso de un fichero
+    que de verdad no esta-, se devuelve la primera, que dara un error legible
+    con la ruta escrita como la escribio quien llamo.
+    """
+    if isinstance(bruto, unicode):  # noqa: F821 (Python 2)
+        return bruto
+    candidatos = []
+    vistos = set()
+    for codec in (sys.getfilesystemencoding(), "mbcs", "utf-8", "latin-1"):
+        if not codec or codec in vistos:
+            continue
+        vistos.add(codec)
+        try:
+            candidatos.append(bruto.decode(codec))
+        except Exception:
+            continue
+    for candidato in candidatos:
+        try:
+            if os.path.exists(candidato):
+                return candidato
+        except Exception:
+            continue
+    if candidatos:
+        return candidatos[0]
+    return bruto.decode("latin-1", "replace")
 
 
 def texto(valor):
@@ -28,7 +70,19 @@ def texto(valor):
     try:
         if isinstance(valor, unicode):  # noqa: F821 (Python 2)
             return valor
-        return unicode(valor, "utf-8", "replace")  # noqa: F821
+        if isinstance(valor, BaseException):
+            # unicode(exc, "utf-8") lanza TypeError SIEMPRE (no es un buffer), asi que
+            # todo error caia al repr() de abajo y salia como
+            # "RuntimeError(u'... no v\xe1lido.',)", con los acentos escapados. El
+            # mensaje de verdad esta en los args.
+            partes = [texto(a) for a in valor.args] or [texto(type(valor).__name__)]
+            return u"%s: %s" % (type(valor).__name__, u" ".join(p for p in partes if p))
+        if isinstance(valor, str):
+            try:
+                return valor.decode("utf-8")
+            except UnicodeDecodeError:
+                return valor.decode("mbcs", "replace")
+        return unicode(valor)  # noqa: F821
     except Exception:
         try:
             return unicode(repr(valor))  # noqa: F821
@@ -78,16 +132,34 @@ def auditar(ruta):
 
 
 def main():
+    """Nunca lanza. Quien llama distingue "documento roto" de "proceso muerto"
+    por el JSON, y para eso el JSON tiene que salir SIEMPRE: hasta el
+    `json.dumps` final va dentro de un try, con un sobre de ultimo recurso en
+    ASCII puro que no puede fallar al codificar."""
     if len(sys.argv) < 2:
         sys.stdout.write(json.dumps({"ok": False, "error": "falta la ruta del .mxd"}))
         return 2
-    ruta = sys.argv[1]
     try:
-        salida = auditar(ruta)
+        ruta = ruta_unicode(sys.argv[1])
     except Exception as exc:
-        salida = {"ruta": ruta, "ok": False, "error": texto(exc),
+        ruta = u"<ruta ilegible>"
+        salida = {"ruta": ruta, "ok": False,
+                  "error": u"no se pudo interpretar la ruta recibida: %s" % texto(exc),
                   "tipo_error": type(exc).__name__}
-    sys.stdout.write(json.dumps(salida, ensure_ascii=True))
+    else:
+        try:
+            salida = auditar(ruta)
+        except Exception as exc:
+            salida = {"ruta": ruta, "ok": False, "error": texto(exc),
+                      "tipo_error": type(exc).__name__}
+    try:
+        # ensure_ascii=True devuelve `str` ASCII puro: escribirlo en una consola
+        # cp1252 o en un pipe no puede fallar por codificacion.
+        sys.stdout.write(json.dumps(salida, ensure_ascii=True))
+    except Exception:
+        sys.stdout.write(
+            '{"ok": false, "error": "el auditor no pudo serializar su salida"}')
+        return 1
     return 0
 
 

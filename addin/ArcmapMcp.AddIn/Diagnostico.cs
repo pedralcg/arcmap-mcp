@@ -1,5 +1,5 @@
 using System;
-using System.IO;
+using System.Text.RegularExpressions;
 using Microsoft.Win32;
 
 namespace ArcmapMcp.AddIn
@@ -7,8 +7,15 @@ namespace ArcmapMcp.AddIn
     /// <summary>
     /// Texto de diagnóstico NO SENSIBLE, reutilizado por el botón Estado y por el
     /// reporte de problemas. Deliberadamente NO incluye el título del documento ni
-    /// nombres de capas ni rutas: eso son posibles datos de cliente (restricción L3)
-    /// y el reporte sale de la máquina. Solo entorno, versiones y contadores.
+    /// nombres de capas ni rutas de datos: eso son posibles datos de cliente
+    /// (restricción L3) y el reporte sale de la máquina. Solo entorno, versiones y
+    /// contadores.
+    ///
+    /// La única ruta que aparece es la del intérprete Python de ArcGIS, que hace falta
+    /// para diagnosticar la mitad de los fallos de execute_arcpy — y que puede llevar el
+    /// nombre del usuario si viene de ARCMAP_PYTHON27. Por eso se enmascara el perfil
+    /// (%USERPROFILE%) antes de mostrarla, y el texto del formulario ya no promete "sin
+    /// rutas" a secas: dice qué sale y enseña el bloque antes de enviar nada.
     /// </summary>
     internal static class Diagnostico
     {
@@ -34,7 +41,28 @@ namespace ArcmapMcp.AddIn
                 + "Peticiones:   " + Estadisticas.Peticiones + "\r\n"
                 + "Errores:      " + Estadisticas.Errores + "\r\n"
                 + "Último cmd:   " + Estadisticas.UltimoComando + "\r\n"
-                + "Python arcpy: " + DescribirPython27();
+                + "Python arcpy: " + SinPerfilDeUsuario(DescribirPython27());
+        }
+
+        /// <summary>
+        /// Sustituye la carpeta de perfil del usuario por %USERPROFILE% en un texto que va
+        /// a salir de la máquina. No es anonimización fuerte —una ruta fuera del perfil
+        /// puede seguir llevando un nombre—, y por eso el formulario enseña el bloque
+        /// entero antes de enviarlo: lo que promete el texto y lo que contiene coinciden.
+        /// </summary>
+        public static string SinPerfilDeUsuario(string texto)
+        {
+            if (string.IsNullOrEmpty(texto)) return texto;
+            try
+            {
+                string perfil = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                if (string.IsNullOrEmpty(perfil)) return texto;
+                // Regex y no string.Replace porque este comparaba con distinción de
+                // mayúsculas, y una ruta del registro rara vez viene con el mismo casing.
+                return Regex.Replace(texto, Regex.Escape(perfil), "%USERPROFILE%",
+                                     RegexOptions.IgnoreCase);
+            }
+            catch { return texto; }
         }
 
         /// <summary>Estado de actualización en una línea, para colar en Estado/reporte.</summary>
@@ -81,16 +109,13 @@ namespace ArcmapMcp.AddIn
             catch { return "(desconocido)"; }
         }
 
-        /// <summary>Mismo criterio que el runner: variable de entorno y, si no, la
-        /// instalación estándar. Sin él no hay execute_arcpy ni DDP.</summary>
+        /// <summary>El MISMO buscador que usa el runner (Python27), no una copia del
+        /// criterio: aquí había una ruta 10.5 escrita a mano que decía "NO encontrado" en
+        /// máquinas con 10.6-10.8 donde el Python estaba perfectamente instalado.
+        /// Sin él no hay execute_arcpy ni DDP.</summary>
         public static string DescribirPython27()
         {
-            try
-            {
-                string exe = Environment.GetEnvironmentVariable("ARCMAP_PYTHON27");
-                if (string.IsNullOrEmpty(exe)) exe = @"C:\Python27\ArcGIS10.5\python.exe";
-                return File.Exists(exe) ? exe : "NO encontrado (" + exe + ")";
-            }
+            try { return Python27.Describir(); }
             catch { return "(no comprobable)"; }
         }
     }

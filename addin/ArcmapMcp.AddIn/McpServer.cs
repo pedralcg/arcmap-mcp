@@ -211,53 +211,90 @@ namespace ArcmapMcp.AddIn
                 JObject response;
                 try
                 {
-                    JObject request = ReadRequest(stream);
+                    string motivo;
+                    JObject request = ReadRequest(stream, out motivo);
                     if (request == null)
                     {
-                        response = Protocol.Error("Request ilegible (no llegó un objeto JSON válido)");
+                        response = Protocol.Error(motivo);
                     }
-                    else if (!_gate.Wait(0))
+                    else
                     {
-                        // OCUPADO. `ping` NO se queda aquí: un chequeo de salud que
-                        // solo contesta cuando todo va bien no sirve para nada, y es
-                        // justo cuando hay algo atascado cuando hace falta saber QUÉ.
-                        // Se responde sin tocar el STA (que puede ser lo atascado),
-                        // así que esta rama contesta siempre y al instante.
-                        double seg = SegundosOcupado();
-                        string cual = _comandoEnCurso ?? "desconocido";
-                        if ("ping".Equals((string)request["type"]))
+                        // Los dos datos se leen ANTES de tocar el gate, a propósito: entre
+                        // el Wait que lo toma y el Release o el finally que lo suelta no
+                        // puede correr nada más. Una excepción en ese hueco dejaría el gate
+                        // cogido para siempre y el puente diciendo "busy" hasta reiniciar.
+                        string desbordado = StaDispatcher.TrabajoDesbordado();
+                        bool esPing = "ping".Equals((string)request["type"]);
+
+                        if (!_gate.Wait(0))
                         {
+                            // OCUPADO. `ping` NO se queda aquí: un chequeo de salud que
+                            // solo contesta cuando todo va bien no sirve para nada, y es
+                            // justo cuando hay algo atascado cuando hace falta saber QUÉ.
+                            // Se responde sin tocar el STA (que puede ser lo atascado),
+                            // así que esta rama contesta siempre y al instante.
+                            double seg = SegundosOcupado();
+                            string cual = _comandoEnCurso ?? "desconocido";
+                            if (esPing)
+                            {
+                                var estado = new JObject
+                                {
+                                    { "estado", "ocupado" },
+                                    { "comando_en_curso", cual },
+                                    { "ocupado_desde_s", Math.Round(seg, 1) },
+                                    { "nota", "El puente está VIVO; ArcMap está atendiendo '" + cual
+                                              + "' desde hace " + seg.ToString("0") + " s. Si es un geoproceso"
+                                              + " pesado sigue corriendo: espera, no relances. Si lleva mucho"
+                                              + " más de lo razonable, mira el log del add-in." },
+                                };
+                                if (desbordado != null)
+                                    estado["trabajo_desbordado"] = desbordado;
+                                response = Protocol.Result(estado);
+                            }
+                            else
+                            {
+                                response = Protocol.Error("busy: ArcMap lleva " + seg.ToString("0")
+                                    + " s atendiendo '" + cual + "'; reintenta en unos segundos"
+                                    + " (llama a ping para ver el estado sin esperar)"
+                                    + (desbordado == null ? "" : ". Además sigue corriendo dentro de ArcMap "
+                                       + "trabajo que ya venció por timeout: " + desbordado));
+                            }
+                        }
+                        // Gate libre, pero ArcMap puede NO estarlo: una operación que venció
+                        // por timeout con el handler ya empezado sigue ocupando el hilo STA.
+                        // Un `ping` que fuera al STA en ese estado se quedaría esperando sus
+                        // 60 s para acabar en un timeout — justo cuando más falta hace saber
+                        // qué pasa. Se contesta aquí, sin tocar el STA, con la misma lógica
+                        // que la rama de ocupado. NO se rechaza ningún otro comando: la
+                        // decisión de no encolar es del gate y no cambia.
+                        else if (desbordado != null && esPing)
+                        {
+                            _gate.Release();
                             response = Protocol.Result(new JObject
                             {
-                                { "estado", "ocupado" },
-                                { "comando_en_curso", cual },
-                                { "ocupado_desde_s", Math.Round(seg, 1) },
-                                { "nota", "El puente está VIVO; ArcMap está atendiendo '" + cual
-                                          + "' desde hace " + seg.ToString("0") + " s. Si es un geoproceso"
-                                          + " pesado sigue corriendo: espera, no relances. Si lleva mucho"
-                                          + " más de lo razonable, mira el log del add-in." },
+                                { "estado", "ocupado_tras_timeout" },
+                                { "trabajo_desbordado", desbordado },
+                                { "nota", "El puente está VIVO y acepta peticiones, pero ArcMap sigue"
+                                          + " ocupado con trabajo que YA venció su timeout (" + desbordado
+                                          + "): no se pudo abortar porque había empezado. Lo que mandes"
+                                          + " ahora se encolará detrás. Espera a que el log diga que ha"
+                                          + " terminado; si no termina nunca, reinicia ArcMap." },
                             });
                         }
                         else
                         {
-                            response = Protocol.Error("busy: ArcMap lleva " + seg.ToString("0")
-                                + " s atendiendo '" + cual + "'; reintenta en unos segundos"
-                                + " (llama a ping para ver el estado sin esperar)");
-                        }
-                    }
-                    else
-                    {
-                        _comandoEnCurso = (string)request["type"] ?? "?";
-                        Interlocked.Exchange(ref _inicioComandoTicks, DateTime.UtcNow.Ticks);
-                        try
-                        {
-                            response = Dispatch(request);
-                        }
-                        finally
-                        {
-                            Interlocked.Exchange(ref _inicioComandoTicks, 0);
-                            _comandoEnCurso = null;
-                            _gate.Release();
+                            _comandoEnCurso = (string)request["type"] ?? "?";
+                            Interlocked.Exchange(ref _inicioComandoTicks, DateTime.UtcNow.Ticks);
+                            try
+                            {
+                                response = Dispatch(request);
+                            }
+                            finally
+                            {
+                                Interlocked.Exchange(ref _inicioComandoTicks, 0);
+                                _comandoEnCurso = null;
+                                _gate.Release();
+                            }
                         }
                     }
                 }
@@ -283,14 +320,19 @@ namespace ArcmapMcp.AddIn
         /// <summary>
         /// El relay envía UN objeto JSON y espera SIN cerrar su lado de envío
         /// (no hay shutdown): no se puede leer hasta EOF. Se acumula y se intenta
-        /// el parse tras cada chunk hasta que el JSON está completo.
+        /// el parse cuando el buffer PUEDE estar completo.
+        ///
+        /// Devuelve null y deja en `motivo` por qué: un request de 3 MB y uno cortado a
+        /// medias no son el mismo problema y no pueden dar el mismo "Request ilegible",
+        /// que manda a mirar el JSON cuando lo que pasa es que sobra tamaño.
         /// </summary>
-        private static JObject ReadRequest(NetworkStream stream)
+        private static JObject ReadRequest(NetworkStream stream, out string motivo)
         {
+            motivo = null;   // solo se rellena en los caminos que devuelven null
             stream.ReadTimeout = ReadTimeoutMs;
             var buf = new MemoryStream();
             var chunk = new byte[8192];
-            while (buf.Length < MaxRequestBytes)
+            while (true)
             {
                 int n;
                 try
@@ -303,17 +345,56 @@ namespace ArcmapMcp.AddIn
                 }
                 if (n <= 0)
                     break;
+
+                if (buf.Length + n > MaxRequestBytes)
+                {
+                    motivo = "Request DEMASIADO GRANDE: pasa de " + (MaxRequestBytes / 1024)
+                        + " KB y se corta sin leerlo. Los comandos del puente son pequeños; si estás "
+                        + "mandando datos a granel dentro de 'code', escríbelos a un fichero y que el "
+                        + "código los lea de ahí.";
+                    return null;
+                }
                 buf.Write(chunk, 0, n);
+
+                // Solo se intenta parsear cuando el último byte no-blanco es '}'. Antes se
+                // copiaba, decodificaba y reparseaba el buffer ENTERO tras cada chunk: coste
+                // cuadrático en el tamaño del request. Medido en aislado sobre .NET
+                // Framework el 2026-09-20 con un request de 76 bytes: 76 parses sin puerta
+                // y 3 con ella leyendo byte a byte, 11 y 1 leyendo de 7 en 7, y el mismo
+                // resultado en todos los casos.
+                // La puerta es un FILTRO, no una decisión: una '}' de dentro de una cadena
+                // pasa, el parse falla y se sigue leyendo (1 de los 3 intentos de la medida).
+                if (!AcabaEnLlave(buf))
+                    continue;
                 try
                 {
                     return JObject.Parse(Encoding.UTF8.GetString(buf.ToArray()));
                 }
                 catch (JsonReaderException)
                 {
-                    // JSON aún incompleto (o byte multibyte cortado): seguir leyendo.
+                    // Una '}' que era parte de una cadena, no el cierre: seguir leyendo.
                 }
             }
+            motivo = buf.Length == 0
+                ? "No llegó ni un byte antes del timeout de lectura (" + (ReadTimeoutMs / 1000)
+                  + " s): el cliente abrió la conexión y no mandó el request."
+                : "Request ilegible (no llegó un objeto JSON válido; " + buf.Length + " bytes recibidos)";
             return null;
+        }
+
+        /// <summary>¿El último byte no-blanco del buffer es '}'? Sin copiar el buffer:
+        /// se mira el array de respaldo del MemoryStream tal cual.</summary>
+        private static bool AcabaEnLlave(MemoryStream buf)
+        {
+            byte[] datos = buf.GetBuffer();
+            for (int i = (int)buf.Length - 1; i >= 0; i--)
+            {
+                byte b = datos[i];
+                if (b == (byte)' ' || b == (byte)'\t' || b == (byte)'\r' || b == (byte)'\n')
+                    continue;
+                return b == (byte)'}';
+            }
+            return false;
         }
 
         // Comandos nativos ArcObjects. Corren en el hilo STA vía StaDispatcher;
@@ -392,11 +473,31 @@ namespace ArcmapMcp.AddIn
                 { "least_cost_path",      Handlers.PythonHandlers.LeastCostPath },
             };
 
+        /// <summary>Cuántos comandos entiende el puente. Lo consume la ficha "Acerca de"
+        /// para no tener que mantener el número a mano (estuvo en 48 con 57 tools reales).</summary>
+        public static int NumComandos
+        {
+            get { return _handlers.Count + _handlersFondo.Count; }
+        }
+
         // Exports a disco y GP nativos pueden tardar mucho más de 60s (layouts densos,
         // dpi alto, geoprocesos): timeout STA amplio, filosofía del ARCMAP_GP_TIMEOUT.
+        // calculate_geometry está aquí porque es un GP nativo como run_geoprocessing:
+        // AddGeometryAttributes sobre una capa de decenas de miles de entidades se pasa
+        // de 60 s con facilidad, y el timeout cortaba con el cálculo ya escribiendo
+        // campos en la fuente real.
         private static readonly System.Collections.Generic.HashSet<string> _comandosLargos =
-            new System.Collections.Generic.HashSet<string> { "export_pdf", "export_jpg", "export_view_png", "run_geoprocessing" };
+            new System.Collections.Generic.HashSet<string> { "export_pdf", "export_jpg", "export_view_png", "run_geoprocessing", "calculate_geometry" };
         private static readonly TimeSpan LongHandlerTimeout = TimeSpan.FromSeconds(1800);
+
+        // save_mxd y save_mxd_as acaban en SaveDocument/SaveAsDocument, la MISMA operación
+        // que PythonHandlers cronometra con 600 s (SnapshotTimeout) porque un mxd con
+        // decenas de capas y rásters pesados se va a varios minutos. Con los 60 s de por
+        // defecto, guardar un documento grande devolvía un timeout mientras ArcMap seguía
+        // escribiéndolo: el peor error posible, el que dice que falló algo que sí pasó.
+        private static readonly System.Collections.Generic.HashSet<string> _comandosGuardado =
+            new System.Collections.Generic.HashSet<string> { "save_mxd", "save_mxd_as" };
+        private static readonly TimeSpan GuardadoTimeout = TimeSpan.FromSeconds(600);
 
         // Techo de SEGURIDAD para los handlers de fondo. No compite con sus timeouts
         // internos: el peor caso legítimo es snapshot (600 s) + subprocess (1800 s) =
@@ -429,14 +530,38 @@ namespace ArcmapMcp.AddIn
                 Exception fallo = null;
                 var terminado = new ManualResetEventSlim(false);
 
+                // Quién libera el evento: el ÚLTIMO de los dos que acabe de usarlo. No se
+                // puede liberar sin más al volver de Wait, porque con timeout el handler
+                // sigue vivo y llamará a Set() sobre un objeto ya liberado — y liberarlo
+                // MIENTRAS otro thread está dentro de Set() es la carrera clásica de
+                // ManualResetEventSlim, que el try/catch de ahí no cubre. Cada lado
+                // decrementa cuando ya ha terminado de tocarlo, y el que llega a cero
+                // libera. Hasta ahora sencillamente no se liberaba nunca.
+                int usuarios = 2;
+                Action soltar = delegate
+                {
+                    if (Interlocked.Decrement(ref usuarios) == 0)
+                    {
+                        try { terminado.Dispose(); } catch { }
+                    }
+                };
+
                 ThreadPool.QueueUserWorkItem(delegate
                 {
                     try { resultado = handlerLocal(parametrosLocal); }
                     catch (Exception ex) { fallo = ex; }
-                    finally { try { terminado.Set(); } catch { /* ya liberado */ } }
+                    finally
+                    {
+                        try { terminado.Set(); } catch { /* ya liberado */ }
+                        soltar();
+                    }
                 });
 
-                if (!terminado.Wait(FondoTimeout))
+                bool completo;
+                try { completo = terminado.Wait(FondoTimeout); }
+                finally { soltar(); }
+
+                if (!completo)
                 {
                     Log.Error("Handler de fondo '" + type + "' superó el techo de "
                               + FondoTimeout.TotalSeconds + " s y NO volvió. El gate se libera "
@@ -462,8 +587,10 @@ namespace ArcmapMcp.AddIn
                     "Comando desconocido: '" + type + "'. Implementados: "
                     + string.Join(", ", implementados));
             }
-            TimeSpan timeout = _comandosLargos.Contains(type) ? LongHandlerTimeout : HandlerTimeout;
-            return StaDispatcher.Invoke(delegate { return handler(parameters); }, timeout);
+            TimeSpan timeout = _comandosLargos.Contains(type)
+                ? LongHandlerTimeout
+                : _comandosGuardado.Contains(type) ? GuardadoTimeout : HandlerTimeout;
+            return StaDispatcher.Invoke(delegate { return handler(parameters); }, timeout, type);
         }
     }
 }
