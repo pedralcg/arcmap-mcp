@@ -1,0 +1,21 @@
+name: Propuesta o herramienta nueva
+description: Algo que te gustaría que arcmap-mcp hiciera
+labels: [propuesta]
+body:
+  - type: textarea
+    id: flujo
+    attributes:
+      label: Qué intentas hacer en ArcMap
+      description: El trabajo real, no la herramienta. Por ejemplo, «exportar cada mes la misma serie de 40 planos cambiando la fecha del cajetín».
+    validations:
+      required: true
+  - type: textarea
+    id: hoy
+    attributes:
+      label: Cómo lo resuelves hoy
+      description: A mano, con execute_arcpy, con otra herramienta…
+  - type: input
+    id: version-arcmap
+    attributes:
+      label: Versión de ArcMap
+      placeholder: "10.5, 10.8…"

@@ -1,0 +1,11 @@
+# Los issues en blanco se quedan ACTIVADOS a propósito: el botón «Reportar» del add-in
+# abre /issues/new?title=…&body=… con el diagnóstico ya escrito, y eso solo funciona
+# si GitHub permite el issue en blanco.
+blank_issues_enabled: true
+contact_links:
+  - name: Guía de instalación
+    url: https://github.com/pedralcg/arcmap-mcp/blob/main/docs/INSTALL.md
+    about: Antes de abrir un fallo de instalación, repasa los pasos y los problemas frecuentes.
+  - name: Catálogo de herramientas
+    url: https://github.com/pedralcg/arcmap-mcp/blob/main/docs/TOOLS.md
+    about: Qué hace cada una de las 58 herramientas, con ejemplos.

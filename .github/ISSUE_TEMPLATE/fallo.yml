@@ -1,0 +1,55 @@
+name: Algo no funciona
+description: Un fallo, un error o un comportamiento raro de arcmap-mcp
+labels: [fallo]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Lo más rápido es el botón «Reportar» de la barra arcmap-mcp en ArcMap**: rellena solo el diagnóstico técnico (sin datos de tus proyectos) y te lo enseña antes de enviar nada. Usa este formulario si no puedes abrir ArcMap o la barra no aparece.
+  - type: textarea
+    id: que-paso
+    attributes:
+      label: Qué pasó
+      description: Qué pediste al asistente (o qué botón pulsaste) y qué ocurrió.
+    validations:
+      required: true
+  - type: textarea
+    id: que-esperabas
+    attributes:
+      label: Qué esperabas que pasara
+    validations:
+      required: true
+  - type: input
+    id: version-addin
+    attributes:
+      label: Versión de arcmap-mcp
+      description: Botón «Estado» de la barra, o la línea de arriba del CHANGELOG si no carga.
+      placeholder: "2.13.0"
+    validations:
+      required: true
+  - type: input
+    id: version-arcmap
+    attributes:
+      label: Versión de ArcMap
+      placeholder: "10.5, 10.8…"
+    validations:
+      required: true
+  - type: dropdown
+    id: cliente
+    attributes:
+      label: Cliente de IA
+      options:
+        - Claude Desktop
+        - Claude Code
+        - OpenCode
+        - Gemini CLI
+        - Antigravity
+        - Otro
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: Mensaje de error o respuesta de la herramienta
+      description: Si la hay, cópiala tal cual. El log del add-in está en C:\MCP_Logs\arcmap-mcp.log (revísalo antes de pegarlo, puede llevar nombres de capas y rutas).
+      render: text
