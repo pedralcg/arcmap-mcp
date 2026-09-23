@@ -424,6 +424,85 @@ class TestAuditFolderValida(unittest.TestCase):
         self.assertEqual(r["mxd_encontrados"], 0)  # la raíz del repo no tiene .mxd
 
 
+class TestArgumentosEstrictos(unittest.TestCase):
+    """Un argumento que la tool no declara es ERROR, no se ignora.
+
+    El 2026-09-22 `export_jpg(salida=..., mxd=<otro plano>, resolucion=230)` exportó
+    el documento ABIERTO con `ok: true`: FastMCP tiraba `mxd` y `resolucion` sin decir
+    nada. Estos tests pasan por `call_tool`, el mismo camino que una llamada real.
+    """
+
+    def _llamar(self, nombre, args):
+        import asyncio
+        return asyncio.run(servidor.mcp.call_tool(nombre, args))
+
+    def test_el_caso_del_22_de_septiembre(self):
+        with self.assertRaises(Exception) as ctx:
+            self._llamar("export_jpg", {"salida": r"C:\x.jpg", "mxd": r"C:\otro.mxd",
+                                        "resolucion": 230})
+        texto = str(ctx.exception)
+        self.assertIn("mxd", texto)
+        self.assertIn("resolucion", texto)
+        self.assertIn("NO admite", texto)
+
+    def test_tool_sin_argumentos_tambien(self):
+        with self.assertRaises(Exception):
+            self._llamar("describe_mxd", {"ruta": r"C:\no_existe.mxd", "extra": 1})
+
+    def test_los_argumentos_validos_siguen_pasando(self):
+        r = self._llamar("describe_mxd", {"ruta": r"C:\no_existe.mxd"})
+        self.assertIn("no existe", str(r))
+
+    def test_el_schema_lo_anuncia_en_todas(self):
+        import asyncio
+        tools = asyncio.run(servidor.mcp.list_tools())
+        self.assertGreater(len(tools), 50)
+        sin = [t.name for t in tools if t.inputSchema.get("additionalProperties") is not False]
+        self.assertEqual(sin, [])
+
+
+class TestExportMxdLoteValida(unittest.TestCase):
+    """Lo que se rechaza ANTES de lanzar un solo python.exe."""
+
+    def test_formato_desconocido(self):
+        r = servidor.export_mxd_lote([r"C:\a.mxd"], formato="png")
+        self.assertFalse(r["ok"])
+        self.assertIn("formato", r["error"])
+
+    def test_dpi_fuera_de_rango(self):
+        r = servidor.export_mxd_lote([r"C:\a.mxd"], dpi=2000)
+        self.assertFalse(r["ok"])
+        self.assertIn("dpi", r["error"])
+
+    def test_lista_vacia(self):
+        r = servidor.export_mxd_lote([])
+        self.assertFalse(r["ok"])
+
+    def test_mxd_inexistente_no_tumba_el_lote(self):
+        if servidor._python27_arcgis() is None:
+            self.skipTest("sin Python 2.7 de ArcGIS")
+        r = servidor.export_mxd_lote([r"C:\no_existe_1.mxd", r"C:\no_existe_2.mxd"])
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["resumen"]["fallidos"], 2)
+        self.assertEqual(len(r["documentos"]), 2)
+
+    def test_sin_sobrescribir_salta_y_lo_dice(self):
+        if servidor._python27_arcgis() is None:
+            self.skipTest("sin Python 2.7 de ArcGIS")
+        import tempfile
+        carpeta = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(carpeta, ignore_errors=True))
+        mxd = os.path.join(carpeta, "plano.mxd")
+        jpg = os.path.join(carpeta, "plano.jpg")
+        for ruta in (mxd, jpg):
+            with open(ruta, "wb") as fh:
+                fh.write(b"x")
+        r = servidor.export_mxd_lote([mxd], sobrescribir=False)
+        self.assertEqual(r["resumen"]["saltados"], 1)
+        with open(jpg, "rb") as fh:
+            self.assertEqual(fh.read(), b"x")  # intacto
+
+
 class TestRespuestas(unittest.TestCase):
     """Formas de respuesta que ya rompieron el cliente alguna vez."""
 
@@ -496,6 +575,7 @@ class TestContratoDeTools(unittest.TestCase):
     SIN_PUENTE = {
         "describe_mxd": "lee el .mxd del disco; tiene que funcionar con ArcMap cerrado",
         "audit_folder": "audita una carpeta de .mxd con arcpy standalone; sin sesión viva",
+        "export_mxd_lote": "un python.exe por .mxd: el proceso que ya exportó no vuelve a exportar",
     }
 
     def test_todas_las_tools_pasan_por_send(self):
