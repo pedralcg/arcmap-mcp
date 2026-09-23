@@ -1,0 +1,5 @@
+# Los .bat y .cmd SIEMPRE con CRLF, tambien en el ZIP de "Download ZIP" de GitHub
+# (git archive respeta este eol). Con saltos LF, cmd.exe puede no encontrar las
+# etiquetas de `goto` (ACTUALIZAR.bat las usa) y el script salta a donde no debe.
+*.bat text eol=crlf
+*.cmd text eol=crlf
