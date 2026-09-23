@@ -905,7 +905,11 @@ def set_raster_symbology(capa: str, modo: str = "clasificado", num_clases: int =
     defecto hasta el 2026-09-04; CIE Lab interpola en espacio perceptualmente
     uniforme y sí produce secuencias que se leen como orden.
 
-    Si el ráster no tiene estadísticas calculadas, se calculan solas.
+    Si el ráster no tiene estadísticas calculadas, se calculan solas y la respuesta trae
+    `estadisticas_calculadas` con el tiempo. Los píxeles no cambian, pero el fichero sí:
+    ArcMap guarda las estadísticas con el ráster al liberarlo (metadatos dentro del TIFF
+    y el histograma en `.aux.xml`). Se calculan una vez (~50 s en un TIFF de 2 GB) y
+    después es instantáneo; en una carpeta sin escritura se recalculan cada vez.
 
     La cabecera de la leyenda queda siempre en `Value`: ArcObjects la fija en el
     `Update()` y después es de solo lectura. Se quita en el elemento de leyenda

@@ -122,7 +122,7 @@ namespace ArcmapMcp.AddIn.Handlers
             // que salen de un geoproceso, típicamente), y el síntoma es un E_FAIL
             // mudo desde COM. Se calculan aquí en vez de mandar al usuario a
             // hacerlo a mano, que es lo que hacía la primera versión de esto.
-            AsegurarEstadisticas(raster);
+            JObject estadisticas = AsegurarEstadisticas(raster);
 
             IRasterClassifyColorRampRenderer clasificado = new RasterClassifyColorRampRendererClass();
             IRasterRenderer render = (IRasterRenderer)clasificado;
@@ -197,11 +197,14 @@ namespace ArcmapMcp.AddIn.Handlers
             render.Update();
             rl.Renderer = render;
 
-            return new JObject
+            var res = new JObject
             {
                 ["num_clases"] = nReal,
                 ["cortes"] = cortes,
             };
+            if (estadisticas != null)
+                res["estadisticas_calculadas"] = estadisticas;
+            return res;
         }
 
         /// <summary>
@@ -358,7 +361,7 @@ namespace ArcmapMcp.AddIn.Handlers
             // Mismas estadísticas que el clasificado: el propio error de más abajo
             // dice "suele ser que el ráster no tiene estadísticas calculadas", así
             // que calcularlas aquí y no mandar al usuario a hacerlo a mano.
-            AsegurarEstadisticas(raster);
+            JObject estadisticas = AsegurarEstadisticas(raster);
 
             IRasterStretchColorRampRenderer estirado = new RasterStretchColorRampRendererClass();
             IRasterRenderer render = (IRasterRenderer)estirado;
@@ -390,21 +393,35 @@ namespace ArcmapMcp.AddIn.Handlers
             }
             rl.Renderer = render;
 
-            return new JObject
+            var res = new JObject
             {
                 ["banda"] = 0,
             };
+            if (estadisticas != null)
+                res["estadisticas_calculadas"] = estadisticas;
+            return res;
         }
 
         /// <summary>
         /// Calcula estadísticas de las bandas si faltan. Sin ellas, el renderer
         /// clasificado falla con un E_FAIL de COM que no explica nada.
+        ///
+        /// Qué deja en disco, medido el 2026-09-23: los PÍXELES no cambian (checksum
+        /// de GDAL idéntico antes y después); ArcMap guarda al liberar el ráster
+        /// mínimo/máximo/media/desviación como metadatos GDAL DENTRO del TIFF (el
+        /// fichero crece: +269 KB en uno de 2 GB) y el histograma en un .aux.xml al
+        /// lado. Es información derivada e invariable: se calcula una vez (~50 s en
+        /// 2 GB) y después es instantáneo. En una carpeta sin escritura no se puede
+        /// guardar y se recalcula en cada llamada. Devuelve null si no calculó nada,
+        /// o el detalle para la respuesta: que el fichero crezca no puede ser mudo.
         /// </summary>
-        private static void AsegurarEstadisticas(IRaster raster)
+        private static JObject AsegurarEstadisticas(IRaster raster)
         {
             IRasterBandCollection bandas = raster as IRasterBandCollection;
             if (bandas == null)
-                return;
+                return null;
+            var reloj = System.Diagnostics.Stopwatch.StartNew();
+            int calculadas = 0;
             for (int i = 0; i < bandas.Count; i++)
             {
                 IRasterBand banda = bandas.Item(i);
@@ -415,15 +432,27 @@ namespace ArcmapMcp.AddIn.Handlers
                 try
                 {
                     banda.ComputeStatsAndHist();
+                    calculadas++;
                     Log.Info("Estadísticas calculadas para la banda " + i + " del ráster.");
                 }
                 catch (Exception ex)
                 {
-                    // No es fatal: puede ser una fuente de solo lectura. Se deja que
-                    // falle después con su mensaje, pero queda anotado el motivo.
+                    // No es fatal: se deja que falle después con su mensaje, pero
+                    // queda anotado el motivo.
                     Log.Error("No se pudieron calcular estadísticas de la banda " + i, ex);
                 }
             }
+            if (calculadas == 0)
+                return null;
+            return new JObject
+            {
+                ["bandas"] = calculadas,
+                ["segundos"] = Math.Round(reloj.Elapsed.TotalSeconds, 1),
+                ["nota"] = "El ráster no tenía estadísticas y se han calculado. Los píxeles no "
+                    + "cambian; ArcMap las guarda con el ráster al liberarlo (metadatos dentro "
+                    + "del TIFF y histograma en .aux.xml), así que la próxima vez será "
+                    + "instantáneo. Si la carpeta no admite escritura, se recalcularán cada vez."
+            };
         }
 
         /// <summary>

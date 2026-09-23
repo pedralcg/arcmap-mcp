@@ -54,6 +54,14 @@ cuadra, decide por nombre y solo con capas con fuente en disco.
   documento (el runner los inyecta siempre, así que no indicaban nada), y el runner omite
   el aviso si el código no usó la copia (`mxd`/`df` no nombrados, o reasignados). Cuando
   sale, nombra el .mxd y lista 5 capas en vez de 10.
+- **`set_raster_symbology` dice cuándo ha calculado estadísticas.** Desde la 2.12.0 las
+  calcula si faltan (estirado y clasificado), y eso deja huella en el fichero: los
+  **píxeles no cambian** (checksum de GDAL idéntico), pero ArcMap guarda al liberar el
+  ráster mínimo/máximo/media/desviación como metadatos DENTRO del TIFF y el histograma en
+  un `.aux.xml`. En un TIFF de 2 GB son ~50 s la primera vez y +269 KB; después es
+  instantáneo, y en una carpeta sin escritura se recalculan cada vez. Se mantiene el
+  comportamiento (es información derivada e invariable, no una reclasificación), pero ya no
+  es mudo: la respuesta trae `estadisticas_calculadas` con bandas y segundos.
 - **E_PENDING en los export** (`0x8000000A`, el mapa sigue dibujando): hasta 3 intentos
   bombeando mensajes de ArcMap entre medias, y si no, un error que dice qué hacer. ⚠️
   **Esto TAPA EL SÍNTOMA, no explica la causa**: el disparador sigue sin identificarse
