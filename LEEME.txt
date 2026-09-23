@@ -14,6 +14,8 @@ README.md y en docs\INSTALL.md.
   1. Cierra ArcMap por completo.
 
   2. Doble clic en INSTALAR.bat
+     arcmap-mcp queda instalado en C:\mcp\arcmap-mcp. La carpeta donde
+     descomprimiste el ZIP ya no hace falta despues: puedes borrarla.
 
   3. Abre ArcMap y activa la barra de herramientas:
      Customize (Personalizar) > Toolbars (Barras de herramientas) >
@@ -41,8 +43,9 @@ el complemento y no se puede sustituir.
       1. Baja el ZIP nuevo desde la pagina del proyecto
          (boton verde "Code" > "Download ZIP").
       2. Clic derecho en el ZIP > Propiedades > marca "Desbloquear".
-      3. Extraelo ENCIMA de esta misma carpeta, sobrescribiendo.
-      4. Doble clic en INSTALAR.bat
+      3. Extraelo donde quieras (por ejemplo, en Descargas).
+      4. Doble clic en INSTALAR.bat de la carpeta extraida. Actualiza
+         C:\mcp\arcmap-mcp; luego puedes borrar la carpeta extraida.
 
      Si, INSTALAR.bat: el mismo fichero sirve para instalar y para
      actualizar, tantas veces como haga falta.

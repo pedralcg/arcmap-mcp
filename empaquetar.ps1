@@ -115,6 +115,6 @@ Write-Host "OK -> $zip  ($copiados ficheros, $mb MB)" -ForegroundColor Green
 Write-Host ""
 Write-Host "En el equipo de prueba:" -ForegroundColor White
 Write-Host "  1. Clic derecho en el ZIP > Propiedades > Desbloquear > Aceptar"
-Write-Host "  2. Extraer donde quieras (por ejemplo C:\mcp)"
-Write-Host "  3. Cerrar ArcMap y doble clic en INSTALAR.bat"
+Write-Host "  2. Extraer donde quieras (por ejemplo en Descargas)"
+Write-Host "  3. Cerrar ArcMap y doble clic en INSTALAR.bat: queda instalado en C:\mcp\arcmap-mcp"
 Write-Host ""

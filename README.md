@@ -51,6 +51,7 @@ Las **dos piezas son una decisión de diseño, no una provisionalidad**:
 ```
 arcmap-mcp/
 ├── src/      arcmap_mcp_server.py   ← servidor MCP (regístralo en tu cliente IA)
+│             auditor_mxd.py · exportar_mxd.py ← procesos hijo Py2.7 de audit_folder y export_mxd_lote
 ├── addin/    ArcmapMcp.AddIn/       ← código C# del add-in (+ runner.py embebido)
 │             dist/arcmap-mcp.esriaddin  ← add-in listo para instalar
 │             build.ps1              ← build sin Visual Studio (dotnet CLI)
@@ -58,8 +59,10 @@ arcmap-mcp/
 ├── tests/    test_client_protocol.py  ← tests automáticos (no necesitan ArcMap)
 │             test_runner_py27.py      ← el runner y el auditor bajo Python 2.7, sin arcpy
 │             regresion_sesion_viva.py ← barrido manual del catálogo (ArcMap vivo)
+│             regresion_ddp.py         ← barrido del atlas (Data Driven Pages, solo lectura)
 │             sonda_puente.py          ← sonda manual de un comando suelto
-├── start-arcmap-mcp.ps1 · requirements.txt · CHANGELOG.md · LICENSE · README.md
+├── INSTALAR.bat · ACTUALIZAR.bat · install.ps1 · LEEME.txt ← instalación de un clic
+├── start-arcmap-mcp.ps1 · empaquetar.ps1 · requirements.txt · CHANGELOG.md · LICENSE · README.md
 ```
 
 | Pieza | Dónde corre | Qué es |
@@ -68,9 +71,11 @@ arcmap-mcp/
 | `src/arcmap_mcp_server.py` | externo (Python 3) | Servidor MCP que registras en tu cliente IA |
 | `start-arcmap-mcp.ps1` | Windows | Lanzador: prepara venv, vigila el túnel, hace ping |
 
-> **Ruta de instalación recomendada: `C:\mcp\arcmap-mcp`** (fuera de carpetas
-> sincronizadas tipo Drive/Dropbox). Ajusta las rutas de los ejemplos si instalas
-> en otra ubicación.
+> **arcmap-mcp se instala en `C:\mcp\arcmap-mcp`**, extraigas el ZIP donde lo extraigas:
+> el instalador copia ahí el paquete y registra esa ruta en tus clientes IA, así que la
+> carpeta donde descomprimiste el ZIP se puede borrar después. Para otra ubicación,
+> `INSTALAR.bat -Destino D:\otra\carpeta` (fuera de carpetas sincronizadas tipo
+> Drive/Dropbox). Si clonas con git, se usa la carpeta del clon.
 
 ## Herramientas MCP
 
@@ -79,14 +84,17 @@ firmas, ejemplos y los matices de ejecución de cada grupo).
 
 Qué significa «probado», que conviene decirlo con precisión:
 
-- `tests/regresion_sesion_viva.py` hace **105 comprobaciones contra una sesión de ArcMap
-  real** y cubre unas **34 de las 57** tools, con sus casos de error. 🔴 **Modifica el
+- `tests/regresion_sesion_viva.py` hace **106 comprobaciones contra una sesión de ArcMap
+  real** y cubre unas **34 de las 58** tools, con sus casos de error. 🔴 **Modifica el
   documento abierto** (añade capas, cambia simbología, lanza geoprocesos): se lanza contra
   un mxd de pruebas, nunca contra un proyecto.
 - `tests/regresion_ddp.py` cubre las tres tools del atlas (Data Driven Pages) con **14
   comprobaciones**, y es **de solo lectura** sobre el documento: necesita un mxd con atlas
   habilitado, que en la práctica es siempre uno de producción. Exporta a `C:\temp`.
-- Otros **41 tests** corren sin ArcMap (protocolo, runner Python 2.7, instalador).
+- Otros **50 tests** corren sin ArcMap (protocolo, argumentos, runner Python 2.7 —con 38
+  casos propios—, instalador).
+- `export_mxd_lote` no pasa por el puente y no está en la regresión: se probó sobre planos
+  reales, con salida idéntica byte a byte a la exportada a mano.
 - El resto de tools se ha ejercitado **a mano** en trabajo real a lo largo de las
   versiones —series de planos de decenas de páginas, análisis ambiental— pero **no están
   en la regresión automática**, así que un fallo suyo no lo caza nadie hasta que aparece.
@@ -108,7 +116,8 @@ próxima sorpresa: si usas una versión anterior a la 2.12.0, ese fallo está la
   snapshot del documento — ver matiz en `docs/TOOLS.md`).
 - **Series de planos (Data Driven Pages):** `list_ddp` · `export_ddp` ·
   `list_layout_elements` · `set_text_element` · `goto_ddp_page` · `set_definition_query` ·
-  `set_layer_visibility` · `export_view_png` · `export_jpg`.
+  `set_layer_visibility` · `export_view_png` · `export_jpg` · **`export_mxd_lote`**
+  (exporta una lista de .mxd del disco, un proceso por documento: la vía para series).
 - **Capas y datos:** `select_by_attribute` · `clear_selection` · `get_unique_values` ·
   `count_features` · `list_fields` · `get_layer_info` · `get_layer_features` · `add_layer` ·
   `remove_layer` · `apply_symbology_from_layer` · `set_scale`.
@@ -179,8 +188,8 @@ un encuadre que vas a repetir, guárdalo con `add_bookmark` y vuelve con `goto_b
 **Sin git** (recomendado si no lo usas): en la página del repositorio, botón verde
 **Code ▸ Download ZIP**. Antes de extraerlo, **clic derecho en el ZIP ▸ Propiedades ▸
 marcar «Desbloquear» ▸ Aceptar**: Windows marca lo que viene de internet y ese marcado
-puede impedir que ArcMap cargue el add-in. Extrae después la carpeta donde quieras, por
-ejemplo `C:\mcp\arcmap-mcp`.
+puede impedir que ArcMap cargue el add-in. Extrae después la carpeta donde quieras (en
+Descargas, por ejemplo): al instalar se copia sola a `C:\mcp\arcmap-mcp`.
 
 **Con git:**
 
@@ -190,14 +199,13 @@ git clone https://github.com/pedralcg/arcmap-mcp.git C:\mcp\arcmap-mcp
 
 ### 2. Instalar
 
-**Cierra ArcMap** y haz **doble clic en `INSTALAR.bat`**. Eso es todo: prepara el
-entorno del servidor, instala el add-in dentro de ArcMap y registra el servidor en los
-clientes IA que encuentre en tu equipo.
+**Cierra ArcMap** y haz **doble clic en `INSTALAR.bat`**. Eso es todo: deja arcmap-mcp en
+`C:\mcp\arcmap-mcp`, prepara el entorno del servidor, instala el add-in dentro de ArcMap y
+registra el servidor en los clientes IA que encuentre en tu equipo.
 
-Si prefieres la terminal, es el mismo trabajo:
+Si prefieres la terminal, es el mismo trabajo (desde la carpeta que extrajiste):
 
 ```powershell
-cd C:\mcp\arcmap-mcp
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
@@ -229,7 +237,7 @@ mientras está abierto mantiene cargado el add-in y no se puede reemplazar en ca
 | Descargaste… | Para actualizar |
 |---|---|
 | **con git** | Doble clic en **`ACTUALIZAR.bat`**. Hace `git pull` y reinstala. |
-| **el ZIP** | Baja el ZIP nuevo, extráelo sobre la misma carpeta y doble clic en **`INSTALAR.bat`**. |
+| **el ZIP** | Baja el ZIP nuevo, extráelo donde quieras y doble clic en **`INSTALAR.bat`**: actualiza `C:\mcp\arcmap-mcp`. |
 
 Sin git, **tu actualizador es `INSTALAR.bat`**: no hay un segundo fichero que aprender.
 `install.ps1` es idempotente, así que da igual que sea la primera vez o la quinta: borra el
@@ -241,8 +249,8 @@ ejecutas sin git te lo dice y no toca nada.
 correcto desde la 2.8.2: actívala una vez en *Customize ▸ Toolbars ▸ arcmap-mcp* y ArcMap
 recordará su posición. Comprueba con el botón **Estado** que la versión es la que esperabas.
 
-> El servidor MCP (Python) no necesita ceremonia: corre desde esta misma carpeta, así que en
-> cuanto reemplazas los ficheros ya está actualizado. Solo el add-in .NET obliga a cerrar
+> El servidor MCP (Python) no necesita ceremonia: corre desde `C:\mcp\arcmap-mcp` (o desde tu
+> clon git), así que en cuanto el instalador reemplaza los ficheros ya está actualizado. Solo el add-in .NET obliga a cerrar
 > ArcMap. Detalle completo en [`docs/INSTALL.md`](docs/INSTALL.md#actualizar).
 
 ### Versiones de ArcMap
@@ -414,8 +422,8 @@ admite `1024`–`65535`; un valor inválido se ignora con aviso en el log y se v
 - [x] Add-in .NET nativo (ArcObjects vía CLR, sin runtime Python embebido)
 - [x] 58 herramientas, incluido el análisis ambiental (índices espectrales, hidrología,
       curvas, perfiles 3D y ruta de mínimo coste) y series de planos reales de decenas
-      de páginas. Cobertura automática: 105 comprobaciones en sesión viva sobre ~34 de
-      ellas, más 41 tests sin ArcMap (ver «Herramientas MCP»)
+      de páginas. Cobertura automática: 106 comprobaciones en sesión viva sobre ~34 de
+      ellas, más 50 tests sin ArcMap (ver «Herramientas MCP»)
 - [x] Geoprocesos arcpy fuera de proceso: la GUI de ArcMap no se congela
 - [x] Cancelación de render/exports con ESC (`ITrackCancel`)
 - [x] Registrable en 5 clientes (Claude Code/Desktop, Gemini CLI, Antigravity, OpenCode)

@@ -98,9 +98,11 @@ namespace ArcmapMcp.AddIn
                             DialogResult r = MessageBox.Show(
                                 "Hay una versión nueva de arcmap-mcp disponible: v" + versionNueva + ".\n"
                                 + "Tienes instalada la v" + Diagnostico.VersionAddin() + ".\n\n"
-                                + "Para actualizar, con ArcMap cerrado, doble clic en\n"
-                                + "ACTUALIZAR.bat dentro de la carpeta del repositorio\n"
-                                + "(equivale a: git pull  +  install.ps1).\n\n"
+                                + "Para actualizar, con ArcMap cerrado:\n"
+                                + " - Si lo descargaste como ZIP: baja el ZIP nuevo,\n"
+                                + "   extráelo donde quieras y doble clic en INSTALAR.bat.\n"
+                                + " - Si lo clonaste con git: doble clic en ACTUALIZAR.bat\n"
+                                + "   dentro de C:\\mcp\\arcmap-mcp.\n\n"
                                 + "No se puede instalar sin cerrar ArcMap: mientras está\n"
                                 + "abierto mantiene cargado el add-in.\n\n"
                                 + "¿Abrir las instrucciones de actualización?",

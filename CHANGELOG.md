@@ -30,6 +30,17 @@ cuadra, decide por nombre y solo con capas con fuente en disco.
   salen **idénticos byte a byte** a los del 22-sep.
 
 ### Corregido
+- 🔴 **El instalador ya no deja los clientes IA apuntando a la carpeta del ZIP.** Registraba
+  la ruta desde la que se ejecutaba: quien descomprimía el ZIP en Descargas y luego borraba
+  esa carpeta se quedaba con un servidor que no arrancaba, y el fallo salía en una sesión
+  posterior como `CONNECTION_CLOSED`. Hasta ahora solo había un aviso. Ahora, instalando
+  desde un ZIP, el paquete se **copia a `C:\mcp\arcmap-mcp`** y se registra esa ruta; la
+  carpeta del ZIP se puede borrar. `-Destino` elige otra ubicación. Un clon git se usa donde
+  esté, y si `C:\mcp\arcmap-mcp` ya es un clon git, un ZIP no lo pisa: se para con un
+  mensaje claro. Probado bajo PowerShell 5.1: copia, protección, y verificación con la
+  carpeta del ZIP ya borrada. README, INSTALL, LEEME, `ACTUALIZAR.bat` y el aviso de versión
+  nueva del add-in lo explican ya así: ese aviso mandaba a `ACTUALIZAR.bat` (git pull), que a
+  quien descargó el ZIP no le sirve.
 - 🔴 **Argumentos desconocidos se rechazan en TODAS las tools.** FastMCP los tiraba en
   silencio: `export_jpg(salida=..., mxd=<otro plano>, resolucion=230)` exportó el
   documento abierto —otro monte, otro plano— con `ok: true`. Ahora es un error que nombra

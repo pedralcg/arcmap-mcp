@@ -10,7 +10,7 @@ runner arcpy out-of-process) y servidor FastMCP en Python 3— está validada en
 en ArcMap 10.5, con **58 herramientas** que incluyen el análisis ambiental (índices
 espectrales, hidrología, curvas, perfiles 3D y ruta de mínimo coste) y series de planos
 reales de decenas de páginas. La regresión en sesión viva cubre unas **34** de ellas con
-105 comprobaciones; el resto se ha ejercitado a mano, no automáticamente, y ahí es donde
+106 comprobaciones; el resto se ha ejercitado a mano, no automáticamente, y ahí es donde
 toca seguir ampliando cobertura.
 
 El servidor es registrable en cinco clientes IA (Claude Code, Claude Desktop, Gemini
@@ -27,8 +27,9 @@ CLI, Antigravity, OpenCode).
 Ya hechas (estaban aquí y conviene no volver a proponerlas): el **arranque
 automático** del puente (desplegable *Autoarranque* de la barra, preferencia por
 usuario en `HKCU\Software\pedralcg\arcmap-mcp`), los **marcadores espaciales**
-(`get_bookmarks`, `add_bookmark`, `remove_bookmark`, `goto_bookmark`) y la guía
-rápida *"tu primer plano en 5 pasos"* del README.
+(`get_bookmarks`, `add_bookmark`, `remove_bookmark`, `goto_bookmark`), la guía
+rápida *"tu primer plano en 5 pasos"* del README y la **exportación en lote** de series
+de .mxd (`export_mxd_lote`, 2.13.0).
 
 ## Limitaciones por diseño
 

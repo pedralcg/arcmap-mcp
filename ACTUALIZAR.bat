@@ -35,8 +35,9 @@ echo.
 echo      No hace falta para usar arcmap-mcp: actualiza a mano en tres pasos.
 echo        1. Baja el ZIP: https://github.com/pedralcg/arcmap-mcp/archive/refs/heads/main.zip
 echo        2. Clic derecho en el ZIP ^> Propiedades ^> Desbloquear, y extraelo
-echo           sobre esta misma carpeta, sobrescribiendo.
-echo        3. Doble clic en INSTALAR.bat (con ArcMap cerrado).
+echo           donde quieras (por ejemplo, en Descargas).
+echo        3. Doble clic en el INSTALAR.bat de lo extraido (con ArcMap cerrado):
+echo           actualiza C:\mcp\arcmap-mcp.
 echo.
 echo      Si prefieres que esto sea un solo clic en el futuro, instala git desde
 echo      https://git-scm.com/download/win y vuelve a clonar el repositorio.
@@ -49,7 +50,7 @@ echo  [!] git esta instalado, pero esta carpeta no es un repositorio
 echo      (seguramente la extrajiste de un ZIP en vez de clonarla).
 echo.
 echo      Para actualizar ahora: baja el ZIP nuevo, clic derecho ^> Propiedades ^>
-echo      Desbloquear, extraelo sobre esta carpeta y ejecuta INSTALAR.bat
+echo      Desbloquear, extraelo donde quieras y ejecuta su INSTALAR.bat
 echo.
 echo      Para que en adelante sea un solo clic, clona el repositorio:
 echo        git clone https://github.com/pedralcg/arcmap-mcp C:\mcp\arcmap-mcp

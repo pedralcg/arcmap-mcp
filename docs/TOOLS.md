@@ -6,7 +6,7 @@
 > planos (Data Driven Pages)—, no para replicar toda la API.
 
 **58 herramientas** sobre ArcMap 10.5. Unas **34 están cubiertas por la regresión en sesión
-viva** (`tests/regresion_sesion_viva.py`, 105 comprobaciones); el resto se ha ejercitado a
+viva** (`tests/regresion_sesion_viva.py`, 106 comprobaciones); el resto se ha ejercitado a
 mano en trabajo real, pero **no automáticamente**. El README, en «Herramientas MCP», explica
 por qué la distinción importa.
 
@@ -20,7 +20,7 @@ tres primeros son del add-in .NET; el cuarto no pasa por el puente siquiera:
 | **Nativo en sesión viva** (ArcObjects, hilo STA) | capas, selección, layout, exports, navegación, `run_geoprocessing`, `calculate_geometry` | Opera sobre el documento **vivo**: los cambios se ven al instante. Ocupa la interfaz mientras dura (exports cancelables con **ESC**). |
 | **Out-of-process sobre snapshot** (arcpy en Python 2.7 aparte) | `execute_arcpy`, `list_ddp`, `export_ddp`, `goto_ddp_page`, `raster_index`, `hydrology`, `contours`, `topographic_profile`, `least_cost_path` | Trabaja sobre una **copia temporal del .mxd** con el estado actual: lee el documento real, pero **sus cambios al documento no afectan a la sesión viva**. Las salidas a disco sí son reales, y los resultados de análisis se añaden al mapa al terminar. **No congela la interfaz.** Coste fijo de unos segundos por llamada (snapshot + arranque de Python). |
 | **Solo lectura de datos** (cursores/Describe) | consultas, listados de workspace | Sin efectos secundarios. |
-| **Sin ArcMap, leyendo del disco** | `describe_mxd`, `audit_folder` | **No pasan por el puente**: funcionan con ArcMap cerrado y sobre documentos que ArcMap se niega a abrir. Es su razón de ser. |
+| **Sin ArcMap, leyendo del disco** | `describe_mxd`, `audit_folder`, `export_mxd_lote` | **No pasan por el puente**: funcionan con ArcMap cerrado (y `export_mxd_lote` también con ArcMap abierto) y sobre documentos que no son el abierto. |
 
 ---
 
@@ -65,10 +65,21 @@ arrastra al resto, y **anuncia siempre lo que trunca**.
 | `execute_arcpy` | **Código arcpy arbitrario** — la base de la filosofía híbrida (ver matiz abajo) |
 
 > **Matiz de `execute_arcpy`:** corre **fuera del proceso de ArcMap**, sobre un
-> snapshot del documento (`mxd`/`df` apuntan a la copia). Perfecto para análisis,
-> consultas complejas y exports; **no sirve para mutar la sesión viva** (para eso
-> están las tools nativas `set_*`, `add_layer`, …). A cambio, un script largo no
-> congela ArcMap. Devuelve `RESULT`, stdout y avisos.
+> snapshot del documento (`mxd`/`df` apuntan a la copia). Perfecto para análisis y
+> consultas complejas; **no sirve para mutar la sesión viva** (para eso están las tools
+> nativas `set_*`, `add_layer`, …). A cambio, un script largo no congela ArcMap.
+> Devuelve `RESULT`, stdout y avisos. Detalles que ahorran llamadas:
+>
+> - La copia del documento solo se hace si el código nombra **`mxd` o `df`** como variable
+>   (`MAP`/`mapping` existen siempre y no la fuerzan). Con `usar_documento` se decide a mano.
+> - Se devuelve `RESULT`; si asignas `result` en minúscula (la convención del MCP de
+>   ArcGIS Pro) también, con un `aviso_result`. La cabecera `# -*- coding: utf-8 -*-` se tolera.
+> - Si el código falla, la respuesta trae igualmente el **`stdout`** impreso hasta el fallo:
+>   en un bucle, imprime una línea por documento hecho. Un `UnicodeEncodeError` trae una
+>   `pista` (casi siempre `str(ex)` sobre un mensaje con tildes: usa `unicode(ex)`).
+> - Con un documento «Sin título» (sin data frame activo), `df` vale `None`.
+> - **Para exportar varios .mxd no uses un bucle aquí**: un proceso arcpy que ya ha exportado
+>   un layout no vuelve a exportar otro. Usa `export_mxd_lote`.
 >
 > **Identificar una capa.** Toda tool que pide `capa` acepta el nombre o la **ruta de
 > grupo** que da `list_layers` (`"Hidrología/Cauces"`). Si el nombre casa con más de una
@@ -89,8 +100,13 @@ arrastra al resto, y **anuncia siempre lo que trunca**.
 > La respuesta lo deja a la vista con dos campos: **`snapshot_via`** (`disco_temp`,
 > `disco_junto_al_original` o `sesion_serializada`) y **`capas_rotas_en_copia`**, el nº
 > de capas con la fuente rota **en la copia**. Si es mayor que cero llega además
-> `aviso_capas_rotas` con sus nombres: compáralo con `list_broken_data_sources` para
-> saber si ya estaban rotas en la sesión o si las rompió la copia.
+> `aviso_capas_rotas`, que nombra el `.mxd` y hasta cinco capas: compáralo con
+> `list_broken_data_sources` para saber si ya estaban rotas en la sesión o si las rompió la
+> copia. Si el código no usó la copia (no nombra `mxd`/`df`, o los reasigna para abrir otros
+> documentos), ninguno de los dos campos aparece: hablarían de un documento que no tocaste.
+> Ojo: arcpy y ArcObjects no cuentan igual las rotas (arcpy incluye capas de servicio web
+> sin `dataSource`; ArcObjects, tablas), así que el número puede diferir en uno o dos del de
+> `list_broken_data_sources` sin que la copia haya roto nada.
 
 ---
 
@@ -202,8 +218,12 @@ colarse con un color cualquiera. Las categorías son las que la capa **dibuja**:
 definition query (una capa regional filtrada a un municipio da la leyenda del municipio), y
 un campo numérico se ordena numéricamente. La selección no se tiene en cuenta, a propósito.
 
-**Ráster:** si la banda no tiene estadísticas, se calculan solas. Sin ellas la clasificación
-falla con un `E_FAIL` de COM que no explica nada. El número real de clases puede ser menor
+**Ráster:** si la banda no tiene estadísticas, se calculan solas (en clasificado y en
+estirado) y la respuesta trae `estadisticas_calculadas`. Sin ellas la clasificación falla con
+un `E_FAIL` de COM que no explica nada. Los píxeles no cambian, pero ArcMap guarda las
+estadísticas con el ráster al liberarlo (metadatos dentro del TIFF e histograma en
+`.aux.xml`): la primera vez cuesta (~50 s en un TIFF de 2 GB) y después es instantáneo. En
+una carpeta sin escritura se recalculan en cada llamada. El número real de clases puede ser menor
 que el pedido si el ráster no tiene variación suficiente, y se devuelve el real.
 
 `set_raster_symbology(capa, modo, num_clases, color_desde, color_hasta, colores, etiquetas,

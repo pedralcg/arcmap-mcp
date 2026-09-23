@@ -7,24 +7,31 @@ el servidor MCP no sirve de nada si el add-in dentro de ArcMap no está escuchan
 > Recuerda la arquitectura: `cliente IA → arcmap_mcp_server.py (Py3) → socket
 > 127.0.0.1:27179 → add-in .NET (dentro de ArcMap)`.
 >
-> **Ruta recomendada del repo: `C:\mcp\arcmap-mcp`** (fuera de carpetas sincronizadas
-> tipo Drive/Dropbox). En los ejemplos, sustituye `<USUARIO>` por tu usuario de Windows.
+> **Ubicación de la instalación: `C:\mcp\arcmap-mcp`.** Si instalas desde un ZIP extraído
+> en otra carpeta, `INSTALAR.bat` copia ahí el paquete y registra esa ruta en los clientes,
+> así que la carpeta del ZIP se puede borrar después (`-Destino` para otra ubicación, fuera
+> de carpetas sincronizadas tipo Drive/Dropbox). Un clon git se usa donde esté. En los
+> ejemplos, sustituye `<USUARIO>` por tu usuario de Windows.
 
 ---
 
 ## Vía rápida: `INSTALAR.bat`
 
-Con **ArcMap cerrado**, doble clic en `INSTALAR.bat` (en la raíz del repo). Prepara el
-entorno, instala el add-in y registra el servidor en los clientes IA detectados.
+Con **ArcMap cerrado**, doble clic en `INSTALAR.bat` (en la carpeta que extrajiste o
+clonaste). Deja el paquete en `C:\mcp\arcmap-mcp`, prepara el entorno, instala el add-in y
+registra el servidor en los clientes IA detectados.
 
-Desde terminal es lo mismo:
+Desde terminal es lo mismo, lanzado desde esa carpeta:
 
 ```powershell
-cd C:\mcp\arcmap-mcp
 powershell -ExecutionPolicy Bypass -File .\install.ps1   # clientes detectados automáticamente
 .\install.ps1 -Clientes todos                            # o los cinco, detectados o no
 .\install.ps1 -Clientes claude-desktop                   # o solo uno
+.\install.ps1 -Destino D:\herramientas\arcmap-mcp        # otra ubicación fija
 ```
+
+> Si `C:\mcp\arcmap-mcp` ya es un **clon git** (una copia de desarrollo), un ZIP no lo
+> pisa: el instalador se para y lo explica. Actualízalo con `ACTUALIZAR.bat`.
 
 > **Si has descargado el ZIP** en vez de clonar: desbloquéalo antes de extraerlo
 > (clic derecho en el ZIP ▸ *Propiedades* ▸ *Desbloquear*). Windows marca lo que viene
@@ -73,8 +80,8 @@ con un aviso, en vez de dejar una instalación a medias.
 ### Por qué hay dos piezas y solo una da guerra
 
 - **El servidor MCP (Python) se actualiza con el `git pull` y ya está.** Tu cliente IA tiene
-  registrado el `python.exe` del venv apuntando al `.py` **de esta carpeta**, así que corre siempre
-  el código actual. Basta con reiniciar la sesión del cliente. Solo necesitas volver a pasar
+  registrado el `python.exe` del venv apuntando al `.py` **de la carpeta instalada** (el clon, o
+  `C:\mcp\arcmap-mcp`), así que corre siempre el código actual. Basta con reiniciar la sesión del cliente. Solo necesitas volver a pasar
   `install.ps1` si cambió `requirements.txt`.
 - **El add-in .NET sí exige cerrar ArcMap.** Vive copiado en
   `%USERPROFILE%\Documents\ArcGIS\AddIns\Desktop<versión>\{51f4ce63-…}\`, y ArcMap mantiene su
@@ -90,8 +97,9 @@ con el botón **Estado** que la versión es la que esperas.
 ### Si descargaste el ZIP en vez de clonar
 
 No hay `git pull`: baja el ZIP nuevo, **desbloquéalo antes de extraerlo** (clic derecho ▸
-*Propiedades* ▸ *Desbloquear*), extráelo sobre la misma carpeta y ejecuta `INSTALAR.bat`. Clonar con
-git ahorra este paso en cada actualización.
+*Propiedades* ▸ *Desbloquear*), extráelo donde quieras y ejecuta `INSTALAR.bat`: actualiza
+`C:\mcp\arcmap-mcp` y los clientes siguen apuntando al mismo sitio. Clonar con git ahorra este
+paso en cada actualización.
 
 ### Comprobar en qué versión estás
 
@@ -253,7 +261,7 @@ nº de capas. Luego `list_layers` → devuelve tus capas. Para feedback visual,
 
 | Qué | Ruta |
 |---|---|
-| Repo (recomendado) | `C:\mcp\arcmap-mcp` |
+| Instalación (la fija el instalador) | `C:\mcp\arcmap-mcp` (o `-Destino`, o la carpeta del clon git) |
 | Add-in .NET (instalador) | `C:\mcp\arcmap-mcp\addin\dist\arcmap-mcp.esriaddin` |
 | Add-in instalado | `%USERPROFILE%\Documents\ArcGIS\AddIns\Desktop10.5\{51f4ce63-…}\` |
 | Log del add-in | `C:\MCP_Logs\arcmap-mcp.log` |

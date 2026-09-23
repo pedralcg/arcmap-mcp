@@ -24,6 +24,11 @@
 .PARAMETER InstalarPython
     Si no hay ningun Python 3 utilizable, lo instala con winget sin preguntar.
 
+.PARAMETER Destino
+    Ubicacion fija de la instalacion (por defecto C:\mcp\arcmap-mcp). Instalando
+    desde un ZIP extraido en otra carpeta, el paquete se copia aqui y los clientes
+    IA quedan apuntando aqui, asi que la carpeta del ZIP se puede borrar despues.
+
 .EXAMPLE
     .\install.ps1
     Instalacion tipica: venv + add-in + registro en los clientes IA detectados.
@@ -44,11 +49,20 @@ param(
     [switch] $Desinstalar,
     [switch] $SinVenv,
     [switch] $SinAddIn,
-    [switch] $InstalarPython
+    [switch] $InstalarPython,
+    [string] $Destino = 'C:\mcp\arcmap-mcp'
 )
 
 $ErrorActionPreference = 'Stop'
-$Repo = $PSScriptRoot
+# Carpeta desde la que se EJECUTA el instalador (el ZIP extraido o el clon git).
+$Origen = $PSScriptRoot
+<# Ubicacion fija de la instalacion. Los clientes IA guardan la ruta del servidor,
+   y hasta la 2.13.0 esa ruta era la del ZIP extraido: al borrar la carpeta de
+   Descargas el servidor dejaba de arrancar, y el fallo salia en una sesion
+   posterior como CONNECTION_CLOSED. Ahora, instalando desde un ZIP en cualquier
+   sitio, el paquete se COPIA aqui y se registra esta ruta. Ver Resolve-Instalacion. #>
+$InstalacionFija = $Destino
+$Repo = $Origen   # se reasigna en Resolve-Instalacion si hay que copiar
 $VenvDir = Join-Path $env:LOCALAPPDATA 'arcmap-mcp\venv'
 $VenvPython = Join-Path $VenvDir 'Scripts\python.exe'
 $ServerPy = Join-Path $Repo 'src\arcmap_mcp_server.py'
@@ -281,6 +295,47 @@ function Unblock-Repo {
         Get-ChildItem $Repo -Recurse -File -ErrorAction SilentlyContinue | Unblock-File -ErrorAction SilentlyContinue
     }
     catch { }
+}
+
+<# Decide DESDE DONDE queda instalado y registrado el servidor:
+     1. Se ejecuta desde C:\mcp\arcmap-mcp            -> se queda ahi.
+     2. Se ejecuta desde un clon git en otra carpeta -> se queda ahi: un clon es una
+        ubicacion elegida a proposito, y copiarlo desacoplaria lo que se edita de lo
+        que corre.
+     3. Se ejecuta desde un ZIP extraido en otro sitio -> se COPIA el paquete entero a
+        C:\mcp\arcmap-mcp y todo lo demas (venv, add-in, registro) sale de alli. La
+        carpeta del ZIP se puede borrar despues.
+   Proteccion: si C:\mcp\arcmap-mcp ya es un clon git, un ZIP NO lo pisa: se para y
+   lo explica, porque sobrescribir un clon de desarrollo pierde trabajo sin avisar. #>
+function Resolve-Instalacion {
+    $origenNorm = $Origen.TrimEnd('\').ToLower()
+    $fijaNorm = $InstalacionFija.TrimEnd('\').ToLower()
+    if ($origenNorm -eq $fijaNorm) { return }
+    if (Test-Path (Join-Path $Origen '.git')) {
+        Write-Info "Instalando desde un clon git: se registra en su sitio ($Origen)."
+        return
+    }
+
+    Write-Paso "Instalando en $InstalacionFija"
+    if (Test-Path (Join-Path $InstalacionFija '.git')) {
+        # Solo le pasa a quien desarrolla (tiene el repo clonado ahi). Mensaje claro y
+        # salida limpia, sin la traza roja de PowerShell de un throw.
+        Write-Aviso "$InstalacionFija ya contiene una copia de desarrollo (git) y no se va a pisar."
+        Write-Info  'Para actualizarla, usa ACTUALIZAR.bat desde esa carpeta.'
+        Write-Info  'Para instalar este ZIP en otro sitio:  INSTALAR.bat -Destino D:\otra\carpeta'
+        Write-Host  "`nNo se ha instalado nada.`n" -ForegroundColor White
+        exit 1
+    }
+    New-Item -ItemType Directory -Force $InstalacionFija | Out-Null
+    # Copia de lo que trae el paquete, encima de lo que hubiera: una actualizacion
+    # desde un ZIP nuevo es exactamente esto. Los .bak y logs de fuera no se tocan.
+    Get-ChildItem $Origen -Force | ForEach-Object {
+        Copy-Item $_.FullName $InstalacionFija -Recurse -Force
+    }
+    Write-Ok "arcmap-mcp queda instalado en $InstalacionFija"
+    Write-Info "La carpeta donde descomprimiste el ZIP ya no hace falta: puedes borrarla."
+    $script:Repo = $InstalacionFija
+    $script:ServerPy = Join-Path $InstalacionFija 'src\arcmap_mcp_server.py'
 }
 
 function Get-AddInId {
@@ -891,6 +946,16 @@ Unblock-Repo
 $arcmap = Find-ArcMap
 $py27 = Find-Python27
 
+# Verificar y desinstalar no copian nada, pero si lo instalado vive en la ubicacion
+# fija, es de ahi de donde hay que informar.
+$esFijaOClon = ($Origen.TrimEnd('\').ToLower() -eq $InstalacionFija.ToLower()) -or
+               (Test-Path (Join-Path $Origen '.git'))
+if (($SoloVerificar -or $Desinstalar) -and -not $esFijaOClon -and
+    (Test-Path (Join-Path $InstalacionFija 'src\arcmap_mcp_server.py'))) {
+    $Repo = $InstalacionFija
+    $ServerPy = Join-Path $InstalacionFija 'src\arcmap_mcp_server.py'
+}
+
 if ($SoloVerificar) {
     Show-Resumen $arcmap $py27
     if ($arcmap) {
@@ -933,9 +998,16 @@ if ($Desinstalar) {
         }
     }
     Remove-RestosLocales
+    if (Test-Path $InstalacionFija) {
+        # No se borra: puede ser un clon de desarrollo o tener cosas del usuario.
+        Write-Info "La carpeta $InstalacionFija NO se borra; si ya no la quieres, borrala a mano."
+    }
     Write-Host "`nDesinstalacion completada.`n" -ForegroundColor White
     return
 }
+
+# Instalacion: fijar primero DESDE DONDE va a quedar todo (ver Resolve-Instalacion).
+Resolve-Instalacion
 
 if (-not $arcmap) {
     Write-Aviso 'No se detecta ninguna instalacion de ArcMap 10.5-10.8.'
