@@ -5,7 +5,7 @@
 > lista existen solo para lo **repetitivo y de alto valor** —sobre todo las series de
 > planos (Data Driven Pages)—, no para replicar toda la API.
 
-**57 herramientas** sobre ArcMap 10.5. Unas **34 están cubiertas por la regresión en sesión
+**58 herramientas** sobre ArcMap 10.5. Unas **34 están cubiertas por la regresión en sesión
 viva** (`tests/regresion_sesion_viva.py`, 105 comprobaciones); el resto se ha ejercitado a
 mano en trabajo real, pero **no automáticamente**. El README, en «Herramientas MCP», explica
 por qué la distinción importa.
@@ -107,13 +107,20 @@ arrastra al resto, y **anuncia siempre lo que trunca**.
 | `set_layer_visibility` | Enciende/apaga capa o grupo (la leyenda del layout se actualiza) | nativo |
 | `export_view_png` | Exporta la vista activa (o el layout con `modo="layout"`) a PNG | nativo |
 | `export_jpg` | Exporta el layout a JPG (dpi 230 por defecto — series de planos ligeras). Vale `.jpg` o `.jpeg` | nativo |
+| `export_mxd_lote` | Exporta a JPG o PDF una **lista de .mxd del disco**, un proceso `python.exe` por documento. Por defecto, cada fichero junto a su .mxd. Devuelve bytes y `sobrescrito` por documento | sin puente |
 
 > **Los tres export** (`export_pdf`, `export_jpg`, `export_view_png`) comparten reglas:
 > `salida` **absoluta** en una carpeta que exista, `dpi` entre 24 y 600, y
 > `sobrescribir=True` por defecto —una serie que se regenera necesita pisar— con
 > **`sobrescrito`** en la respuesta para que nunca sea silencioso. Se exporta a un
 > temporal y solo al final se mueve al destino: cancelar con ESC ya no destruye el plano
-> que había.
+> que había. Exportan **siempre el documento abierto**, y la respuesta trae `documento`
+> con su ruta.
+>
+> **Para una serie de .mxd, `export_mxd_lote`, no un bucle en `execute_arcpy`:** un
+> proceso arcpy que ya ha exportado un layout no vuelve a exportar otro, así que el bucle
+> saca el primero y falla en el resto. El lote lanza un proceso por documento y funciona
+> con ArcMap abierto.
 
 > **Matiz de `goto_ddp_page`:** el atlas vivo de la sesión **no pagina** (la API de
 > Data Driven Pages solo existe en arcpy, que corre sobre el snapshot). La tool lee el

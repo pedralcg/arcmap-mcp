@@ -3,6 +3,62 @@
 Formato inspirado en [Keep a Changelog](https://keepachangelog.com/es/); versionado
 [SemVer](https://semver.org/lang/es/).
 
+## [2.13.0] - 2026-09-23 (SIN PUBLICAR)
+
+Lo que destapó el trabajo real de dos días con series de planos (lotes de 88 y de 149
+documentos). El hilo común: **respuestas que dicen `ok` sin describir lo que ha pasado**.
+
+Verificado el mismo día en sesión viva: 10 comprobaciones propias de esta versión (documento
+«Sin título», cabecera coding, `result`, stdout en el error, aviso de capas rotas, `documento`
+en el export, rechazo de `mxd=`) y **106/106** en la regresión general, en un documento con
+servicios web. 38 casos del runner y 50 tests sin ArcMap. **No verificado:** el reintento por
+E_PENDING, porque el fallo no apareció en ninguno de los 5 pases de la regresión.
+
+La regresión corrige de paso su propia aserción de capas rotas, que comparaba el RECUENTO de
+arcpy con el de ArcObjects: no cuentan lo mismo (arcpy da por rota una capa de servicio web
+sin `dataSource`; ArcObjects cuenta tablas que `ListLayers` no ve). Ahora, si el recuento no
+cuadra, decide por nombre y solo con capas con fuente en disco.
+
+### Añadido
+- **`export_mxd_lote`**: exporta a JPG o PDF una lista de .mxd del disco, **un proceso
+  `python.exe` por documento**. Es la única vía fiable: un proceso arcpy que ya ha
+  exportado un layout no vuelve a exportar otro (medido el 2026-09-22 sobre planos de
+  94-141 capas: sale el primero y fallan los siguientes, haya guardado o no). No usa el
+  puente y funciona con ArcMap abierto. Exporta a un temporal y mueve al final; devuelve
+  bytes y `sobrescrito` por documento, y no se fía del `ok` del hijo: comprueba que el
+  fichero existe, tiene tamaño y es de esta pasada. Probado sobre tres planos entregados:
+  salen **idénticos byte a byte** a los del 22-sep.
+
+### Corregido
+- 🔴 **Argumentos desconocidos se rechazan en TODAS las tools.** FastMCP los tiraba en
+  silencio: `export_jpg(salida=..., mxd=<otro plano>, resolucion=230)` exportó el
+  documento abierto —otro monte, otro plano— con `ok: true`. Ahora es un error que nombra
+  los argumentos sobrantes y los admitidos, y el schema anuncia `additionalProperties:
+  false`. Toca internos de FastMCP (`_tool_manager`, `fn_metadata`); un test lo vigila.
+- **Los export dicen QUÉ han exportado** (`documento` en la respuesta de `export_pdf`,
+  `export_jpg` y `export_view_png`).
+- **`execute_arcpy` devuelve el `stdout` también cuando falla.** Un bucle que moría en el
+  5º documento no decía que los cuatro primeros ya estaban guardados. Si el fallo es un
+  `UnicodeError`, la respuesta trae una `pista` (casi siempre `str(ex)` sobre un mensaje
+  con tildes).
+- **`execute_arcpy` tolera `# -*- coding: utf-8 -*-`** en las dos primeras líneas (antes:
+  `SyntaxError: encoding declaration in Unicode string` sin ejecutar nada). La línea se
+  blanquea, no se borra, para que los números de línea del traceback sigan casando.
+- **`execute_arcpy` arranca con un documento «Sin título»**: `df` vale `None` en vez de
+  morir en el preámbulo con `NameError` y `ping` en verde.
+- **`result` en minúscula se devuelve**, con `aviso_result`. Es la convención del MCP de
+  ArcGIS Pro, y volvía `null` con el valor calculado y tirado.
+- **El aviso de capas rotas ya no habla de otro documento.** Salía en las 20 llamadas de
+  una sesión que editaba otros .mxd por ruta, nombrando las capas rotas del documento
+  abierto —que no se tocó—. Dos cambios: `MAP`/`mapping` ya no fuerzan la copia del
+  documento (el runner los inyecta siempre, así que no indicaban nada), y el runner omite
+  el aviso si el código no usó la copia (`mxd`/`df` no nombrados, o reasignados). Cuando
+  sale, nombra el .mxd y lista 5 capas en vez de 10.
+- **E_PENDING en los export** (`0x8000000A`, el mapa sigue dibujando): hasta 3 intentos
+  bombeando mensajes de ArcMap entre medias, y si no, un error que dice qué hacer. ⚠️
+  **Esto TAPA EL SÍNTOMA, no explica la causa**: el disparador sigue sin identificarse
+  (tres hipótesis probadas y refutadas el 2026-09-21). Que nadie lo lea como entendido.
+
 ## [2.12.0] - 2026-09-20 (SIN PUBLICAR)
 
 Revisión completa del código. Un defecto grave y silencioso, una veintena de tamaño
