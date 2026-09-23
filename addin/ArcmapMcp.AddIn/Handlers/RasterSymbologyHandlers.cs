@@ -16,7 +16,7 @@ namespace ArcmapMcp.AddIn.Handlers
     /// IGeoFeatureLayer (LayerHandlers.cs), así que hasta 2026-08-27 NO había
     /// forma de simbolizar un ráster desde el MCP. `execute_arcpy` tampoco valía:
     /// opera sobre una copia del documento y los cambios al renderer se descartan
-    /// por diseño (ADR-004). Era el hueco más pegado a los flujos reales de IDEN,
+    /// por diseño (ADR-004). Era el hueco más pegado a los flujos forestales reales,
     /// donde casi todo el producto es ráster: NDVI, FCC, P95, pendientes.
     ///
     /// La familia de interfaces es OTRA que en vectorial: aquí manda

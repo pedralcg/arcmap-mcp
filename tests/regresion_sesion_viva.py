@@ -27,7 +27,7 @@ PORT = int(os.environ.get("ARCMAP_BRIDGE_PORT", "27179"))
 
 SEP = chr(92)
 RASTER = "C:" + SEP + "temp" + SEP + "20260715_verif_qml2lyr" + SEP + "real_NUEVO.tif"
-VEC = ("C:" + SEP + "temp" + SEP + "20260710_export_coberturas_id2025_024" + SEP
+VEC = ("C:" + SEP + "temp" + SEP + "arcmap-mcp-regresion" + SEP
        + "Áreas Naturales de Interés Turístico.shp")
 NOMBRE_VEC = "Áreas Naturales de Interés Turístico"
 
