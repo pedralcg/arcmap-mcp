@@ -118,11 +118,42 @@ namespace ArcmapMcp.AddIn
             get { return _running; }
         }
 
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetHandleInformation(IntPtr hObject, uint dwMask, uint dwFlags);
+        private const uint HANDLE_FLAG_INHERIT = 0x00000001;
+
+        /// <summary>
+        /// Marca un socket como NO heredable. En .NET Framework los sockets nacen
+        /// heredables, y cualquier proceso que ArcMap lance después con herencia de
+        /// handles se lleva una copia: medido el 2026-09-23, `RuntimeLocalServer.exe`
+        /// (Esri, hijo de ArcMap) arrancó 10 s después del puente y se quedó con el
+        /// socket de escucha. Tras «Detener», el 27179 siguió en LISTENING a nombre de
+        /// ArcMap, las conexiones se colgaban sin respuesta y el siguiente «Iniciar»
+        /// falló con "Solo se permite un uso de cada dirección". Es muy probablemente la
+        /// raíz del puerto cogido del 2026-08-27. Nunca rompe: si falla, se anota.
+        /// </summary>
+        private static void NoHeredable(Socket s, string que)
+        {
+            try
+            {
+                if (!SetHandleInformation(s.Handle, HANDLE_FLAG_INHERIT, 0))
+                    Log.Info("No se pudo marcar como no heredable el socket (" + que + "): error "
+                             + System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+            }
+            catch (Exception ex)
+            {
+                Log.Error("No se pudo marcar como no heredable el socket (" + que + ")", ex);
+            }
+        }
+
         public void Start()
         {
             if (_avisoPuerto != null)
                 Log.Info(_avisoPuerto);
             _listener = new TcpListener(Bind, Port);
+            // Antes de Start: el handle ya existe, y así no hay ventana en la que un hijo
+            // lanzado justo entonces lo herede.
+            NoHeredable(_listener.Server, "escucha");
             _listener.Start();
             _running = true;
             _acceptThread = new Thread(AcceptLoop)
@@ -186,6 +217,10 @@ namespace ArcmapMcp.AddIn
                 {
                     break; // Stop() cierra el listener y rompe el Accept: salida limpia
                 }
+                // Las conexiones aceptadas también: un runner python.exe lanzado mientras
+                // se atiende un comando heredaría este socket, y cerrar la conexión desde
+                // aquí no llegaría al cliente hasta que el runner muriese.
+                NoHeredable(client.Client, "conexión");
                 ThreadPool.QueueUserWorkItem(delegate { HandleClient(client); });
             }
         }

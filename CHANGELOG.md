@@ -3,7 +3,7 @@
 Formato inspirado en [Keep a Changelog](https://keepachangelog.com/es/); versionado
 [SemVer](https://semver.org/lang/es/).
 
-## [2.13.0] - 2026-09-23 (SIN PUBLICAR)
+## [2.13.0] - 2026-09-23
 
 Lo que destapó el trabajo real de dos días con series de planos (lotes de 88 y de 149
 documentos). El hilo común: **respuestas que dicen `ok` sin describir lo que ha pasado**.
@@ -11,8 +11,9 @@ documentos). El hilo común: **respuestas que dicen `ok` sin describir lo que ha
 Verificado el mismo día en sesión viva: 10 comprobaciones propias de esta versión (documento
 «Sin título», cabecera coding, `result`, stdout en el error, aviso de capas rotas, `documento`
 en el export, rechazo de `mxd=`) y **106/106** en la regresión general, en un documento con
-servicios web. 38 casos del runner y 50 tests sin ArcMap. **No verificado:** el reintento por
-E_PENDING, porque el fallo no apareció en ninguno de los 5 pases de la regresión.
+servicios web, repetido en 12 pases sin un fallo. 38 casos del runner y 51 tests sin ArcMap.
+**No verificado:** el reintento por E_PENDING, porque el fallo no apareció en ninguno de los
+pases (el log no registra ni uno).
 
 La regresión corrige de paso su propia aserción de capas rotas, que comparaba el RECUENTO de
 arcpy con el de ArcObjects: no cuentan lo mismo (arcpy da por rota una capa de servicio web
@@ -39,6 +40,15 @@ cuadra, decide por nombre y solo con capas con fuente en disco.
   salen **idénticos byte a byte** a los del 22-sep.
 
 ### Corregido
+- 🔴 **«Detener» ya libera el puerto de verdad.** En .NET Framework los sockets nacen
+  heredables, y `RuntimeLocalServer.exe` (un proceso de Esri que ArcMap lanza por su cuenta
+  unos segundos después de abrir) se llevaba una copia del socket de escucha. Tras «Detener»,
+  el 27179 seguía en LISTENING a nombre de ArcMap, las conexiones se quedaban colgadas y el
+  siguiente «Iniciar» fallaba con *«Solo se permite un uso de cada dirección de socket»*.
+  Reproducido y corregido el 2026-09-23: el socket de escucha y las conexiones aceptadas se
+  marcan como no heredables. Con el arreglo, el puerto queda libre en menos de 2 s y el puente
+  vuelve a arrancar. Muy probablemente es la raíz del puerto cogido del 2026-08-27, que hasta
+  ahora se atribuía a un handler bloqueado.
 - 🔴 **El instalador ya no deja los clientes IA apuntando a la carpeta del ZIP.** Registraba
   la ruta desde la que se ejecutaba: quien descomprimía el ZIP en Descargas y luego borraba
   esa carpeta se quedaba con un servidor que no arrancaba, y el fallo salía en una sesión
@@ -87,7 +97,7 @@ cuadra, decide por nombre y solo con capas con fuente en disco.
   **Esto TAPA EL SÍNTOMA, no explica la causa**: el disparador sigue sin identificarse
   (tres hipótesis probadas y refutadas el 2026-09-21). Que nadie lo lea como entendido.
 
-## [2.12.0] - 2026-09-20 (SIN PUBLICAR)
+## [2.12.0] - 2026-09-20 (sin etiqueta propia: se publica dentro de la 2.13.0)
 
 Revisión completa del código. Un defecto grave y silencioso, una veintena de tamaño
 medio y una pasada de documentación. Se escribió **con ArcMap cerrado** y se probó en
@@ -110,9 +120,9 @@ exige un documento de producción y la regresión general **modifica** el docume
 Verificado en vivo: el arreglo de las rutas relativas (`snapshot_via:
 disco_junto_al_original`, cero capas rotas *por la copia*, sin `~arcmap-mcp-snap_*.mxd`
 residual), la simbología, los exports, `save_mxd_as`, el desempate de capas homónimas y
-los avisos de `execute_arcpy`. **Siguen sin probar en vivo** el cajetín agrupado, el join
-con tabla unida, ESC en un export, el CRS cruzado en `zoom_to_layer` y el modo estirado
-de ráster.
+los avisos de `execute_arcpy`. El resto —cajetín agrupado, join con tabla unida, ESC en un
+export, el CRS cruzado en `zoom_to_layer` y el modo estirado de ráster— se comprobó en vivo
+el 2026-09-23, ya sobre la 2.13.0.
 
 ### Corregido — grave
 - **La copia del `.mxd` rompía los documentos con rutas relativas.** Desde la 2.6.0
@@ -261,7 +271,7 @@ de ráster.
   existió, los modos ADD/REMOVE de `select_by_attribute`, la «IP del otro equipo» como
   acceso remoto y la nota de que no había bookmarks. Timeouts documentados como son.
 
-## [2.11.0] - 2026-09-11 (SIN PUBLICAR)
+## [2.11.0] - 2026-09-11 (sin etiqueta propia: se publica dentro de la 2.13.0)
 
 Instalada y verificada contra ArcMap vivo el mismo dia: 40/40 en
 `tests/regresion_sesion_viva.py` —con el caso negativo (`modo unico` sin `valores`)
@@ -324,7 +334,7 @@ nombres, colores y transparencias en una sola llamada.
   `E_INVALIDARG` y por `ILegendInfo.LegendGroup[0].Heading` tampoco. Se quita en el elemento
   de leyenda del layout.
 
-## [2.10.1] - 2026-08-28 (SIN PUBLICAR)
+## [2.10.1] - 2026-08-28 (sin etiqueta propia: se publica dentro de la 2.13.0)
 
 El ArcMap zombi del 2026-08-27, diagnosticado de verdad. **Tampoco se etiqueta.**
 
@@ -363,7 +373,7 @@ de "supero el timeout". El `busy` de aquellos nueve minutos era el candado funci
 runner atascado. El zombi no nacia de una bandera mal liberada, sino de un cierre que no cerraba
 ni las conexiones ni el runner.
 
-## [2.10.0] - 2026-08-28 (SIN PUBLICAR)
+## [2.10.0] - 2026-08-28 (sin etiqueta propia: se publica dentro de la 2.13.0)
 
 El puerto deja de estar clavado y la documentacion deja de prometer un bind que no
 existe. **Tampoco se etiqueta**, por la misma decision que la 2.9.0.
@@ -413,7 +423,7 @@ existe. **Tampoco se etiqueta**, por la misma decision que la 2.9.0.
 - `install.ps1` y los dos scripts de `tests/` dejan de clavar el 27179 y siguen la
   variable, para no dar "conexion rechazada" contra un puente que si esta vivo.
 
-## [2.9.0] - 2026-08-27 (SIN PUBLICAR)
+## [2.9.0] - 2026-08-27 (sin etiqueta propia: se publica dentro de la 2.13.0)
 
 Simbologia de raster, auditoria de carpetas y errores que enseñan. **Nada de esto se
 etiqueta en GitHub hasta cerrar el resto de la cola**, por decision explicita.
