@@ -66,8 +66,15 @@ namespace ArcmapMcp.AddIn
  *{box-sizing:border-box;}
  body{margin:0;min-height:100vh;background:var(--bg);color:var(--text);
       font-family:'Inter',system-ui,-apple-system,'Segoe UI',Arial,sans-serif;
-      display:flex;align-items:center;justify-content:center;padding:32px;}
- .wrap{width:100%;max-width:560px;}
+      display:flex;align-items:center;justify-content:center;padding:40px 32px;}
+ /* Ancho de escritorio como el contenedor de pedralcg.dev (~1000 px): la ficha de
+    560 px se leía como una página de móvil en una ventana de navegador normal. */
+ .wrap{width:100%;max-width:1040px;}
+ .cols{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:40px;
+        align-items:start;}
+ .cols > div > h2:first-child{margin-top:4px;}
+ .autor{margin-top:28px;}
+ .autor h2{margin:0 4px 12px;}
  /* Cabecera como la de pedralcg.dev: barra verde bosque con la marca en blanco y
     '.dev' en tierra, y el filo inferior de verde a tierra que ya tenía la ficha. */
  .topbar{background:var(--green);border-radius:var(--radius-md) var(--radius-md) 0 0;
@@ -76,17 +83,17 @@ namespace ArcmapMcp.AddIn
             background:linear-gradient(90deg,var(--green) 0%,var(--green2) 55%,var(--amber) 100%);}
  .brand{font-weight:800;font-size:16px;color:#fff;letter-spacing:-.2px;}
  .brand b{color:var(--amber);font-weight:800;}
- .hero{margin-top:14px;border:1px solid var(--border);border-radius:var(--radius-lg);padding:30px 32px;
+ .hero{margin-top:14px;border:1px solid var(--border);border-radius:var(--radius-lg);padding:40px 44px;
         background:linear-gradient(135deg,#e9f1e4 0%,#f2f1e6 55%,var(--cream) 100%);
         box-shadow:0 14px 40px rgba(20,60,30,.10);}
- .hero h1{margin:0;font-size:30px;font-weight:800;color:var(--green);letter-spacing:-.5px;}
+ .hero h1{margin:0;font-size:38px;font-weight:800;color:var(--green);letter-spacing:-.8px;}
  .hero .kicker{margin:6px 0 0;font-size:13px;font-weight:700;letter-spacing:1.2px;
                 text-transform:uppercase;color:var(--amber);}
- .hero p.desc{margin:16px 0 0;font-size:15px;line-height:1.6;color:var(--text);}
+ .hero p.desc{margin:18px 0 0;font-size:16px;line-height:1.65;color:var(--text);}
  .hero p.desc b{color:var(--green);}
  .quote{margin:20px 0 4px;padding:4px 0 4px 14px;border-left:3px solid var(--green2);
          font-style:italic;color:var(--muted);font-size:14px;}
- .cards{margin-top:18px;display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+ .cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;}
  a.card{display:flex;flex-direction:column;align-items:center;text-align:center;gap:8px;
          text-decoration:none;background:#fff;box-shadow:0 2px 8px #0000000d;
          border:1px solid var(--border);border-radius:var(--radius-md);padding:16px 16px 14px;
@@ -130,6 +137,9 @@ namespace ArcmapMcp.AddIn
  .links a.primario{background:var(--green);border-color:var(--green);color:#fff;}
  .links a.primario:hover{background:var(--green2);}
  a:focus-visible{outline:3px solid var(--amber);outline-offset:2px;}
+ @media (max-width:860px){.cols{grid-template-columns:1fr;gap:0;}
+   .cols > div + div > h2:first-child{margin-top:26px;}
+   .cards{grid-template-columns:1fr 1fr;} .hero{padding:30px 28px;} .hero h1{font-size:30px;}}
  @media (max-width:480px){body{padding:16px;} .hero{padding:24px 20px;}
    .cards{grid-template-columns:1fr;} .hero h1{font-size:26px;}}
  @media (prefers-reduced-motion:reduce){a.card{transition:none;} a.card:hover{transform:none;}}
@@ -137,6 +147,8 @@ namespace ArcmapMcp.AddIn
  <div class=""wrap"">
   <div class=""topbar""><span class=""brand"">pedralcg<b>.dev</b></span><i></i></div>
   <main class=""hero"">
+   <div class=""cols"">
+   <div>
    <div class=""titulo""><h1>arcmap-mcp</h1><span class=""ver"">v__VERSION__</span>__UPDATE__</div>
    <p class=""kicker"">Puente MCP para ArcMap</p>
    <p class=""desc"">Conduce la sesi&oacute;n viva de ArcMap desde un agente IA:
@@ -145,6 +157,16 @@ namespace ArcmapMcp.AddIn
       Software libre creado por <b>__AUTOR__</b> &middot; __LUGAR__.</p>
    <p class=""quote"">__TAGLINE__</p>
 
+   <h2>Enlaces &uacute;tiles</h2>
+   <p class=""links"">
+    <a class=""primario"" href=""__ACTUALIZAR__"">C&oacute;mo actualizar &rarr;</a>
+    <a href=""__CATALOGO__"">Cat&aacute;logo de herramientas</a>
+    <a href=""__NOVEDADES__"">Novedades</a>
+    <a href=""__ISSUES__"">Informar de un problema</a>
+   </p>
+   </div>
+
+   <div>
    <h2>Estado de esta sesi&oacute;n</h2>
    <dl class=""estado"">
     <div><dt>Puente</dt><dd>__PUENTE__</dd></div>
@@ -159,15 +181,11 @@ namespace ArcmapMcp.AddIn
     <li>&laquo;Lista las capas del mapa y dime qu&eacute; campos tiene la primera.&raquo;</li>
     <li>&laquo;Exporta el layout a PDF en C:\temp\plano.pdf a 300 ppp.&raquo;</li>
    </ul>
+   </div>
+   </div>
+  </main>
 
-   <h2>Enlaces &uacute;tiles</h2>
-   <p class=""links"">
-    <a class=""primario"" href=""__ACTUALIZAR__"">C&oacute;mo actualizar &rarr;</a>
-    <a href=""__CATALOGO__"">Cat&aacute;logo de herramientas</a>
-    <a href=""__NOVEDADES__"">Novedades</a>
-    <a href=""__ISSUES__"">Informar de un problema</a>
-   </p>
-
+  <section class=""autor"">
    <h2>Autor</h2>
    <div class=""cards"">
     <a class=""card"" href=""__WEB__""><span class=""ic"">__SVG_WEB__</span>
@@ -182,7 +200,7 @@ namespace ArcmapMcp.AddIn
    <p class=""foot"">C&oacute;digo abierto (licencia MIT) en
       <a href=""__REPO__"">github.com/pedralcg/arcmap-mcp</a><br>
       arcmap-mcp v__VERSION__ &middot; <b>pedralcg.dev</b></p>
-  </main>
+  </section>
  </div>
 </body></html>";
 
