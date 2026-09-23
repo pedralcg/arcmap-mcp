@@ -1379,23 +1379,91 @@ def calculate_geometry(entrada: str, propiedades, unidad_longitud: str = "",
     }, timeout=GP_TIMEOUT)
 
 
-def _version_arcmap_local():
-    """Versión de ArcMap instalada EN ESTA MÁQUINA, por el nombre de la carpeta.
+def _clave_version(v):
+    """'10.8' -> (10, 8) para ordenar como números: alfabéticamente, '10.10'
+    quedaría por detrás de '10.8'. Lo que no se entienda va al final."""
+    try:
+        return tuple(int(x) for x in v.split("."))
+    except (ValueError, AttributeError):
+        return ()
 
-    Se mira el disco y no el puente porque `ping` no devuelve la versión de
-    ArcGIS (su docstring lo prometía y la respuesta real no la trae). Ojo: si el
-    servidor corre en una máquina distinta de ArcMap (acceso remoto), esto NO es
-    la versión de la sesión; por eso quien lo use lo dice explícitamente.
+
+def _arcmap_por_registro():
+    """Versiones de ArcGIS Desktop según el registro: [(version, install_dir), ...].
+
+    Es la fuente buena, la misma que usa install.ps1: la escribe el instalador de
+    Esri y vale para CUALQUIER ruta de instalación. Hasta la 2.13.0 solo se miraban
+    las carpetas por defecto de Program Files, y una instalación en otra ruta
+    (issue #1: `D:\\软件安装\\Desktop10.8\\`) dejaba `describe_mxd` sin su veredicto
+    más útil, en silencio.
     """
+    try:
+        import winreg
+    except ImportError:          # no es Windows
+        return []
+    encontradas = []
+    for ruta in (r"SOFTWARE\WOW6432Node\ESRI", r"SOFTWARE\ESRI"):
+        try:
+            esri = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, ruta)
+        except OSError:
+            continue
+        with esri:
+            i = 0
+            while True:
+                try:
+                    nombre = winreg.EnumKey(esri, i)
+                except OSError:
+                    break
+                i += 1
+                if not nombre.lower().startswith("desktop"):
+                    continue
+                version = nombre[len("Desktop"):]
+                if not _clave_version(version):
+                    continue
+                install_dir = None
+                try:
+                    with winreg.OpenKey(esri, nombre) as k:
+                        install_dir = winreg.QueryValueEx(k, "InstallDir")[0]
+                except OSError:
+                    pass
+                encontradas.append((version, install_dir))
+    return encontradas
+
+
+def _detectar_arcmap_local():
+    """(version, fuente) de ArcMap instalado EN ESTA MÁQUINA. (None, motivo) si no.
+
+    Se mira la máquina y no el puente porque `ping` no devuelve la versión de
+    ArcGIS. Ojo: si el servidor corre en una máquina distinta de ArcMap (acceso
+    remoto), esto NO es la versión de la sesión; por eso quien lo use lo dice.
+
+    1. Registro. Si hay varias, se prefieren las que tienen `InstallDir` existente
+       (una desinstalación puede dejar la clave huérfana) y, entre ellas, la mayor.
+    2. Respaldo: las carpetas por defecto de Program Files.
+    """
+    registro = _arcmap_por_registro()
+    if registro:
+        vivas = [v for v, d in registro if d and os.path.isdir(d)]
+        candidatas = vivas or [v for v, _ in registro]
+        mejor = max(candidatas, key=_clave_version)
+        return mejor, ("registro" if vivas else "registro (sin InstallDir existente)")
     for base in (r"C:\Program Files (x86)\ArcGIS", r"C:\Program Files\ArcGIS"):
         try:
             nombres = os.listdir(base)
         except OSError:
             continue
-        for nombre in sorted(nombres, reverse=True):
-            if nombre.lower().startswith("desktop"):
-                return nombre[len("Desktop"):] or None
-    return None
+        versiones = [n[len("Desktop"):] for n in nombres
+                     if n.lower().startswith("desktop") and _clave_version(n[len("Desktop"):])]
+        if versiones:
+            return max(versiones, key=_clave_version), "carpeta %s" % base
+    return None, ("no se encontró ArcGIS Desktop en el registro "
+                  "(HKLM\\SOFTWARE\\[WOW6432Node\\]ESRI\\Desktop*) ni en las carpetas por "
+                  "defecto de Program Files")
+
+
+def _version_arcmap_local():
+    """Solo la versión (compatibilidad con quien ya la usaba)."""
+    return _detectar_arcmap_local()[0]
 
 
 @mcp.tool()
@@ -1429,7 +1497,7 @@ def describe_mxd(ruta: str) -> dict:
                 "error": "no existe o no es un fichero: %s" % ruta_abs}
 
     version, error = _mxd_version_declarada(ruta_abs)
-    local = _version_arcmap_local()
+    local, fuente_local = _detectar_arcmap_local()
     v_doc, v_app = _a_tupla(version), _a_tupla(local)
 
     if version is None:
@@ -1446,10 +1514,18 @@ def describe_mxd(ruta: str) -> dict:
                   "datos (rutas de red que no responden hacen que abrir el documento "
                   "tarde muchísimo o se cuelgue), los permisos y la ruta."
                   % (version, local))
+    elif local is None:
+        # Que no se pudo detectar tiene que DECIRSE: un `null` a secas se leía igual que
+        # "se comparó y no salió nada" (issue #1).
+        veredicto = "indeterminado"
+        motivo = ("el documento se declara %s, pero NO se ha podido detectar la versión "
+                  "de ArcMap instalada en esta máquina: %s. Sin ella no hay comparación. "
+                  "Compárala tú con la de tu ArcMap (Ayuda > Acerca de ArcMap)."
+                  % (version, fuente_local))
     else:
         veredicto = "indeterminado"
-        motivo = ("versión del documento: %s; ArcMap local: %s. Falta una de las dos "
-                  "para poder comparar." % (version, local))
+        motivo = ("versión del documento: %s; ArcMap local: %s. No se pudieron comparar "
+                  "(formato de versión no reconocido)." % (version, local))
 
     return {
         "ok": True,
@@ -1457,6 +1533,7 @@ def describe_mxd(ruta: str) -> dict:
         "tamano_bytes": os.path.getsize(ruta_abs),
         "version_declarada": version,
         "version_arcmap_local": local,
+        "version_arcmap_local_fuente": fuente_local,
         "veredicto": veredicto,
         "motivo": motivo,
         "aviso_version_local": ("'version_arcmap_local' se deduce de la instalación de "

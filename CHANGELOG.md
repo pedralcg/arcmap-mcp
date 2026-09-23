@@ -40,6 +40,15 @@ cuadra, decide por nombre y solo con capas con fuente en disco.
   salen **idénticos byte a byte** a los del 22-sep.
 
 ### Corregido
+- **`describe_mxd` detecta ArcMap instalado en cualquier ruta** (issue #1). Solo miraba las
+  carpetas por defecto de Program Files: con ArcGIS Desktop 10.8 en `D:\软件安装\Desktop10.8\`,
+  `version_arcmap_local` salía `null` y el veredicto quedaba en «indeterminado» sin decir por
+  qué. Ahora manda el registro (`HKLM\SOFTWARE\[WOW6432Node\]ESRI\Desktop*`, el mismo criterio
+  que `install.ps1`), prefiriendo las claves cuyo `InstallDir` existe y ordenando las versiones
+  como números; las carpetas por defecto quedan de respaldo. La respuesta trae
+  `version_arcmap_local_fuente`, y si no se detecta, el `motivo` lo dice con todas las letras
+  en vez de un `null` que se leía igual que «se comparó y no salió nada». Gracias a quien lo
+  reportó, que además confirmó que el add-in funciona en 10.8.
 - 🔴 **«Detener» ya libera el puerto de verdad.** En .NET Framework los sockets nacen
   heredables, y `RuntimeLocalServer.exe` (un proceso de Esri que ArcMap lanza por su cuenta
   unos segundos después de abrir) se llevaba una copia del socket de escucha. Tras «Detener»,

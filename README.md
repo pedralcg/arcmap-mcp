@@ -177,7 +177,7 @@ un encuadre que vas a repetir, guárdalo con `add_bookmark` y vuelve con `goto_b
 
 | Necesitas | Notas |
 |---|---|
-| **ArcMap 10.5** | Validado en 10.5. En 10.6–10.8 debería funcionar, pero **no está probado**: ver [Versiones de ArcMap](#versiones-de-arcmap). |
+| **ArcMap 10.5–10.8** | Validado en 10.5, y un usuario lo ha confirmado en **10.8** (build 12790). 10.6 y 10.7 deberían funcionar, pero no hay confirmación: ver [Versiones de ArcMap](#versiones-de-arcmap). |
 | **Python 3.10 o superior** | Para el servidor MCP. **Puede que ya lo tengas**: el instalador busca también el que viene con QGIS y con ArcGIS Pro, aunque no estén en el PATH. Si no encuentra ninguno, se ofrece a instalarlo con `winget`, o lo descargas de [python.org](https://www.python.org/downloads/windows/). |
 | **Python 2.7 de ArcGIS** | **No hay que instalarlo**: viene con ArcMap (`C:\Python27\ArcGIS10.x`). Lo usan el análisis arcpy y las Data Driven Pages. |
 | **Un cliente MCP** | Claude Desktop, Claude Code, Gemini CLI, Antigravity u OpenCode. |
@@ -257,8 +257,10 @@ recordará su posición. Comprueba con el botón **Estado** que la versión es l
 
 El add-in se compila contra ArcMap **10.5** y ahí está validado en uso real. ArcMap
 carga normalmente add-ins compilados para versiones iguales o anteriores a la instalada,
-así que en 10.6–10.8 debería funcionar, pero **nadie lo ha probado todavía**: si lo
-haces, cuéntalo en una *issue*.
+así que en 10.6–10.8 debería funcionar. **En 10.8 (build 12790) está confirmado** por un
+usuario, incluso instalado en una ruta no estándar: el add-in carga, el puente levanta y la
+regresión en sesión viva sale limpia (issue #1). En 10.6 y 10.7 aún no hay confirmación:
+si lo pruebas, cuéntalo en una *issue*.
 
 **En 10.4 o anterior no funciona**, y el instalador ya no finge lo contrario: si detecta
 una de esas versiones lo dice y no instala el add-in (sí prepara el servidor y registra

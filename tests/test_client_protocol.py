@@ -673,5 +673,60 @@ class TestVersionMxd(unittest.TestCase):
         self.assertTrue(error)
 
 
+class TestArcMapLocal(unittest.TestCase):
+    """Issue #1: ArcMap instalado fuera de Program Files (`D:\\软件安装\\Desktop10.8\\`).
+
+    La detección miraba solo las carpetas por defecto y `describe_mxd` perdía, en
+    silencio, su veredicto más útil. Ahora manda el registro, como en install.ps1.
+    """
+
+    def _con_registro(self, entradas, dirs_existentes=()):
+        p1 = unittest.mock.patch.object(servidor, "_arcmap_por_registro", return_value=entradas)
+        real_isdir = os.path.isdir
+        p2 = unittest.mock.patch.object(
+            servidor.os.path, "isdir",
+            side_effect=lambda d: d in dirs_existentes or real_isdir(d))
+        p1.start(); p2.start()
+        self.addCleanup(p1.stop); self.addCleanup(p2.stop)
+
+    def test_ruta_no_estandar_se_detecta_por_registro(self):
+        d = "D:\\软件安装\\Desktop10.8\\"
+        self._con_registro([("10.8", d)], dirs_existentes=(d,))
+        self.assertEqual(servidor._detectar_arcmap_local(), ("10.8", "registro"))
+
+    def test_clave_huerfana_no_gana_a_la_instalada(self):
+        viva = "C:\\ArcGIS\\Desktop10.5\\"
+        self._con_registro([("10.8", "C:\\ya\\no\\existe\\"), ("10.5", viva)],
+                           dirs_existentes=(viva,))
+        self.assertEqual(servidor._detectar_arcmap_local()[0], "10.5")
+
+    def test_orden_numerico_no_alfabetico(self):
+        a, b = "C:\\a\\", "C:\\b\\"
+        self._con_registro([("10.8", a), ("10.10", b)], dirs_existentes=(a, b))
+        self.assertEqual(servidor._detectar_arcmap_local()[0], "10.10")
+
+    def test_sin_deteccion_el_motivo_lo_dice(self):
+        """Un null a secas se leía igual que 'se comparó y no salió nada'."""
+        readme = os.path.join(RAIZ, "README.md")
+        with unittest.mock.patch.object(servidor, "_detectar_arcmap_local",
+                                        return_value=(None, "no se encontró ArcGIS Desktop")), \
+                unittest.mock.patch.object(servidor, "_mxd_version_declarada",
+                                           return_value=("10.8", None)):
+            r = servidor.describe_mxd(readme)
+        self.assertEqual(r["veredicto"], "indeterminado")
+        self.assertIn("NO se ha podido detectar", r["motivo"])
+        self.assertIn("no se encontró ArcGIS Desktop", r["version_arcmap_local_fuente"])
+
+    def test_con_deteccion_hay_veredicto(self):
+        readme = os.path.join(RAIZ, "README.md")
+        with unittest.mock.patch.object(servidor, "_detectar_arcmap_local",
+                                        return_value=("10.8", "registro")), \
+                unittest.mock.patch.object(servidor, "_mxd_version_declarada",
+                                           return_value=("10.8", None)):
+            r = servidor.describe_mxd(readme)
+        self.assertEqual(r["veredicto"], "compatible")
+        self.assertEqual(r["version_arcmap_local"], "10.8")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
