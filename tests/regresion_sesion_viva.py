@@ -384,10 +384,30 @@ base_rotas = rotas_en_sesion()
 rotas_copia = res(r).get("capas_rotas_en_copia")
 # El testigo 'capas_rotas_en_copia' NACE en la 2.12.0: en versiones anteriores no viene, y
 # comparar None con un int revienta el script a mitad. Si no esta, no hay nada que medir.
-comprobar("la copia no ANADE capas rotas",
-          rotas_copia is None
-          or (base_rotas is not None and rotas_copia <= base_rotas),
-          "copia=%s sesion=%s" % (rotas_copia, base_rotas))
+# Si el recuento no cuadra, se decide por NOMBRE y solo con capas con fuente en disco:
+# arcpy y ArcObjects no cuentan lo mismo. El 2026-09-23, sobre un plano con servicio web,
+# arcpy daba por rota `StereoWebMap` (sin dataSource) y ArcObjects no, y ArcObjects
+# contaba la tabla `Hoja1$` que ListLayers no ve: 45 contra 44 con la copia resolviendo
+# exactamente igual que la sesion. El recuento solo cuadraba en documentos sin servicios.
+if rotas_copia is not None and base_rotas is not None and rotas_copia > base_rotas:
+    # ListBrokenDataSources devuelve tambien TableView, que no tiene `supports`.
+    rc = t("execute_code", {"code": "RESULT = [l.name for l in MAP.ListBrokenDataSources(mxd) "
+                                    "if not hasattr(l, 'supports') or "
+                                    "(l.supports('DATASOURCE') and l.dataSource)]",
+                            "usar_documento": True}, nota="(rotas de la copia con fuente en disco)")
+    nombres_copia = res(rc).get("result")
+    nombres_sesion = [x.get("nombre") for x in
+                      (enviar("list_broken_data_sources", {}).get("result") or {}).get("rotos", [])]
+    # Sin lista no hay verde: una llamada fallida daba [] y pasaba (verde vacio).
+    sobran = ([n for n in nombres_copia if n not in nombres_sesion]
+              if isinstance(nombres_copia, list) else None)
+    comprobar("la copia no ANADE capas rotas (por nombre, con fuente en disco)",
+              sobran == [], "rotas solo en la copia: %s" % sobran)
+else:
+    comprobar("la copia no ANADE capas rotas",
+              rotas_copia is None
+              or (base_rotas is not None and rotas_copia <= base_rotas),
+              "copia=%s sesion=%s" % (rotas_copia, base_rotas))
 if rotas_copia is None:
     sys.stdout.write("      -> sin testigo 'capas_rotas_en_copia': add-in anterior a la "
                      "2.12.0, NO se ha medido" + chr(10))
