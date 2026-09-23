@@ -20,49 +20,63 @@ namespace ArcmapMcp.AddIn
         private const string Lugar = "Bullas, Murcia";
         private const string Repo = "https://github.com/pedralcg/arcmap-mcp";
 
-        // Tools que el servidor MCP resuelve SIN el puente: describe_mxd y audit_folder
-        // leen .mxd del disco con el arcpy standalone y no necesitan ArcMap abierto, así
-        // que no tienen comando en McpServer. Son el +2 sobre los comandos del puente.
-        private const int ToolsSinPuente = 2;
+        private const string Issues = "https://github.com/pedralcg/arcmap-mcp/issues";
+        private const string Catalogo = "https://github.com/pedralcg/arcmap-mcp/blob/main/docs/TOOLS.md";
+        private const string Novedades = "https://github.com/pedralcg/arcmap-mcp/blob/main/CHANGELOG.md";
+
+        // Tools que el servidor MCP resuelve SIN el puente: describe_mxd, audit_folder y
+        // export_mxd_lote (2.13.0) trabajan con .mxd del disco y no tienen comando en
+        // McpServer. Son el +3 sobre los comandos del puente. Si se añade otra tool sin
+        // puente en el servidor, hay que subir este número: el test
+        // TestContratoDeTools.SIN_PUENTE de tests/test_client_protocol.py es la lista.
+        private const int ToolsSinPuente = 3;
 
         // Derivado y no escrito a mano: estaba en 48 cuando ya eran 57, porque un número
         // suelto en un literal no se actualiza al añadir una tool. La correspondencia es
         // 1:1 — cada comando del puente es una @mcp.tool de src/arcmap_mcp_server.py
-        // (execute_code es la de execute_arcpy) — y verificada el 2026-09-20:
-        // 46 nativos + 9 de fondo + 2 sin puente = 57 tools.
+        // (execute_code es la de execute_arcpy) — verificada el 2026-09-23:
+        // 46 nativos + 9 de fondo + 3 sin puente = 58 tools.
         private static int NumHerramientas
         {
             get { return McpServer.NumComandos + ToolsSinPuente; }
         }
 
         private const string SvgWeb =
-            @"<svg viewBox=""0 0 24 24"" width=""22"" height=""22"" fill=""none"" stroke=""#1e5631"" stroke-width=""2""><circle cx=""12"" cy=""12"" r=""9""/><path d=""M3 12h18M12 3c2.5 2.7 2.5 15.3 0 18M12 3c-2.5 2.7-2.5 15.3 0 18""/></svg>";
+            @"<svg aria-hidden=""true"" viewBox=""0 0 24 24"" width=""22"" height=""22"" fill=""none"" stroke=""#1e5c2e"" stroke-width=""2""><circle cx=""12"" cy=""12"" r=""9""/><path d=""M3 12h18M12 3c2.5 2.7 2.5 15.3 0 18M12 3c-2.5 2.7-2.5 15.3 0 18""/></svg>";
         private const string SvgMail =
-            @"<svg viewBox=""0 0 24 24"" width=""22"" height=""22"" fill=""none"" stroke=""#1e5631"" stroke-width=""2""><rect x=""3"" y=""5"" width=""18"" height=""14"" rx=""2""/><path d=""M3 7l9 6 9-6""/></svg>";
+            @"<svg aria-hidden=""true"" viewBox=""0 0 24 24"" width=""22"" height=""22"" fill=""none"" stroke=""#1e5c2e"" stroke-width=""2""><rect x=""3"" y=""5"" width=""18"" height=""14"" rx=""2""/><path d=""M3 7l9 6 9-6""/></svg>";
         private const string SvgGh =
-            @"<svg viewBox=""0 0 24 24"" width=""22"" height=""22"" fill=""#1e5631""><path d=""M12 2C6.5 2 2 6.6 2 12.3c0 4.5 2.9 8.3 6.8 9.7.5.1.7-.2.7-.5v-1.7c-2.8.6-3.4-1.4-3.4-1.4-.5-1.2-1.1-1.5-1.1-1.5-.9-.6.1-.6.1-.6 1 .1 1.5 1 1.5 1 .9 1.6 2.4 1.1 3 .9.1-.7.3-1.1.6-1.4-2.2-.3-4.6-1.1-4.6-5 0-1.1.4-2 1-2.7-.1-.3-.4-1.3.1-2.7 0 0 .8-.3 2.7 1a9.3 9.3 0 0 1 5 0c1.9-1.3 2.7-1 2.7-1 .5 1.4.2 2.4.1 2.7.6.7 1 1.6 1 2.7 0 3.9-2.3 4.7-4.6 5 .4.3.7.9.7 1.9v2.8c0 .3.2.6.7.5A10.3 10.3 0 0 0 22 12.3C22 6.6 17.5 2 12 2z""/></svg>";
+            @"<svg aria-hidden=""true"" viewBox=""0 0 24 24"" width=""22"" height=""22"" fill=""#1e5c2e""><path d=""M12 2C6.5 2 2 6.6 2 12.3c0 4.5 2.9 8.3 6.8 9.7.5.1.7-.2.7-.5v-1.7c-2.8.6-3.4-1.4-3.4-1.4-.5-1.2-1.1-1.5-1.1-1.5-.9-.6.1-.6.1-.6 1 .1 1.5 1 1.5 1 .9 1.6 2.4 1.1 3 .9.1-.7.3-1.1.6-1.4-2.2-.3-4.6-1.1-4.6-5 0-1.1.4-2 1-2.7-.1-.3-.4-1.3.1-2.7 0 0 .8-.3 2.7 1a9.3 9.3 0 0 1 5 0c1.9-1.3 2.7-1 2.7-1 .5 1.4.2 2.4.1 2.7.6.7 1 1.6 1 2.7 0 3.9-2.3 4.7-4.6 5 .4.3.7.9.7 1.9v2.8c0 .3.2.6.7.5A10.3 10.3 0 0 0 22 12.3C22 6.6 17.5 2 12 2z""/></svg>";
         private const string SvgLi =
-            @"<svg viewBox=""0 0 24 24"" width=""22"" height=""22"" fill=""#1e5631""><path d=""M4.98 3.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5zM3 9h4v12H3zM9 9h3.8v1.7h.1c.5-.9 1.8-1.9 3.6-1.9 3.9 0 4.6 2.5 4.6 5.8V21h-4v-5.3c0-1.3 0-2.9-1.8-2.9s-2 1.4-2 2.8V21H9z""/></svg>";
+            @"<svg aria-hidden=""true"" viewBox=""0 0 24 24"" width=""22"" height=""22"" fill=""#1e5c2e""><path d=""M4.98 3.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5zM3 9h4v12H3zM9 9h3.8v1.7h.1c.5-.9 1.8-1.9 3.6-1.9 3.9 0 4.6 2.5 4.6 5.8V21h-4v-5.3c0-1.3 0-2.9-1.8-2.9s-2 1.4-2 2.8V21H9z""/></svg>";
 
         private const string Html = @"<!DOCTYPE html>
 <html lang=""es""><head><meta charset=""utf-8"">
 <meta name=""viewport"" content=""width=device-width, initial-scale=1"">
 <title>arcmap-mcp &middot; pedralcg.dev</title>
+<link rel=""preconnect"" href=""https://fonts.googleapis.com"">
+<link rel=""stylesheet"" href=""https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&amp;display=swap"">
 <style>
- :root{--green:#1e5631;--green2:#2e7d46;--amber:#d98324;--soft:#d7e8d0;
-        --cream:#faf3e6;--bg:#eef3ea;--text:#3a4a3c;--muted:#6f8071;--border:#e0e8dc;}
+ /* Tokens de pedralcg.dev, copiados de la web desplegada (BaseLayout.css, 2026-09-23):
+    forest, forest-mid, earth, sage-lt, bg, text, text-muted, border, surface y radios.
+    Los nombres internos (--green, --amber...) se conservan de la ficha original. */
+ :root{--green:#1e5c2e;--green2:#2d7a3a;--amber:#c9882a;--soft:#d4e8d0;--sage:#a8c8a0;
+        --cream:#faf3e6;--bg:#f1f6f1;--text:#1a2a1a;--muted:#445044;--border:#e2ede2;
+        --panel:#f9fbf9;--radius-md:14px;--radius-lg:22px;}
  *{box-sizing:border-box;}
  body{margin:0;min-height:100vh;background:var(--bg);color:var(--text);
-      font-family:'Segoe UI',system-ui,-apple-system,Arial,sans-serif;
+      font-family:'Inter',system-ui,-apple-system,'Segoe UI',Arial,sans-serif;
       display:flex;align-items:center;justify-content:center;padding:32px;}
  .wrap{width:100%;max-width:560px;}
- .topbar{height:5px;border-radius:6px 6px 0 0;background:var(--green);
-          border-bottom:0;}
- .topbar i{display:block;height:5px;border-radius:6px 6px 0 0;
-            background:linear-gradient(90deg,var(--green) 0%,var(--green) 70%,var(--amber) 100%);}
- .brand{font-weight:700;font-size:15px;color:var(--green);padding:14px 4px 0;}
- .brand b{color:var(--amber);}
- .hero{margin-top:10px;border:1px solid var(--border);border-radius:18px;padding:30px 32px;
+ /* Cabecera como la de pedralcg.dev: barra verde bosque con la marca en blanco y
+    '.dev' en tierra, y el filo inferior de verde a tierra que ya tenía la ficha. */
+ .topbar{background:var(--green);border-radius:var(--radius-md) var(--radius-md) 0 0;
+          padding:12px 18px;}
+ .topbar i{display:block;height:3px;margin:12px -18px -12px;
+            background:linear-gradient(90deg,var(--green) 0%,var(--green2) 55%,var(--amber) 100%);}
+ .brand{font-weight:800;font-size:16px;color:#fff;letter-spacing:-.2px;}
+ .brand b{color:var(--amber);font-weight:800;}
+ .hero{margin-top:14px;border:1px solid var(--border);border-radius:var(--radius-lg);padding:30px 32px;
         background:linear-gradient(135deg,#e9f1e4 0%,#f2f1e6 55%,var(--cream) 100%);
         box-shadow:0 14px 40px rgba(20,60,30,.10);}
  .hero h1{margin:0;font-size:30px;font-weight:800;color:var(--green);letter-spacing:-.5px;}
@@ -73,8 +87,9 @@ namespace ArcmapMcp.AddIn
  .quote{margin:20px 0 4px;padding:4px 0 4px 14px;border-left:3px solid var(--green2);
          font-style:italic;color:var(--muted);font-size:14px;}
  .cards{margin-top:18px;display:grid;grid-template-columns:1fr 1fr;gap:14px;}
- a.card{display:flex;flex-direction:column;gap:8px;text-decoration:none;background:#fff;
-         border:1px solid var(--border);border-radius:14px;padding:16px 16px 14px;
+ a.card{display:flex;flex-direction:column;align-items:center;text-align:center;gap:8px;
+         text-decoration:none;background:#fff;box-shadow:0 2px 8px #0000000d;
+         border:1px solid var(--border);border-radius:var(--radius-md);padding:16px 16px 14px;
          transition:transform .12s,box-shadow .12s,border-color .12s;}
  a.card:hover{transform:translateY(-3px);box-shadow:0 12px 26px rgba(20,60,30,.12);
                border-color:var(--green2);}
@@ -91,11 +106,37 @@ namespace ArcmapMcp.AddIn
        background:var(--soft);border-radius:999px;padding:3px 10px;}
  .upd{font-size:12px;font-weight:700;letter-spacing:.5px;color:#fff;
        background:var(--amber);border-radius:999px;padding:3px 10px;text-decoration:none;}
+ h2{margin:24px 0 10px;font-size:12px;font-weight:700;letter-spacing:1.2px;
+    text-transform:uppercase;color:var(--amber);}
+ .estado{background:var(--panel);border:1px solid var(--border);border-radius:14px;
+          padding:6px 16px;margin:0;}
+ .estado div{display:flex;justify-content:space-between;gap:12px;padding:8px 0;
+              border-bottom:1px solid var(--border);font-size:13px;}
+ .estado div:last-child{border-bottom:0;}
+ .estado dt{color:var(--muted);}
+ .estado dd{margin:0;font-weight:600;text-align:right;word-break:break-all;}
+ .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;
+       vertical-align:1px;background:var(--amber);}
+ .dot.on{background:var(--green2);}
+ .prompts{margin:0;padding:0;list-style:none;display:grid;gap:8px;}
+ .prompts li{background:var(--panel);border:1px solid var(--border);border-left:3px solid var(--green2);
+              border-radius:10px;padding:9px 12px;font-size:13px;line-height:1.5;}
+ .links{display:flex;flex-wrap:wrap;gap:8px;margin:0;}
+ /* Botones de la web: primario verde relleno, secundario blanco con borde. */
+ .links a{font-size:13px;font-weight:700;color:var(--green);text-decoration:none;
+           background:#fff;border:1px solid var(--border);border-radius:8px;padding:8px 14px;
+           box-shadow:0 2px 8px #0000000d;transition:border-color .12s,background .12s;}
+ .links a:hover{border-color:var(--green2);background:var(--panel);}
+ .links a.primario{background:var(--green);border-color:var(--green);color:#fff;}
+ .links a.primario:hover{background:var(--green2);}
+ a:focus-visible{outline:3px solid var(--amber);outline-offset:2px;}
+ @media (max-width:480px){body{padding:16px;} .hero{padding:24px 20px;}
+   .cards{grid-template-columns:1fr;} .hero h1{font-size:26px;}}
+ @media (prefers-reduced-motion:reduce){a.card{transition:none;} a.card:hover{transform:none;}}
 </style></head><body>
  <div class=""wrap"">
-  <div class=""topbar""><i></i></div>
-  <div class=""brand"">pedralcg<b>.dev</b></div>
-  <div class=""hero"">
+  <div class=""topbar""><span class=""brand"">pedralcg<b>.dev</b></span><i></i></div>
+  <main class=""hero"">
    <div class=""titulo""><h1>arcmap-mcp</h1><span class=""ver"">v__VERSION__</span>__UPDATE__</div>
    <p class=""kicker"">Puente MCP para ArcMap</p>
    <p class=""desc"">Conduce la sesi&oacute;n viva de ArcMap desde un agente IA:
@@ -103,6 +144,31 @@ namespace ArcmapMcp.AddIn
       encuadrar, geoprocesar y exportar series de planos.
       Software libre creado por <b>__AUTOR__</b> &middot; __LUGAR__.</p>
    <p class=""quote"">__TAGLINE__</p>
+
+   <h2>Estado de esta sesi&oacute;n</h2>
+   <dl class=""estado"">
+    <div><dt>Puente</dt><dd>__PUENTE__</dd></div>
+    <div><dt>Arranque autom&aacute;tico</dt><dd>__AUTOARRANQUE__</dd></div>
+    <div><dt>Python 2.7 (arcpy)</dt><dd>__PY27__</dd></div>
+    <div><dt>Registro de actividad</dt><dd>__LOG__</dd></div>
+   </dl>
+
+   <h2>Pru&eacute;balo en tu asistente</h2>
+   <ul class=""prompts"">
+    <li>&laquo;&iquest;Est&aacute; vivo el puente de ArcMap? Dime qu&eacute; documento tengo abierto.&raquo;</li>
+    <li>&laquo;Lista las capas del mapa y dime qu&eacute; campos tiene la primera.&raquo;</li>
+    <li>&laquo;Exporta el layout a PDF en C:\temp\plano.pdf a 300 ppp.&raquo;</li>
+   </ul>
+
+   <h2>Enlaces &uacute;tiles</h2>
+   <p class=""links"">
+    <a class=""primario"" href=""__ACTUALIZAR__"">C&oacute;mo actualizar &rarr;</a>
+    <a href=""__CATALOGO__"">Cat&aacute;logo de herramientas</a>
+    <a href=""__NOVEDADES__"">Novedades</a>
+    <a href=""__ISSUES__"">Informar de un problema</a>
+   </p>
+
+   <h2>Autor</h2>
    <div class=""cards"">
     <a class=""card"" href=""__WEB__""><span class=""ic"">__SVG_WEB__</span>
        <span class=""t"">Web</span><span class=""s"">pedralcg.dev</span></a>
@@ -116,9 +182,14 @@ namespace ArcmapMcp.AddIn
    <p class=""foot"">C&oacute;digo abierto (licencia MIT) en
       <a href=""__REPO__"">github.com/pedralcg/arcmap-mcp</a><br>
       arcmap-mcp v__VERSION__ &middot; <b>pedralcg.dev</b></p>
-  </div>
+  </main>
  </div>
 </body></html>";
+
+        private static string Esc(string texto)
+        {
+            return System.Net.WebUtility.HtmlEncode(texto ?? "");
+        }
 
         public static void Show()
         {
@@ -131,7 +202,27 @@ namespace ArcmapMcp.AddIn
                     ? @"<a class=""upd"" href=""" + Actualizaciones.ActualizarUrl + @""">&#8593; v"
                       + Actualizaciones.UltimaDisponible + " disponible</a>"
                     : "";
+
+                // Estado de la sesión: lo que alguien que no entiende del tema necesita
+                // poder leer (o copiar) cuando algo no va. Todo va escapado: una ruta
+                // puede traer '&' o '<'.
+                McpExtension ext = McpExtension.Instance;
+                bool activo = ext != null && ext.IsRunning;
+                string puente = activo
+                    ? @"<span class=""dot on""></span>Activo en 127.0.0.1:" + McpServer.Port
+                    : @"<span class=""dot""></span>Parado &middot; pulsa <b>Iniciar</b> en la barra";
+                string autoarranque = Ajustes.Autoarranque
+                    ? "S&iacute;" : "No &middot; act&iacute;valo en el desplegable de la barra";
+
                 string html = Html
+                    .Replace("__PUENTE__", puente)
+                    .Replace("__AUTOARRANQUE__", autoarranque)
+                    .Replace("__PY27__", Esc(Diagnostico.DescribirPython27()))
+                    .Replace("__LOG__", Esc(Log.PathInfo))
+                    .Replace("__ACTUALIZAR__", Actualizaciones.ActualizarUrl)
+                    .Replace("__CATALOGO__", Catalogo)
+                    .Replace("__NOVEDADES__", Novedades)
+                    .Replace("__ISSUES__", Issues)
                     .Replace("__VERSION__", version)
                     .Replace("__UPDATE__", update)
                     .Replace("__NUM_TOOLS__", NumHerramientas.ToString())

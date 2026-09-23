@@ -604,6 +604,16 @@ class TestContratoDeTools(unittest.TestCase):
 
         self.assertEqual(sueltas, [], "tools que no delegan en _client.send: %s" % sueltas)
 
+    def test_acerca_de_cuenta_las_tools_sin_puente(self):
+        """«Acerca de» suma ToolsSinPuente a los comandos del puente. Con export_mxd_lote
+        pasaron de 2 a 3 y la ficha habría dicho 57 herramientas siendo 58."""
+        ruta = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "addin",
+                            "ArcmapMcp.AddIn", "AboutFicha.cs")
+        with open(ruta, encoding="utf-8-sig") as fh:
+            m = re.search(r"const int ToolsSinPuente = (\d+);", fh.read())
+        self.assertIsNotNone(m, "no se encuentra ToolsSinPuente en AboutFicha.cs")
+        self.assertEqual(int(m.group(1)), len(self.SIN_PUENTE))
+
     def test_las_excepciones_siguen_existiendo(self):
         """Si una tool de SIN_PUENTE desaparece, la lista miente y hay que podarla."""
         ruta = os.path.join(

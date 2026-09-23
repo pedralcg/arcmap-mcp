@@ -20,6 +20,15 @@ sin `dataSource`; ArcObjects cuenta tablas que `ListLayers` no ve). Ahora, si el
 cuadra, decide por nombre y solo con capas con fuente en disco.
 
 ### Añadido
+- **Ficha «Acerca de» renovada**, con los tokens reales de pedralcg.dev (verde bosque, tierra,
+  salvia, radios e Inter, tomados de la web desplegada) en vez de una versión aproximada de la
+  paleta. Cabecera como la de la web, botones primario y secundario, y tres bloques nuevos
+  pensados para quien no es técnico: **estado de la sesión** (puente activo o parado con su
+  puerto, autoarranque, Python 2.7 y ruta del log), **ejemplos de qué pedirle al asistente** y
+  **enlaces** a cómo actualizar, catálogo, novedades e incidencias. Foco visible, iconos
+  ocultos a lectores de pantalla y una columna en pantallas estrechas. Corrige además el número
+  de herramientas: contaba 2 sin puente y con `export_mxd_lote` son 3, así que decía 57 en vez
+  de 58. Un test ata ahora esa constante a la lista del servidor.
 - **`export_mxd_lote`**: exporta a JPG o PDF una lista de .mxd del disco, **un proceso
   `python.exe` por documento**. Es la única vía fiable: un proceso arcpy que ya ha
   exportado un layout no vuelve a exportar otro (medido el 2026-09-22 sobre planos de
