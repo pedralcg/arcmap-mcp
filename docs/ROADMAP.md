@@ -7,7 +7,7 @@
 
 Estable. La arquitectura actual —add-in .NET dentro de ArcMap (ArcObjects nativo +
 runner arcpy out-of-process) y servidor FastMCP en Python 3— está validada end-to-end
-en ArcMap 10.5, con **57 herramientas** que incluyen el análisis ambiental (índices
+en ArcMap 10.5, con **58 herramientas** que incluyen el análisis ambiental (índices
 espectrales, hidrología, curvas, perfiles 3D y ruta de mínimo coste) y series de planos
 reales de decenas de páginas. La regresión en sesión viva cubre unas **34** de ellas con
 105 comprobaciones; el resto se ha ejercitado a mano, no automáticamente, y ahí es donde

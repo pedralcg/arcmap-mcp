@@ -322,7 +322,11 @@ namespace ArcmapMcp.AddIn.Handlers
         {
             public readonly string Ruta;
             public readonly string Via;
-            public Instantanea(string ruta, string via) { Ruta = ruta; Via = via; }
+            /// <summary>Ruta del .mxd ORIGINAL (null si está sin guardar). Viaja al runner
+            /// para que el aviso de capas rotas diga de qué documento habla.</summary>
+            public readonly string Original;
+            public Instantanea(string ruta, string via, string original)
+            { Ruta = ruta; Via = via; Original = original; }
         }
 
         /// <summary>El .mxd tal y como está en disco, con la casilla de rutas relativas.</summary>
@@ -371,7 +375,7 @@ namespace ArcmapMcp.AddIn.Handlers
                          + relojDisco.Elapsed.TotalSeconds.ToString("0.0") + " s (sin ocupar ArcMap): "
                          + doc.Ruta + ". Vía '" + ViaDiscoTemp + "': el documento guarda rutas"
                          + " ABSOLUTAS, así que sus capas resuelven desde cualquier carpeta.");
-                return new Instantanea(destino, ViaDiscoTemp);
+                return new Instantanea(destino, ViaDiscoTemp, doc.Ruta);
             }
 
             if (doc != null)
@@ -397,7 +401,7 @@ namespace ArcmapMcp.AddIn.Handlers
                              + relojJunto.Elapsed.TotalSeconds.ToString("0.0") + " s: " + junto
                              + ". Vía '" + ViaDiscoJunto + "', porque el documento guarda rutas"
                              + " RELATIVAS y una copia en %TEMP% dejaría todas sus capas rotas.");
-                    return new Instantanea(junto, ViaDiscoJunto);
+                    return new Instantanea(junto, ViaDiscoJunto, doc.Ruta);
                 }
                 catch (Exception ex)
                 {
@@ -415,8 +419,9 @@ namespace ArcmapMcp.AddIn.Handlers
             JObject r = StaDispatcher.Invoke(delegate
             {
                 IApplication app = ArcSession.App();
+                string original = ArcSession.MxdPath(app);
                 app.SaveAsDocument(ruta, true); // true = copia: el doc activo no cambia
-                return Protocol.Result(new JObject());
+                return Protocol.Result(new JObject { ["original"] = original });
             }, SnapshotTimeout, "copiar el documento (SaveAsDocument)");
             reloj.Stop();
 
@@ -435,7 +440,7 @@ namespace ArcmapMcp.AddIn.Handlers
             try { mb = new FileInfo(ruta).Length / (1024 * 1024); } catch { }
             Log.Info("Documento copiado en " + reloj.Elapsed.TotalSeconds.ToString("0.0") + " s (" + mb + " MB)"
                      + ". Vía '" + ViaSesion + "'.");
-            return new Instantanea(ruta, ViaSesion);
+            return new Instantanea(ruta, ViaSesion, (string)r["result"]["original"]);
         }
 
         /// <summary>
@@ -585,7 +590,7 @@ namespace ArcmapMcp.AddIn.Handlers
         /// <summary>Lanza el runner con el job y devuelve su JSON de salida.
         /// Timeout duro con Kill: sin zombies de python.exe.</summary>
         private static JObject RunJob(string op, JObject parameters, string mxdSnapshot,
-                                      TimeSpan? timeout = null)
+                                      TimeSpan? timeout = null, string mxdOriginal = null)
         {
             TimeSpan tope = timeout ?? SubprocessTimeout;
             string runner = ExtraerRunner();
@@ -599,6 +604,8 @@ namespace ArcmapMcp.AddIn.Handlers
             var job = new JObject { ["op"] = op, ["params"] = parameters ?? new JObject() };
             if (mxdSnapshot != null)
                 job["mxd"] = mxdSnapshot;
+            if (mxdOriginal != null)
+                job["mxd_original"] = mxdOriginal;
             // UTF-8 sin BOM por fichero (nunca stdout: la consola Py2.7 en cp1252
             // rompería ñ/tildes, igual que un header '# -*- coding -*-' mal puesto).
             File.WriteAllText(jobPath, job.ToString(Formatting.None), new UTF8Encoding(false));
@@ -832,7 +839,7 @@ namespace ArcmapMcp.AddIn.Handlers
             Instantanea snap = Snapshot(serializarSesion);
             try
             {
-                JObject r = RunJob(op, parameters, snap.Ruta, timeout);
+                JObject r = RunJob(op, parameters, snap.Ruta, timeout, snap.Original);
                 JObject res = r["result"] as JObject;
                 if (res != null)
                     res["snapshot_via"] = snap.Via;
@@ -867,20 +874,25 @@ namespace ArcmapMcp.AddIn.Handlers
         // Handlers (nombre de comando y contrato JSON de los schemas del servidor MCP).
         // ------------------------------------------------------------------ //
 
-        // Las cuatro señales son, exactamente, los nombres que el runner inyecta en el
-        // namespace del código del usuario cuando hay snapshot: arcpy, MAP/mapping, mxd
-        // y df. Si el código no nombra ninguno, no puede estar usando el documento.
+        // Las señales son, exactamente, los nombres que el runner inyecta en el
+        // namespace SOLO cuando hay snapshot: `mxd` y `df`. Si el código no nombra
+        // ninguno, no puede estar usando el documento.
         //
-        // `mxd` NO cuenta detrás de un punto: ahí es la EXTENSIÓN de un fichero
-        // (r"C:\planos\hoja.mxd", f.endswith(".mxd")), no la variable inyectada. Un
-        // código que solo AUDITA otros .mxd del disco forzaba copiar el documento vivo
-        // para nada, y en un mxd pesado eso son minutos. El resto de señales se dejan
-        // tal cual, incluidas las que van tras punto — `arcpy.mapping` es la forma normal
-        // de escribirlo—: el sesgo sigue siendo hacia el FALSO POSITIVO, porque copiar de
-        // más solo cuesta tiempo y copiar de menos rompe el código del usuario con un
-        // NameError.
+        // `MAP` y `mapping` contaban también hasta la 2.12.0, y era un error: el runner
+        // los inyecta SIEMPRE, con o sin copia. Un código que abre otros .mxd por ruta
+        // (`MAP.MapDocument(r"...")`) no toca el documento vivo, y aun así pagaba la
+        // copia y recibía en cada respuesta el aviso de capas rotas de un documento que
+        // no había tocado (20 llamadas seguidas el 2026-09-22).
+        //
+        // Ninguna cuenta detrás de un punto: `.mxd` es la EXTENSIÓN de un fichero
+        // (r"C:\planos\hoja.mxd", f.endswith(".mxd")) y `x.df` un atributo, no la
+        // variable inyectada. El sesgo sigue siendo hacia el FALSO POSITIVO —un `mxd`
+        // reasignado en un bucle cuenta—, porque copiar de más solo cuesta tiempo y
+        // copiar de menos rompe el código del usuario con un NameError; el runner decide
+        // después, con el código ya ejecutado, si la copia se usó de verdad antes de
+        // avisar de sus capas rotas.
         private static readonly Regex SenalDocumento = new Regex(
-            @"\b(df|MAP|mapping)\b|(?<!\.)\bmxd\b", RegexOptions.Compiled);
+            @"(?<!\.)\b(df|mxd)\b", RegexOptions.Compiled);
 
         /// <summary>
         /// ¿El código necesita el documento? Solo si menciona `mxd`, `df` o el módulo

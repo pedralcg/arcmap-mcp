@@ -20,6 +20,7 @@ reales (mismas fuentes que la sesión).
 import io
 import json
 import os
+import re
 import sys
 import time
 import traceback
@@ -155,6 +156,15 @@ def _abrir_mxd(job):
 # se pudieron contar). Lo rellena _abrir_mxd y main() lo adjunta al resultado.
 _ROTAS_EN_COPIA = None
 
+# Ruta del .mxd ORIGINAL del que sale la copia (la pone el add-in en el job). Sirve
+# para que el aviso de capas rotas diga de QUÉ documento habla.
+_MXD_ORIGINAL = None
+
+# False cuando execute_code recibió la copia pero el código no la usó (abría otros
+# .mxd por ruta). Entonces el aviso de capas rotas habla de un documento que la
+# llamada no ha tocado, y se omite.
+_COPIA_USADA = True
+
 
 def _contar_rotas(doc):
     """Cuenta las capas con la fuente rota EN LA COPIA. Nunca rompe el job.
@@ -175,20 +185,31 @@ def _contar_rotas(doc):
         _ROTAS_EN_COPIA = None
 
 
+def _nombre_original():
+    if not _MXD_ORIGINAL:
+        return u"el documento abierto en ArcMap"
+    return u"%s (el documento abierto en ArcMap)" % os.path.basename(_u(_MXD_ORIGINAL))
+
+
 def _adjuntar_rotas(resultado):
-    """Añade al resultado el testigo de fuentes rotas de la copia, si lo hay."""
-    if _ROTAS_EN_COPIA is None or not isinstance(resultado, dict):
+    """Añade al resultado el testigo de fuentes rotas de la copia, si lo hay.
+
+    Se omite entero si el código no usó la copia: el 2026-09-22 las 20 llamadas de
+    una sesión que editaba OTROS .mxd por ruta devolvieron, palabra por palabra, las
+    18 capas rotas del documento abierto —que no se tocó ni una vez—, nombrando
+    justo las capas que se estaban arreglando en los otros. Un aviso que no describe
+    lo que hace la llamada se lee como si hablara de lo tuyo.
+    """
+    if _ROTAS_EN_COPIA is None or not isinstance(resultado, dict) or not _COPIA_USADA:
         return resultado
     resultado["capas_rotas_en_copia"] = len(_ROTAS_EN_COPIA)
     if _ROTAS_EN_COPIA:
         resultado["aviso_capas_rotas"] = (
-            u"La copia del documento sobre la que se ha trabajado tiene %d capa(s) con la "
-            u"fuente ROTA: %s%s. Lo que dependa de ellas (un export, un recuento) sale sin "
-            u"esos datos. Comprueba con list_broken_data_sources si ya estaban rotas en la "
-            u"sesión; si allí están bien, el fallo es de la copia: mira `snapshot_via` en "
-            u"esta misma respuesta y repite con serializar_sesion=true si la tool lo admite."
-            % (len(_ROTAS_EN_COPIA), u", ".join(_ROTAS_EN_COPIA[:10]),
-               u"..." if len(_ROTAS_EN_COPIA) > 10 else u""))
+            u"La copia de %s tiene %d capa(s) con la fuente ROTA: %s%s. Lo que dependa "
+            u"de ellas sale sin esos datos. Si en la sesión están bien "
+            u"(list_broken_data_sources), el fallo es de la copia: mira `snapshot_via`."
+            % (_nombre_original(), len(_ROTAS_EN_COPIA), u", ".join(_ROTAS_EN_COPIA[:5]),
+               u" y %d más" % (len(_ROTAS_EN_COPIA) - 5) if len(_ROTAS_EN_COPIA) > 5 else u""))
     return resultado
 
 
@@ -298,23 +319,66 @@ def _ruta_backlink(out_dir):
 # Operaciones de documento (necesitan snapshot).
 # --------------------------------------------------------------------------- #
 
+# Declaración de codificación (PEP 263). Solo cuenta en las dos primeras líneas.
+_CABECERA_CODING = re.compile(u"^[ \\t\\f]*#.*?coding[:=][ \\t]*[-\\w.]+")
+
+
+def _quitar_cabecera_coding(code):
+    """Blanquea la línea `# -*- coding: ... -*-` si está en las dos primeras.
+
+    El código llega como unicode y `exec` de Python 2 PROHÍBE la declaración de
+    codificación sobre una cadena unicode ("SyntaxError: encoding declaration in
+    Unicode string"), antes de ejecutar una sola línea. Pero quien escribe Python
+    2.7 con tildes la pone lo primero, por costumbre, y perdía una llamada cada
+    vez. Se deja la línea VACÍA en vez de borrarla para que los números de línea
+    del traceback sigan casando con el código enviado.
+    """
+    lineas = code.split(u"\n")
+    for i in range(min(2, len(lineas))):
+        if _CABECERA_CODING.match(lineas[i]):
+            lineas[i] = u""
+    return u"\n".join(lineas)
+
+
+# `mxd` / `df` usados como VARIABLE (no tras un punto: ahí `.mxd` es una
+# extensión de fichero).
+_NOMBRA_MXD = re.compile(u"(?<![.\\w])mxd(?!\\w)")
+_NOMBRA_DF = re.compile(u"(?<![.\\w])df(?!\\w)")
+
+# stdout que llevaba impreso el código cuando lanzó una excepción. main() lo adjunta
+# al sobre de error: sin él, un bucle que falla en el 5º documento no dice que los
+# cuatro primeros sí se hicieron.
+_STDOUT_AL_FALLAR = None
+
+
 def op_execute_code(job):
     """Código arcpy arbitrario. Variables: arcpy, MAP/mapping, mxd (SNAPSHOT de la
-    sesión), df. Asignar RESULT. NO incluir '# -*- coding -*-' (llega unicode).
+    sesión), df. Asignar RESULT (se acepta `result` en minúscula, con aviso).
 
     Sin snapshot en el job, `mxd` y `df` sencillamente no existen: el add-in solo
     copia el documento cuando el código lo necesita, porque copiarlo cuesta
     segundos o minutos en sesiones grandes.
     """
-    code = job["params"].get("code", u"")
+    global _STDOUT_AL_FALLAR, _COPIA_USADA
+    code = _quitar_cabecera_coding(job["params"].get("code", u""))
     mxd = _abrir_mxd(job) if job.get("mxd") else None
     buff = _BufferUnicode()
     old_stdout = sys.stdout
     sys.stdout = buff
     ns = {"arcpy": arcpy, "MAP": MAP, "mapping": MAP, "RESULT": None}
+    copia_df = None
     if mxd is not None:
         ns["mxd"] = mxd
-        ns["df"] = mxd.activeDataFrame
+        # Un documento recién abierto y sin guardar ("Sin título") da una copia
+        # en la que `activeDataFrame` no existe: arcpy lanza NameError y el job
+        # moría en este preámbulo, antes de la primera línea del usuario, con
+        # `ping` en verde. Visto el 2026-09-21 con código que ni siquiera usaba
+        # `df` (abría otros .mxd por ruta). Sin data frame, `df` vale None.
+        try:
+            copia_df = mxd.activeDataFrame
+        except Exception:
+            copia_df = None
+        ns["df"] = copia_df
     _fase(u"ejecutando codigo")
     # `sys.exit()`, `exit()` y Ctrl-C NO son Exception (SystemExit y
     # KeyboardInterrupt cuelgan de BaseException): se escapaban del `except
@@ -328,12 +392,32 @@ def op_execute_code(job):
         interrumpido = ex
     except KeyboardInterrupt as ex:
         interrumpido = ex
+    except Exception:
+        _STDOUT_AL_FALLAR = buff.getvalue()
+        raise
     finally:
         sys.stdout = old_stdout
+        if mxd is not None:
+            # ¿Se usó la copia? Por cada nombre: el código lo menciona como variable
+            # Y al terminar sigue apuntando a la copia. Un bucle que hace
+            # `mxd = MAP.MapDocument(ruta)` sobre otros documentos lo reasigna, y un
+            # `df` que el código ni nombra no cuenta aunque siga intacto.
+            _COPIA_USADA = (
+                (bool(_NOMBRA_MXD.search(code)) and ns.get("mxd") is mxd)
+                or (copia_df is not None and bool(_NOMBRA_DF.search(code))
+                    and ns.get("df") is copia_df))
         del mxd
     stdout = buff.getvalue()
     if interrumpido is None:
-        return {"result": ns.get("RESULT"), "stdout": stdout}
+        resultado = ns.get("RESULT")
+        if resultado is None and ns.get("result") is not None:
+            # `result = ...` en minúscula es la convención del MCP de ArcGIS Pro, y
+            # la confusión entre los dos servidores costaba una llamada cada vez:
+            # volvía `result: null` con el valor calculado y tirado. Se devuelve.
+            return {"result": ns.get("result"), "stdout": stdout,
+                    "aviso_result": u"Asignaste `result` en minúscula; en este servidor la "
+                                    u"variable es RESULT. Se ha devuelto igual."}
+        return {"result": resultado, "stdout": stdout}
 
     if isinstance(interrumpido, KeyboardInterrupt):
         raise ValueError(u"El codigo fue interrumpido (KeyboardInterrupt) antes de "
@@ -793,6 +877,7 @@ def _escribir_salida(out_path, respuesta):
 
 
 def main():
+    global _MXD_ORIGINAL
     if len(sys.argv) != 3:
         sys.stderr.write("uso: runner.py <job.json> <out.json>\n")
         return 2
@@ -804,12 +889,23 @@ def main():
         op = OPS.get(job.get("op"))
         if op is None:
             raise ValueError(u"Operación desconocida: %s" % _u(job.get("op")))
+        _MXD_ORIGINAL = job.get("mxd_original")
         _fase(u"ejecutando op", _u(job.get("op")))
         respuesta = {"ok": True, "result": _adjuntar_rotas(op(job))}
     except Exception as ex:
         respuesta = {"ok": False,
                      "error": _u(ex.message if getattr(ex, "message", None) else ex),
                      "traceback": _u(traceback.format_exc())}
+        if _STDOUT_AL_FALLAR:
+            # Lo que el código ya había impreso: en un bucle, es lo único que dice
+            # por dónde iba y qué se llegó a hacer antes del fallo.
+            respuesta["stdout"] = _STDOUT_AL_FALLAR
+        if isinstance(ex, UnicodeError):
+            respuesta["pista"] = (
+                u"Error de codificación dentro de tu código, no del runner (la salida "
+                u"de print ya se captura como unicode). La causa típica es convertir a "
+                u"`str` un texto con tildes: `str(ex)`, `\"%s\" % ex` o `print ex` sobre "
+                u"una excepción de arcpy. Usa `unicode(ex)` o `ex.message`, y literales u\"...\".")
     try:
         _fase(u"serializando salida")
         _escribir_salida(out_path, respuesta)

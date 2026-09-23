@@ -382,7 +382,11 @@ def zoom_to_layer(nombre: str) -> dict:
 @mcp.tool()
 def export_pdf(salida: str, dpi: int = 300, sobrescribir: bool = True) -> dict:
     """
-    Exporta el layout actual de ArcMap a un PDF en la ruta `salida`.
+    Exporta el layout del documento ABIERTO en ArcMap a un PDF en la ruta `salida`.
+
+    Solo sabe exportar el documento abierto; la respuesta trae `documento` con su
+    ruta para que se pueda comprobar. Para exportar OTROS .mxd del disco (una serie
+    de planos), `export_mxd_lote`.
 
     `salida` debe ser una ruta ABSOLUTA a una carpeta que exista; `dpi` entre 24 y
     600. `sobrescribir` (True por defecto, que es lo que necesita una serie de
@@ -402,9 +406,14 @@ def export_pdf(salida: str, dpi: int = 300, sobrescribir: bool = True) -> dict:
 @mcp.tool()
 def export_jpg(salida: str, dpi: int = 230, sobrescribir: bool = True) -> dict:
     """
-    Exporta el layout actual de ArcMap a un JPG en la ruta `salida` (`dpi` 230 por
-    defecto, calidad JPEG 95). Útil para adjuntar planos por correo o incrustarlos
-    en documentos sin el peso de un PDF.
+    Exporta el layout del documento ABIERTO en ArcMap a un JPG en la ruta `salida`
+    (`dpi` 230 por defecto, calidad JPEG 95). Útil para adjuntar planos por correo
+    o incrustarlos en documentos sin el peso de un PDF.
+
+    Solo sabe exportar el documento abierto, y la respuesta trae `documento` con su
+    ruta: compruébalo. Para exportar OTROS .mxd del disco, `export_mxd_lote`. Un
+    argumento que la tool no declara (`mxd=`, `resolucion=`) es error, no se ignora.
+    Si ArcMap sigue dibujando (E_PENDING) se reintenta hasta 3 veces y se dice.
 
     Mismas reglas que `export_pdf`: ruta absoluta, `dpi` 24-600, `sobrescribir` y
     `sobrescrito` en la respuesta. Vale `.jpg` o `.jpeg`. La espera la gobierna
@@ -443,7 +452,8 @@ def execute_arcpy(code: str, usar_documento: bool | None = None,
     la operación y en documentos muy pesados puede llegar a tumbarlo.
 
     Solo se copia el documento cuando hace falta: se decide mirando si el código
-    menciona `mxd`, `df` o `mapping`. `usar_documento` fuerza esa decisión: `False`
+    menciona `mxd` o `df` como variable (`MAP`/`mapping` ya no cuentan: existen
+    siempre, con o sin copia). `usar_documento` fuerza esa decisión: `False`
     no copia nunca (más rápido, pero `mxd` y `df` no existirán), `True` copia
     siempre. Déjalo sin indicar para que se decida solo.
 
@@ -474,6 +484,17 @@ def execute_arcpy(code: str, usar_documento: bool | None = None,
     **contención de licencia** antes que del tamaño del fichero o de las fuentes de
     datos. Para inspeccionar sin abrir nada, `describe_mxd` (milisegundos, sin arcpy
     y sin licencia).
+
+    El resultado se devuelve asignando `RESULT` (en MAYÚSCULAS; `result` en minúscula,
+    la convención del MCP de ArcGIS Pro, también se devuelve, con un `aviso_result`).
+    La cabecera `# -*- coding: utf-8 -*-` se tolera. Si el código lanza una excepción,
+    la respuesta de error trae igualmente el `stdout` impreso hasta ese punto: en un
+    bucle sobre documentos, imprime una línea por documento hecho y sabrás por dónde
+    iba. Un `UnicodeEncodeError` suele ser `str(ex)` sobre un mensaje con tildes:
+    usa `unicode(ex)`.
+
+    Para EXPORTAR varios .mxd no uses un bucle aquí: un proceso arcpy que ya ha
+    exportado un layout no vuelve a exportar otro. Usa `export_mxd_lote`.
 
     NO uses `sys.exit()` ni `exit()`: el resultado se devuelve asignando `RESULT`.
     Si aun así sales, se te responde igual —con el `RESULT` que ya hubieras asignado
@@ -1641,6 +1662,182 @@ def audit_folder(ruta: str, con_capas: bool = True, timeout_por_documento: int =
     if aviso_capas:
         salida["aviso_capas"] = aviso_capas
     return salida
+
+
+@mcp.tool()
+def export_mxd_lote(mxds: list, formato: str = "jpg", dpi: int = 230,
+                    carpeta_salida: str = None, sobrescribir: bool = True,
+                    timeout_por_documento: int = 600) -> dict:
+    """
+    Exporta el layout de VARIOS .mxd del disco, cada uno en su propio proceso.
+
+    Es la herramienta para series de planos: `export_jpg`/`export_pdf` solo saben
+    exportar el documento ABIERTO en ArcMap, y un bucle en `execute_arcpy` no sirve,
+    porque **un proceso arcpy que ya ha exportado un layout no vuelve a exportar
+    otro** (medido el 2026-09-22: en un mismo proceso sale el primero y fallan los
+    siguientes). Aquí cada documento se exporta con un `python.exe` de ArcGIS
+    nuevo, que es la única vía que ha dado cero fallos. No usa el puente: funciona
+    con ArcMap abierto o cerrado, y no toca la sesión.
+
+    - `mxds`: lista de rutas ABSOLUTAS a .mxd.
+    - `formato`: "jpg" o "pdf". `dpi` entre 24 y 600 (230 por defecto, el de los
+      planos). El JPG sale con la calidad por defecto de arcpy, no con la 95 de
+      `export_jpg`: pesa más.
+    - `carpeta_salida`: dónde dejar los ficheros. Sin indicar, cada uno JUNTO A SU
+      .mxd y con su mismo nombre, que es como se entrega una serie.
+    - `sobrescribir` (True por defecto, como los otros export): con False, un
+      destino que ya existe se salta y se dice. Se exporta a un temporal y solo al
+      final se mueve encima: un fallo no se lleva el plano que había.
+    - `timeout_por_documento`: segundos por documento (600). Un documento con
+      fuentes de red que no responden muere solo, y el lote sigue.
+
+    Presupuesto: ~6 s de `import arcpy` por documento más lo que cueste dibujarlo;
+    planos de ~100 capas con WMS salen a ~25 s cada uno. Un lote de 150 son una hora
+    larga: pártelo si el cliente MCP corta antes.
+
+    Devuelve, POR DOCUMENTO, el .mxd, la salida, los bytes y si pisó algo. Mira los
+    bytes: un plano que pesa la mitad que sus vecinos es el primer síntoma de capas
+    rotas o de una vista que no es la que crees.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+    import time
+
+    formato = (formato or "jpg").lower().lstrip(".")
+    if formato not in ("jpg", "pdf"):
+        return {"ok": False, "error": "formato debe ser 'jpg' o 'pdf' (recibido: %r)." % formato}
+    try:
+        dpi = int(dpi)
+        timeout_por_documento = int(timeout_por_documento)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "dpi y timeout_por_documento deben ser enteros."}
+    if not 24 <= dpi <= 600:
+        return {"ok": False, "error": "dpi fuera de rango (24-600): %s." % dpi}
+    if timeout_por_documento < 1:
+        return {"ok": False, "error": "timeout_por_documento debe ser >= 1."}
+    if isinstance(mxds, str):
+        mxds = [mxds]
+    if not mxds:
+        return {"ok": False, "error": "mxds está vacía: no hay nada que exportar."}
+    if carpeta_salida and not os.path.isdir(carpeta_salida):
+        return {"ok": False, "error": "carpeta_salida no existe: %s" % carpeta_salida}
+
+    py27 = _python27_arcgis()
+    exportador = os.path.join(os.path.dirname(os.path.abspath(__file__)), "exportar_mxd.py")
+    if py27 is None or not os.path.isfile(exportador):
+        return {"ok": False, "error": "No se encuentra el Python 2.7 de ArcGIS (define "
+                                      "ARCMAP_PYTHON27) o src/exportar_mxd.py."}
+
+    resultados = []
+    resumen = {"exportados": 0, "fallidos": 0, "saltados": 0}
+    trabajos = tempfile.mkdtemp(prefix="arcmap-mcp-lote_")
+    try:
+        for i, bruto in enumerate(mxds):
+            ruta = os.path.abspath(os.path.expandvars(str(bruto)))
+            nombre = os.path.splitext(os.path.basename(ruta))[0] + "." + formato
+            destino = os.path.join(carpeta_salida or os.path.dirname(ruta), nombre)
+            fila = {"mxd": ruta, "salida": destino}
+            if not (os.path.isfile(ruta) and ruta.lower().endswith(".mxd")):
+                fila["error"] = "no existe o no es un .mxd"
+                resumen["fallidos"] += 1
+                resultados.append(fila)
+                continue
+            if os.path.exists(destino) and not sobrescribir:
+                fila["saltado"] = "el destino ya existe y sobrescribir=false"
+                resumen["saltados"] += 1
+                resultados.append(fila)
+                continue
+
+            trabajo = os.path.join(trabajos, "trabajo_%d.json" % i)
+            with open(trabajo, "w", encoding="utf-8") as f:
+                json.dump({"mxd": ruta, "salida": destino, "formato": formato, "dpi": dpi},
+                          f, ensure_ascii=False)
+            inicio = time.time()
+            try:
+                proc = subprocess.run([py27, exportador, trabajo], capture_output=True,
+                                      timeout=timeout_por_documento)
+                bruto_salida = proc.stdout.decode("utf-8", "replace").strip()
+                datos = json.loads(bruto_salida) if bruto_salida else {
+                    "ok": False, "error": "sin salida; stderr: %s"
+                    % proc.stderr.decode("utf-8", "replace")[-500:]}
+            except subprocess.TimeoutExpired:
+                datos = {"ok": False, "error": "TIMEOUT tras %s s (el proceso muere solo; el lote "
+                                               "sigue). Causa habitual: fuentes de red que no "
+                                               "responden." % timeout_por_documento}
+            except (json.JSONDecodeError, OSError) as exc:
+                datos = {"ok": False, "error": "no se pudo exportar: %s" % exc}
+
+            # No basta con que el hijo diga ok: el fichero tiene que estar, tener
+            # tamaño y ser de ESTA pasada. Un código de salida no prueba la salida.
+            if datos.get("ok"):
+                try:
+                    st = os.stat(destino)
+                    if st.st_size == 0 or st.st_mtime < inicio - 2:
+                        datos = {"ok": False, "error": "el proceso dijo ok pero %s no es de esta "
+                                                       "pasada o está vacío." % destino}
+                except OSError:
+                    datos = {"ok": False, "error": "el proceso dijo ok pero %s no existe." % destino}
+
+            if datos.get("ok"):
+                fila.update(bytes=datos.get("bytes"), sobrescrito=datos.get("sobrescrito"),
+                            segundos=datos.get("segundos"))
+                resumen["exportados"] += 1
+            else:
+                fila["error"] = datos.get("error")
+                if datos.get("fase"):
+                    fila["fase"] = datos["fase"]
+                resumen["fallidos"] += 1
+            resultados.append(fila)
+    finally:
+        shutil.rmtree(trabajos, ignore_errors=True)
+
+    return {"ok": resumen["fallidos"] == 0, "formato": formato, "dpi": dpi,
+            "total": len(mxds), "resumen": resumen, "documentos": resultados}
+
+
+# --------------------------------------------------------------------------- #
+# Argumentos estrictos.
+#
+# FastMCP descarta EN SILENCIO los argumentos que la tool no declara (su modelo
+# pydantic ignora los extra). El 2026-09-22 una llamada a export_jpg con
+# `mxd=<otro plano>` y `resolucion=230` —ninguno de los dos existe—
+# devolvió `ok: true` tras exportar el documento ABIERTO, que era otro plano de
+# otro monte. En un lote de 149 planos de cliente habría pisado 149 entregables con
+# el mismo dibujo. Un argumento que no se entiende tiene que ser un error.
+# --------------------------------------------------------------------------- #
+
+from pydantic import BaseModel, model_validator  # noqa: E402
+
+
+class _SinArgumentosDesconocidos(BaseModel):
+    @model_validator(mode="before")
+    @classmethod
+    def _rechazar_desconocidos(cls, datos):
+        if isinstance(datos, dict):
+            validos = {f.alias or n for n, f in cls.model_fields.items()}
+            sobran = sorted(set(datos) - validos)
+            if sobran:
+                raise ValueError(
+                    "argumento(s) que esta herramienta NO admite: %s. Se rechazan en vez "
+                    "de ignorarlos, porque ignorarlos hace otra cosa de la que pediste. "
+                    "Admite: %s." % (", ".join(sobran), ", ".join(sorted(validos)) or "(ninguno)"))
+        return datos
+
+
+def _argumentos_estrictos(servidor):
+    """Hace que TODAS las tools registradas rechacen argumentos desconocidos.
+
+    Toca atributos internos de FastMCP (`_tool_manager`, `fn_metadata`): si una
+    versión futura los cambia, `test_client_protocol` lo detecta.
+    """
+    for tool in servidor._tool_manager.list_tools():
+        base = tool.fn_metadata.arg_model
+        tool.fn_metadata.arg_model = type(base.__name__, (_SinArgumentosDesconocidos, base), {})
+        tool.parameters["additionalProperties"] = False
+
+
+_argumentos_estrictos(mcp)
 
 
 if __name__ == "__main__":

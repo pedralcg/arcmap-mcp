@@ -80,16 +80,35 @@ namespace ArcmapMcp.AddIn.Handlers
             bool sobrescrito = Parametros.ComprobarSobrescritura(salida, sobrescribir, "sobrescribir");
 
             string tmp = TemporalJuntoA(salida);
-            string aviso;
-            try
+            string aviso = null;
+            int intento = 0;
+            while (true)
             {
-                aviso = Exportar(export, tmp, dpi, quierenLayout, anchoPx, altoPx);
+                intento++;
+                try
+                {
+                    aviso = Exportar(export, tmp, dpi, quierenLayout, anchoPx, altoPx);
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    Borrar(tmp);
+                    if (!EsPendiente(ex))
+                        throw;
+                    if (intento >= IntentosPendiente)
+                        throw new InvalidOperationException(
+                            "ArcMap seguía dibujando el mapa tras " + IntentosPendiente + " intentos "
+                            + "(E_PENDING, 0x8000000A): el export no se ha hecho y el fichero de destino "
+                            + "no se ha tocado. Espera a que termine de pintar —capas WMS o rásters "
+                            + "pesados tardan— y repite la llamada.", ex);
+                    Log.Info("Export con E_PENDING (intento " + intento + " de " + IntentosPendiente
+                             + "): se deja dibujar a ArcMap y se reintenta.");
+                    DejarDibujar(EsperaPendiente);
+                }
             }
-            catch
-            {
-                Borrar(tmp);
-                throw;
-            }
+            if (intento > 1)
+                aviso = (aviso == null ? "" : aviso + " ") + "Salió al intento " + intento
+                        + ": ArcMap devolvió E_PENDING (mapa aún dibujando) en los anteriores.";
 
             try
             {
@@ -104,9 +123,17 @@ namespace ArcmapMcp.AddIn.Handlers
                     + salida + " (¿abierto en otro programa?): " + ex.Message, ex);
             }
 
+            // QUÉ se ha exportado. Estas tools exportan SIEMPRE el documento abierto, y
+            // hasta la 2.12.0 la respuesta no lo decía: el 2026-09-22 una llamada con un
+            // `mxd=` que la tool no admite exportó en silencio OTRO plano con `ok: true`,
+            // y solo el tamaño del fichero lo delató. Un export que no dice qué ha
+            // exportado no es verificable.
+            string documento = null;
+            try { documento = ArcSession.MxdPath(ArcSession.App()); } catch { }
             var inner = new JObject
             {
                 ["salida"] = salida,
+                ["documento"] = documento ?? "(documento sin guardar)",
                 ["dpi"] = dpi,
                 ["sobrescrito"] = sobrescrito
             };
@@ -116,6 +143,41 @@ namespace ArcmapMcp.AddIn.Handlers
             if (aviso != null)
                 inner["aviso"] = aviso;
             return Protocol.Result(inner);
+        }
+
+        // E_PENDING (0x8000000A, "el dato necesario ... no está disponible todavía"):
+        // el mapa sigue dibujando. Visto el 2026-09-21 en ~4 de ~11 pases de la
+        // regresión, siempre en export_jpg, SIN disparador identificado (tres hipótesis
+        // probadas y refutadas). Este reintento TAPA EL SÍNTOMA, no explica la causa:
+        // que nadie lo lea como entendido. Acotado en intentos, nunca indefinido.
+        private const int EPending = unchecked((int)0x8000000A);
+        private const int IntentosPendiente = 3;
+        private static readonly TimeSpan EsperaPendiente = TimeSpan.FromSeconds(2);
+
+        private static bool EsPendiente(Exception ex)
+        {
+            for (Exception e = ex; e != null; e = e.InnerException)
+            {
+                var com = e as System.Runtime.InteropServices.COMException;
+                if (com != null && com.ErrorCode == EPending)
+                    return true;
+                if (e.HResult == EPending)
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>Espera BOMBEANDO mensajes. Esto corre en el hilo de ArcMap: un
+        /// Thread.Sleep lo congelaría y el mapa no podría acabar de dibujar, que es
+        /// justo lo que se está esperando.</summary>
+        private static void DejarDibujar(TimeSpan espera)
+        {
+            var reloj = System.Diagnostics.Stopwatch.StartNew();
+            while (reloj.Elapsed < espera)
+            {
+                System.Windows.Forms.Application.DoEvents();
+                System.Threading.Thread.Sleep(50);
+            }
         }
 
         /// <summary>Temporal en la MISMA carpeta que el destino: así el movimiento

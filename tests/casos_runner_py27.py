@@ -526,6 +526,162 @@ def least_cost_path_usa_el_backlink_unico():
 
 
 # --------------------------------------------------------------------------- #
+# 2026-09-23 — execute_code: cabecera coding, result, stdout al fallar,
+# documento sin data frame y aviso de capas rotas que no viene a cuento.
+# --------------------------------------------------------------------------- #
+
+def _job_por_main(job):
+    """Pasa un job por runner.main() de punta a punta y devuelve el out.json."""
+    import io
+    carpeta = tempfile.mkdtemp(prefix="runner_main_")
+    job_path = os.path.join(carpeta, "job.json")
+    out_path = os.path.join(carpeta, "out.json")
+    with io.open(job_path, "w", encoding="utf-8") as f:
+        texto = json.dumps(job, ensure_ascii=False)
+        f.write(texto.decode("utf-8") if isinstance(texto, str) else texto)
+    argv = sys.argv
+    sys.argv = ["runner.py", job_path, out_path]
+    try:
+        runner.main()
+    finally:
+        sys.argv = argv
+    with io.open(out_path, "r", encoding="utf-8") as f:
+        datos = json.loads(f.read())
+    shutil.rmtree(carpeta, ignore_errors=True)
+    return datos
+
+
+def _reiniciar_estado():
+    runner._STDOUT_AL_FALLAR = None
+    runner._ROTAS_EN_COPIA = None
+    runner._COPIA_USADA = True
+    runner._MXD_ORIGINAL = None
+
+
+class _Capa(object):
+    def __init__(self, nombre):
+        self.name = nombre
+
+
+class _DocSinDataFrame(object):
+    """Lo que da arcpy con la copia de un documento "Sin título"."""
+    @property
+    def activeDataFrame(self):
+        raise NameError("The attribute 'activeDataFrame' is not supported on this "
+                        "instance of MapDocument.")
+
+
+class _DocConDataFrame(object):
+    activeDataFrame = object()
+
+
+def _con_documento(doc, rotas):
+    """Stub de MapDocument/ListBrokenDataSources y un .mxd de mentira en disco."""
+    fd, ruta = tempfile.mkstemp(suffix=".mxd", dir=_TMP)
+    os.close(fd)
+    # Otra ruta, otro documento: como arcpy de verdad.
+    ARCPY.mapping.MapDocument = lambda r: doc if r == ruta else _DocConDataFrame()
+    ARCPY.mapping.ListBrokenDataSources = lambda d: [_Capa(n) for n in rotas]
+    return ruta
+
+
+@caso
+def coding_cabecera_se_tolera():
+    _reiniciar_estado()
+    codigo = u'# -*- coding: utf-8 -*-\nRESULT = u"monta\xf1a"'
+    salida = runner.op_execute_code({"params": {"code": codigo}})
+    assert salida["result"] == u"monta\xf1a", salida
+
+
+@caso
+def coding_en_segunda_linea_y_numeros_de_linea_intactos():
+    _reiniciar_estado()
+    codigo = u'#!python\n# vim: set fileencoding=latin-1 :\nx = 1\nraise ValueError("linea4")'
+    try:
+        runner.op_execute_code({"params": {"code": codigo}})
+    except ValueError:
+        tb = traceback.format_exc()
+        assert u"line 4" in tb, tb
+        return
+    raise AssertionError("se esperaba ValueError")
+
+
+@caso
+def coding_en_tercera_linea_no_se_toca():
+    """PEP 263 solo mira las dos primeras: más abajo es un comentario normal."""
+    assert runner._quitar_cabecera_coding(u"a\nb\n# coding: utf-8") == u"a\nb\n# coding: utf-8"
+
+
+@caso
+def result_minuscula_se_devuelve_con_aviso():
+    _reiniciar_estado()
+    salida = runner.op_execute_code({"params": {"code": u'result = [1, 2]'}})
+    assert salida["result"] == [1, 2], salida
+    assert u"RESULT" in salida["aviso_result"], salida
+
+
+@caso
+def result_mayuscula_manda_sobre_minuscula():
+    _reiniciar_estado()
+    salida = runner.op_execute_code({"params": {"code": u'result = 1\nRESULT = 2'}})
+    assert salida["result"] == 2 and "aviso_result" not in salida, salida
+
+
+@caso
+def stdout_se_conserva_cuando_el_codigo_falla():
+    """El bucle que falla en el 5º documento debe decir que los 4 primeros salieron."""
+    _reiniciar_estado()
+    codigo = u'for i in range(4):\n    print u"OK plano %d" % i\nraise RuntimeError("plano 5")'
+    datos = _job_por_main({"op": "execute_code", "params": {"code": codigo}})
+    assert datos["ok"] is False, datos
+    assert u"OK plano 3" in datos["stdout"], datos
+
+
+@caso
+def unicode_error_trae_pista():
+    _reiniciar_estado()
+    codigo = u'print "voy"\nstr(ValueError(u"acci\xf3n"))'
+    datos = _job_por_main({"op": "execute_code", "params": {"code": codigo}})
+    assert datos["ok"] is False, datos
+    assert u"unicode(ex)" in datos["pista"], datos
+    assert u"voy" in datos["stdout"], datos
+
+
+@caso
+def documento_sin_data_frame_no_bloquea():
+    _reiniciar_estado()
+    ruta = _con_documento(_DocSinDataFrame(), [])
+    salida = runner.op_execute_code({"params": {"code": u'RESULT = df is None'},
+                                     "mxd": ruta})
+    assert salida["result"] is True, salida
+
+
+@caso
+def rotas_se_omiten_si_el_codigo_abre_otros_mxd():
+    _reiniciar_estado()
+    ruta = _con_documento(_DocConDataFrame(), [u"ENP", u"ZEPA"])
+    codigo = u'mxd = MAP.MapDocument(r"C:\\otro\\plano.mxd")\nRESULT = "hecho"'
+    datos = _job_por_main({"op": "execute_code", "params": {"code": codigo},
+                           "mxd": ruta, "mxd_original": u"C:\\p\\PlanoAbierto.mxd"})
+    assert datos["ok"] is True, datos
+    assert "aviso_capas_rotas" not in datos["result"], datos
+    assert "capas_rotas_en_copia" not in datos["result"], datos
+
+
+@caso
+def rotas_nombran_el_documento_si_se_usa_la_copia():
+    _reiniciar_estado()
+    rotas = [u"capa%d" % i for i in range(8)]
+    ruta = _con_documento(_DocConDataFrame(), rotas)
+    datos = _job_por_main({"op": "execute_code", "params": {"code": u'RESULT = mxd is not None'},
+                           "mxd": ruta, "mxd_original": u"C:\\p\\PlanoAbierto.mxd"})
+    aviso = datos["result"]["aviso_capas_rotas"]
+    assert u"PlanoAbierto.mxd" in aviso, aviso
+    assert u"y 3 más" in aviso and u"capa7" not in aviso, aviso
+    assert datos["result"]["capas_rotas_en_copia"] == 8, datos
+
+
+# --------------------------------------------------------------------------- #
 
 def main():
     fallos = [r for r in RESULTADOS if not r["ok"]]
