@@ -30,6 +30,7 @@ namespace ArcmapMcp.AddIn.Handlers
                 throw new ArgumentException("'posicion' debe ser TOP, BOTTOM o AUTO_ARRANGE.");
             string grupo = (string)parameters["grupo"];
             string nombre = (string)parameters["nombre"];
+            bool enLeyenda = Parametros.LeerBool(parameters["en_leyenda"], "en_leyenda", true);
 
             IMxDocument doc;
             IMap map = MapHandlers.FocusMap(out doc);
@@ -42,28 +43,7 @@ namespace ArcmapMcp.AddIn.Handlers
             if (!string.IsNullOrEmpty(nombre))
                 nueva.Name = nombre;
 
-            IMapLayers mapLayers = (IMapLayers)map;
-
-            if (!string.IsNullOrEmpty(grupo))
-            {
-                IGroupLayer grp = MapHandlers.FindLayer(map, grupo) as IGroupLayer;
-                if (grp == null)
-                    throw new ArgumentException("La capa indicada en 'grupo' no es una capa de grupo: " + grupo);
-                if (posicion == "AUTO_ARRANGE")
-                    mapLayers.InsertLayerInGroup(grp, nueva, true, -1);
-                else
-                    mapLayers.InsertLayerInGroup(grp, nueva, false,
-                        posicion == "BOTTOM" ? ((ICompositeLayer)grp).Count : 0);
-            }
-            else
-            {
-                if (posicion == "AUTO_ARRANGE")
-                    mapLayers.InsertLayer(nueva, true, -1);
-                else
-                    mapLayers.InsertLayer(nueva, false, posicion == "BOTTOM" ? map.LayerCount : 0);
-            }
-
-            MapHandlers.NotificarCambioContenido(map, doc);
+            int leyendasAparte = Insertar(map, doc, nueva, grupo, posicion, enLeyenda);
             ICompositeLayer comp = nueva as ICompositeLayer;
             return Protocol.Result(new JObject
             {
@@ -72,8 +52,110 @@ namespace ArcmapMcp.AddIn.Handlers
                 ["posicion"] = posicion,
                 ["grupo"] = grupo,
                 ["es_grupo"] = comp != null,
-                ["capas_dentro"] = comp != null ? (JToken)comp.Count : null
+                ["capas_dentro"] = comp != null ? (JToken)comp.Count : null,
+                ["en_leyenda"] = enLeyenda,
+                ["leyendas_sin_tocar"] = enLeyenda ? null : (JToken)leyendasAparte
             });
+        }
+
+        /// <summary>
+        /// add_group — crea una capa de grupo vacía. arcpy no sabe (en el bloque 03 de
+        /// ID2018 hubo que guardar un grupo vacío existente como .lyr y usarlo de
+        /// plantilla); en ArcObjects es un GroupLayer nuevo.
+        /// </summary>
+        public static JObject AddGroup(JObject parameters)
+        {
+            string nombre = (string)parameters["nombre"];
+            if (string.IsNullOrEmpty(nombre))
+                throw new ArgumentException("Indica 'nombre' para el grupo nuevo.");
+            string posicion = ((string)parameters["posicion"] ?? "TOP").ToUpperInvariant();
+            if (posicion != "TOP" && posicion != "BOTTOM")
+                throw new ArgumentException("'posicion' debe ser TOP o BOTTOM.");
+            string padre = (string)parameters["grupo"];
+            bool visible = Parametros.LeerBool(parameters["visible"], "visible", true);
+            bool enLeyenda = Parametros.LeerBool(parameters["en_leyenda"], "en_leyenda", true);
+
+            IMxDocument doc;
+            IMap map = MapHandlers.FocusMap(out doc);
+
+            // Un homónimo no impide crearlo, pero a partir de ahí 'grupo' y el resto de
+            // tools pedirán la ruta: se avisa para que no sea una sorpresa.
+            int homonimos = MapHandlers.Coincidencias(MapHandlers.CapasConRuta(map), nombre).Count;
+
+            ILayer grp = new GroupLayerClass();
+            grp.Name = nombre;
+            grp.Visible = visible;
+            int leyendasAparte = Insertar(map, doc, grp, padre, posicion, enLeyenda);
+
+            var r = new JObject
+            {
+                ["grupo"] = nombre,
+                ["dentro_de"] = padre,
+                ["posicion"] = posicion,
+                ["visible"] = visible,
+                ["en_leyenda"] = enLeyenda,
+                ["leyendas_sin_tocar"] = enLeyenda ? null : (JToken)leyendasAparte
+            };
+            if (homonimos > 0)
+                r["aviso"] = "Ya había " + homonimos + " capa(s) llamada(s) '" + nombre
+                    + "': para referirte a este grupo usa su ruta (list_layers la muestra).";
+            return Protocol.Result(r);
+        }
+
+        /// <summary>
+        /// Inserta la capa en el mapa o en un grupo. Con `enLeyenda` = false apaga el
+        /// AutoAdd de las leyendas de ESE mapa mientras entra y lo deja como estaba:
+        /// con AutoAdd (lo normal) cada capa añadida entra también en la leyenda del
+        /// plano, y en uno que ya va justo la desborda. Devuelve cuántas leyendas se
+        /// han dejado sin tocar.
+        /// </summary>
+        private static int Insertar(IMap map, IMxDocument doc, ILayer nueva, string grupo,
+                                    string posicion, bool enLeyenda)
+        {
+            IMapLayers mapLayers = (IMapLayers)map;
+            IGroupLayer grp = null;
+            if (!string.IsNullOrEmpty(grupo))
+            {
+                grp = MapHandlers.FindLayer(map, grupo) as IGroupLayer;
+                if (grp == null)
+                    throw new ArgumentException("La capa indicada en 'grupo' no es una capa de grupo: " + grupo);
+            }
+
+            var leyendas = enLeyenda ? new System.Collections.Generic.List<ILegend>()
+                                     : LayoutHandlers.LeyendasDelMapa(doc, map);
+            var autoAdd = new System.Collections.Generic.List<bool>();
+            foreach (ILegend lg in leyendas)
+            {
+                autoAdd.Add(lg.AutoAdd);
+                lg.AutoAdd = false;
+            }
+            try
+            {
+                if (grp != null)
+                {
+                    if (posicion == "AUTO_ARRANGE")
+                        mapLayers.InsertLayerInGroup(grp, nueva, true, -1);
+                    else
+                        mapLayers.InsertLayerInGroup(grp, nueva, false,
+                            posicion == "BOTTOM" ? ((ICompositeLayer)grp).Count : 0);
+                }
+                else
+                {
+                    if (posicion == "AUTO_ARRANGE")
+                        mapLayers.InsertLayer(nueva, true, -1);
+                    else
+                        mapLayers.InsertLayer(nueva, false, posicion == "BOTTOM" ? map.LayerCount : 0);
+                }
+                // Dentro del try: la leyenda reacciona al aviso de cambio de contenido,
+                // y tiene que llegarle con el AutoAdd aún apagado.
+                MapHandlers.NotificarCambioContenido(map, doc);
+            }
+            finally
+            {
+                for (int i = 0; i < leyendas.Count; i++)
+                    leyendas[i].AutoAdd = autoAdd[i];
+            }
+            return leyendas.Count;
         }
 
         /// <summary>

@@ -14,7 +14,7 @@ Cliente IA (Claude Code / Desktop / Gemini / Antigravity / OpenCode)
         │  protocolo MCP (stdio)
         ▼
 arcmap_mcp_server.py        ← servidor MCP externo (Python 3 + FastMCP): los schemas
-        │                      de las 58 herramientas y el contrato con el cliente
+        │                      de las 60 herramientas y el contrato con el cliente
         │  socket TCP local  127.0.0.1:27179
         ▼
 Add-in .NET (C#)            ← DENTRO de ArcMap: TcpListener + ArcObjects nativo
@@ -79,19 +79,19 @@ arcmap-mcp/
 
 ## Herramientas MCP
 
-**58 herramientas** sobre ArcMap 10.5 (ver `docs/TOOLS.md` para el catálogo completo con
+**60 herramientas** sobre ArcMap 10.5 (ver `docs/TOOLS.md` para el catálogo completo con
 firmas, ejemplos y los matices de ejecución de cada grupo).
 
 Qué significa «probado», que conviene decirlo con precisión:
 
-- `tests/regresion_sesion_viva.py` hace **106 comprobaciones contra una sesión de ArcMap
-  real** y cubre unas **34 de las 58** tools, con sus casos de error. 🔴 **Modifica el
+- `tests/regresion_sesion_viva.py` hace **114 comprobaciones contra una sesión de ArcMap
+  real** y cubre unas **36 de las 60** tools, con sus casos de error. 🔴 **Modifica el
   documento abierto** (añade capas, cambia simbología, lanza geoprocesos): se lanza contra
   un mxd de pruebas, nunca contra un proyecto.
 - `tests/regresion_ddp.py` cubre las tres tools del atlas (Data Driven Pages) con **14
   comprobaciones**, y es **de solo lectura** sobre el documento: necesita un mxd con atlas
   habilitado, que en la práctica es siempre uno de producción. Exporta a `C:\temp`.
-- Otros **50 tests** corren sin ArcMap (protocolo, argumentos, runner Python 2.7 —con 38
+- Otros **56 tests** corren sin ArcMap (protocolo, argumentos, runner Python 2.7 —con 38
   casos propios—, instalador).
 - `export_mxd_lote` no pasa por el puente y no está en la regresión: se probó sobre planos
   reales, con salida idéntica byte a byte a la exportada a mano.
@@ -441,10 +441,10 @@ admite `1024`–`65535`; un valor inválido se ignora con aviso en el log y se v
 
 ## Estado
 - [x] Add-in .NET nativo (ArcObjects vía CLR, sin runtime Python embebido)
-- [x] 58 herramientas, incluido el análisis ambiental (índices espectrales, hidrología,
+- [x] 60 herramientas, incluido el análisis ambiental (índices espectrales, hidrología,
       curvas, perfiles 3D y ruta de mínimo coste) y series de planos reales de decenas
-      de páginas. Cobertura automática: 106 comprobaciones en sesión viva sobre ~34 de
-      ellas, más 50 tests sin ArcMap (ver «Herramientas MCP»)
+      de páginas. Cobertura automática: 114 comprobaciones en sesión viva sobre ~36 de
+      ellas, más 56 tests sin ArcMap (ver «Herramientas MCP»)
 - [x] Geoprocesos arcpy fuera de proceso: la GUI de ArcMap no se congela
 - [x] Cancelación de render/exports con ESC (`ITrackCancel`)
 - [x] Registrable en 5 clientes (Claude Code/Desktop, Gemini CLI, Antigravity, OpenCode)

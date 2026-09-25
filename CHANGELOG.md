@@ -3,6 +3,42 @@
 Formato inspirado en [Keep a Changelog](https://keepachangelog.com/es/); versionado
 [SemVer](https://semver.org/lang/es/).
 
+## [2.14.0] - 2026-09-25
+
+Tres huecos que aparecieron editando series de planos de verdad: meter capas **sin que se
+cuelen en la leyenda**, crear grupos, y cambiar lo que enseña una entrada de leyenda **sin
+cambiarle el aspecto**. Además, el log dice por fin **quién tiene el puerto** cuando el puente
+no puede arrancar.
+
+Verificado en sesión viva: **114/114** en la regresión general, con 8 comprobaciones nuevas, y
+56 tests sin ArcMap. La prueba de `en_leyenda=False` lleva control: una capa añadida después con
+los valores por defecto **sí** entra en la leyenda (45 → 45 → 46 entradas), así que el AutoAdd
+queda como estaba.
+
+### Añadido
+- **`add_group`**: crea una capa de grupo vacía, en la raíz o dentro de otro grupo, encendida o
+  apagada. Con arcpy no se puede; hasta ahora había que guardar un grupo vacío existente como
+  `.lyr` y usarlo de plantilla. Si ya hay una capa con ese nombre, lo crea igual y avisa.
+- **`add_layer(..., en_leyenda=False)`** (y lo mismo en `add_group`): las leyendas de ArcMap
+  traen activado «añadir capas nuevas», así que cada capa añadida entraba en la leyenda del
+  plano y en uno que ya iba justo la desbordaba. Ahora se apaga solo mientras entra esa capa y
+  se deja como estaba.
+- **`set_legend_item`**: enciende o apaga el nombre de capa, el encabezado y las etiquetas de la
+  entrada de una capa en la leyenda. Solo toca esos interruptores de `ILegendItem`: la vía de
+  arcpy (`updateItem` con un estilo de ESRI.style) cambia también las fuentes, y en un plano real
+  puso el nombre en negrita grande. La respuesta devuelve las fuentes **leídas** para que se vea
+  que no han cambiado. Si la capa está en varias leyendas, no elige: se desempata con `leyenda`
+  o `indice`.
+
+### Cambiado
+- **Log: el PID en cada carga de la extensión**, y cuando el puerto está ocupado, **qué proceso
+  lo tiene** (PID, ejecutable y título de ventana, vía `GetExtendedTcpTable`). Antes el aviso
+  pedía buscar un `<PID>` a mano, y en el log había más de cien fallos de puerto sin forma de
+  distinguir un segundo ArcMap legítimo de uno zombi. Si el dueño no tiene ventana, el mensaje
+  lo señala como zombi y da el `Stop-Process -Id` con el número real.
+- Ese caso pasa de `[ERROR]` con traza a **`[WARN ]`**, y no suma al contador de errores del
+  botón «Estado»: es previsto, y eran 260 de los 1.483 errores del log, tapando los de verdad.
+
 ## [2.13.0] - 2026-09-23
 
 Lo que destapó el trabajo real de dos días con series de planos (lotes de 88 y de 149
