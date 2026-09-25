@@ -55,7 +55,7 @@ arcmap-mcp/
 ├── addin/    ArcmapMcp.AddIn/       ← código C# del add-in (+ runner.py embebido)
 │             dist/arcmap-mcp.esriaddin  ← add-in listo para instalar
 │             build.ps1              ← build sin Visual Studio (dotnet CLI)
-├── docs/     INSTALL.md · TOOLS.md · ROADMAP.md
+├── docs/     INSTALL.md · TOOLS.md · ROADMAP.md · img/ (capturas)
 ├── tests/    test_client_protocol.py  ← tests automáticos (no necesitan ArcMap)
 │             test_runner_py27.py      ← el runner y el auditor bajo Python 2.7, sin arcpy
 │             regresion_sesion_viva.py ← barrido manual del catálogo (ArcMap vivo)
@@ -218,8 +218,15 @@ Por defecto configura **todos los clientes IA detectados**. Para elegir:
 
 ### 3. Arrancar y verificar
 
-Abre ArcMap: en la barra **arcmap-mcp** pon el desplegable en **«Autoarranque: Sí»** y
-el puente se levantará solo en esta sesión y en todas las siguientes. Después:
+Abre ArcMap. La barra no aparece sola la primera vez: actívala en **Customize ▸ Toolbars
+▸ arcmap-mcp** (ArcMap recuerda después dónde la dejas).
+
+![Barra arcmap-mcp en ArcMap](docs/img/barra-addin.png)
+
+De izquierda a derecha: **Iniciar** y **Detener** el puente, **Estado**, el desplegable de
+**Autoarranque**, **Reportar** (un problema) y **Acerca de**. Pon el desplegable en
+**«Autoarranque: Sí»** y el puente se levantará solo en esta sesión y en todas las
+siguientes. Después:
 
 ```powershell
 .\install.ps1 -SoloVerificar    # comprueba la instalación y hace un ping real al puente
@@ -227,6 +234,18 @@ el puente se levantará solo en esta sesión y en todas las siguientes. Después
 
 Reinicia por completo tu cliente IA (el registro de servidores MCP se lee al arrancar) y
 pídele la herramienta `ping`. Para desinstalarlo todo: `.\install.ps1 -Desinstalar`.
+
+**Si algo no va, el botón Estado** dice si el puente está activo, qué versión del add-in
+está cargada (la que ArcMap tiene instalada, que es la que cuenta), si hay una más nueva,
+cuántas peticiones y errores lleva la sesión y dónde está el log:
+
+![Diálogo Estado del puente](docs/img/estado-puente.png)
+
+**Acerca de** abre en el navegador una ficha con la versión, el estado de la sesión,
+ejemplos de qué pedirle al asistente y los enlaces para actualizar o informar de un
+problema:
+
+<img src="docs/img/acerca-de.png" alt="Ficha Acerca de de arcmap-mcp" width="480">
 
 ### 4. Actualizar
 
