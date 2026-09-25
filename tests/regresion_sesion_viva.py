@@ -472,7 +472,13 @@ if texto_campo and inicial.get("ok"):
     ini = inicial["result"]
     sys.stdout.write("  motor del mapa: %s | clases: %d | campo: %s%s"
                      % (ini["motor"], len(ini["clases"]), texto_campo, chr(10)))
-    t("zoom_to_layer", {"capa": NOMBRE_VEC})
+    # UNA entidad a escala de plano, no la capa entera: zoom_to_layer la encuadra a
+    # escala regional, y en un plano real (WMS, curvas de nivel etiquetadas, Maplex)
+    # el export que viene despues se quedo 20 min dibujando sin dejarse cancelar
+    # (2026-09-25). set_extent con una seleccion encuadra la seleccion.
+    t("select_by_attribute", {"capa": NOMBRE_VEC, "where": "FID = 0"})
+    t("set_extent", {"capa": NOMBRE_VEC}, nota="(una entidad)")
+    t("clear_selection", {"capa": NOMBRE_VEC})
     r = t("set_labels", {"capa": NOMBRE_VEC, "expresion": "[" + texto_campo + "]", "tamano": 11,
                          "color": "#1E5C2E", "halo": 1.5, "color_halo": [255, 255, 255]})
     if r and r.get("ok"):
@@ -490,11 +496,19 @@ if texto_campo and inicial.get("ok"):
             else:
                 fallos.append(("set_labels", nombre + ": " + json.dumps(res)[:200]))
             sys.stdout.write("  [%s] %s%s" % ("OK " if bien else "FALLO", nombre, chr(10)))
-    on = ETQ_DIR + SEP + "etiquetas_on.png"
-    off = ETQ_DIR + SEP + "etiquetas_off.png"
-    t("export_view_png", {"salida": on, "dpi": 96})
+    # ESPERA antes de cada export, y no es adorno: un export lanzado justo despues de
+    # cambiar etiquetas encuentra el mapa dibujando (E_PENDING), y la espera del
+    # add-in, que bombea mensajes, NO deja terminar un dibujado con etiquetas: ArcMap
+    # se quedo colgado tres veces el 2026-09-25 (Esc no lo saca). Con 20 s de margen
+    # sale en 0,8 s. Quitar la espera cuando el export sepa esperar (pendiente E_PENDING).
+    import time  # noqa: E402
+    on = ETQ_DIR + SEP + "etiquetas_on.jpg"
+    off = ETQ_DIR + SEP + "etiquetas_off.jpg"
+    time.sleep(20)
+    t("export_jpg", {"salida": on, "dpi": 72})
     t("set_labels", {"capa": NOMBRE_VEC, "activar": False}, nota="(apagar)")
-    t("export_view_png", {"salida": off, "dpi": 96})
+    time.sleep(20)
+    t("export_jpg", {"salida": off, "dpi": 72})
     try:
         pinta = huella(on) != huella(off)
     except OSError:
@@ -503,7 +517,7 @@ if texto_campo and inicial.get("ok"):
         ok_n += 1
     else:
         fallos.append(("set_labels", "la vista con etiquetas es identica a la vista sin ellas"))
-    sys.stdout.write("  [%s] las etiquetas se dibujan (PNG on != off, motor %s)%s"
+    sys.stdout.write("  [%s] las etiquetas se dibujan (JPG on != off, motor %s)%s"
                      % ("OK " if pinta else "FALLO", ini["motor"], chr(10)))
     r = t("set_labels", {"capa": NOMBRE_VEC, "halo": 0}, nota="(halo 0 lo quita)")
     if r and r.get("ok") and r["result"]["clases"][0]["halo"] != 0:
