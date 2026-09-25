@@ -471,19 +471,18 @@ def execute_arcpy(code: str, usar_documento: bool | None = None,
       - Abrir el documento en sí: **menos de un segundo** (0,7 s medidos sobre un
         .mxd de 36 capas el 2026-08-27). Abrir NO es caro.
 
-    Lo caro es otra cosa, y es lo que llevaba mal documentado desde el principio:
-    **el arcpy standalone se BLOQUEA al abrir un documento mientras otra cosa tiene
-    tomada la licencia de Desktop.** El mismo .mxd que abre en 0,7 s con ArcMap
-    cerrado seguía bloqueado a los 180 s con ArcMap abierto. El `import arcpy`
-    funciona igual en los dos casos, así que el bloqueo no se ve venir. Ahí es donde
-    salen los 324,5 s que este docstring dio durante un tiempo como coste normal de
-    abrir, y los timeouts de 900 s.
+    Lo caro, cuando pasa, es un **bloqueo al abrir** que no se ve venir: el
+    `import arcpy` va normal y la espera aparece en `MapDocument()`. De ahí salieron
+    los 324,5 s que este docstring dio durante un tiempo como coste normal de abrir, y
+    los timeouts de 900 s. El 2026-08-27 el mismo .mxd pasó de 0,7 s a más de 180 s
+    bloqueado, y se atribuyó a que ArcMap tenía la licencia tomada. **Esa causa está
+    descartada**: el 2026-09-25 abrió igual (~8,5 s) con ArcMap cerrado, abierto con
+    ese mismo documento y congelado. La causa real sigue sin identificar.
 
-    Dentro del puente esto normalmente no muerde, porque el runner corre bajo la
-    propia sesión de ArcMap. Si ves esperas largas abriendo documentos, sospecha de
-    **contención de licencia** antes que del tamaño del fichero o de las fuentes de
-    datos. Para inspeccionar sin abrir nada, `describe_mxd` (milisegundos, sin arcpy
-    y sin licencia).
+    Si ves esperas largas abriendo documentos, no subas el timeout a ciegas: mira si
+    hay `python.exe` de ArcGIS huérfanos de llamadas anteriores y si responden las
+    unidades de red de las capas. Para inspeccionar sin abrir nada, `describe_mxd`
+    (milisegundos, sin arcpy y sin licencia).
 
     El resultado se devuelve asignando `RESULT` (en MAYÚSCULAS; `result` en minúscula,
     la convención del MCP de ArcGIS Pro, también se devuelve, con un `aviso_result`).
@@ -1607,23 +1606,10 @@ _SUMAS_AUDITOR = ("num_rotas_en_plano", "num_rotas", "num_con_query_en_plano",
                   "num_con_query", "num_en_plano_desconocido")
 
 
-def _arcmap_esta_abierto():
-    """True si hay un ArcMap.exe corriendo. None si no se pudo averiguar.
-
-    Importa mucho para `audit_folder`: el arcpy standalone **se bloquea al abrir un
-    documento mientras ArcMap tiene la licencia tomada**. Medido el 2026-08-27 sobre
-    el mismo .mxd: con ArcMap cerrado abre en 0,7 s; con ArcMap abierto sigue
-    bloqueado a los 180 s. El `import arcpy` funciona igual en los dos casos (~6 s),
-    así que el bloqueo NO se ve venir: aparece en `MapDocument()`.
-    """
-    try:
-        import subprocess
-        salida = subprocess.run(
-            ["tasklist", "/FI", "IMAGENAME eq ArcMap.exe", "/NH"],
-            capture_output=True, timeout=20)
-        return b"ArcMap.exe" in salida.stdout
-    except Exception:
-        return None
+# Timeouts SEGUIDOS tras los que `audit_folder` deja de abrir documentos. Si algo
+# bloquea al arcpy standalone para todos (lo que se vio el 2026-08-27, de causa sin
+# identificar), sin este corte una carpeta de 200 planos costaría 200 timeouts.
+_CORTE_TIMEOUTS_SEGUIDOS = 2
 
 
 def _python27_arcgis():
@@ -1665,18 +1651,22 @@ def audit_folder(ruta: str, con_capas: bool = True, timeout_por_documento: int =
        documento se atasca, muere su proceso y la auditoría continúa marcándolo
        como `timeout`.
 
-    ⚠️ **CIERRA ARCMAP ANTES DE USAR `con_capas`.** El arcpy standalone se
-    **bloquea al abrir un documento mientras ArcMap tiene la licencia tomada**.
-    Medido el 2026-08-27 sobre el mismo .mxd: con ArcMap cerrado abre en **0,7 s**;
-    con ArcMap abierto sigue bloqueado a los **180 s**. Y no se ve venir, porque
-    `import arcpy` funciona igual en ambos casos: el bloqueo aparece en
-    `MapDocument()`. Por eso esta herramienta comprueba si ArcMap está corriendo y
-    se niega a hacer la pasada 2, salvo que pases
-    `forzar_con_arcmap_abierto=True`.
+    **Funciona con ArcMap abierto.** Hasta la 2.14.0 se negaba a la pasada 2 con
+    ArcMap corriendo, por una medición del 2026-08-27 (mismo .mxd: 0,7 s con ArcMap
+    cerrado, bloqueado a los 180 s con ArcMap abierto). No se ha vuelto a
+    reproducir: el 2026-09-25 el auditor abrió el mismo documento en ~8,5 s con
+    ArcMap cerrado, abierto con ese mismo .mxd y **congelado** (proceso suspendido),
+    así que el estado de ArcMap no es la causa. La causa de agosto sigue sin
+    identificar, y la protección ya no mira a ArcMap sino al síntoma: tras
+    **dos timeouts seguidos** la pasada 2 se corta para el resto de documentos y la
+    respuesta lo dice en `aviso_capas` (quedan con `sin_abrir: true`). Si pasa, lo
+    primero es mirar si hay `python.exe` de ArcGIS huérfanos y si las unidades de red
+    de las capas responden. `forzar_con_arcmap_abierto` se sigue aceptando por
+    compatibilidad y ya no hace nada.
 
-    Presupuesta el tiempo: con ArcMap cerrado, abrir cuesta menos de un segundo por
-    documento más ~6 s de `import arcpy` por proceso. Empieza con `con_capas=False`
-    para tener el mapa de versiones al instante.
+    Presupuesta el tiempo: abrir cuesta ~1-3 s por documento más ~6 s de
+    `import arcpy` por proceso. Empieza con `con_capas=False` para tener el mapa de
+    versiones al instante.
 
     **QUÉ SALE EN EL PLANO Y QUÉ NO.** Lee primero `num_rotas_en_plano` y
     `num_con_query_en_plano` (por documento y sumados en `resumen`), no los totales:
@@ -1742,15 +1732,6 @@ def audit_folder(ruta: str, con_capas: bool = True, timeout_por_documento: int =
     documentos = encontrados[:max_documentos]
 
     aviso_capas = None
-    if con_capas and not forzar_con_arcmap_abierto and _arcmap_esta_abierto():
-        con_capas = False
-        aviso_capas = (
-            "PASADA 2 OMITIDA: ArcMap está abierto. El arcpy standalone se bloquea al "
-            "abrir documentos mientras ArcMap tiene la licencia tomada (medido: 0,7 s "
-            "con ArcMap cerrado frente a >180 s con ArcMap abierto, mismo .mxd). "
-            "Cierra ArcMap y repite, o pasa forzar_con_arcmap_abierto=True si sabes "
-            "lo que haces: cada documento agotará su timeout sin dar nada.")
-
     py27 = _python27_arcgis() if con_capas else None
     auditor = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auditor_mxd.py")
     if con_capas and (py27 is None or not os.path.isfile(auditor)):
@@ -1762,7 +1743,10 @@ def audit_folder(ruta: str, con_capas: bool = True, timeout_por_documento: int =
     resumen = {"con_capas": 0, "timeout": 0, "error_al_abrir": 0, "ilegibles": 0}
     if con_capas:
         resumen.update((clave, 0) for clave in _SUMAS_AUDITOR)
+        resumen["sin_abrir"] = 0
     versiones: dict = {}
+    timeouts_seguidos = 0
+    cortada = False
 
     for doc in documentos:
         version, err_version = _mxd_version_declarada(doc)
@@ -1778,7 +1762,11 @@ def audit_folder(ruta: str, con_capas: bool = True, timeout_por_documento: int =
             fila["problema_fichero"] = err_version
             resumen["ilegibles"] += 1
 
-        if con_capas:
+        if con_capas and cortada:
+            fila["sin_abrir"] = True
+            resumen["sin_abrir"] += 1
+        elif con_capas:
+            timeout_previo = resumen["timeout"]
             try:
                 proc = subprocess.run(
                     [py27, auditor, doc],
@@ -1806,6 +1794,18 @@ def audit_folder(ruta: str, con_capas: bool = True, timeout_por_documento: int =
             except (json.JSONDecodeError, OSError) as exc:
                 fila["error_al_abrir"] = "no se pudo auditar: %s" % exc
                 resumen["error_al_abrir"] += 1
+            # Seguidos, no en total: un documento con la red caída entre cien sanos
+            # no debe cortar la auditoría; dos seguidos ya huelen a algo general.
+            timeouts_seguidos = timeouts_seguidos + 1 if resumen["timeout"] > timeout_previo else 0
+            if timeouts_seguidos >= _CORTE_TIMEOUTS_SEGUIDOS:
+                cortada = True
+                aviso_capas = (
+                    "PASADA 2 CORTADA tras %d timeouts seguidos (de %d s cada uno): el resto "
+                    "de documentos NO se ha abierto y va marcado con sin_abrir=true. Cuando "
+                    "todo agota el timeout, la causa no suele ser el documento. Mira si hay "
+                    "python.exe de ArcGIS huérfanos (tasklist) y si responden las unidades de "
+                    "red de las capas; luego repite, o sube timeout_por_documento."
+                    % (timeouts_seguidos, timeout_por_documento))
 
         resultados.append(fila)
 

@@ -441,15 +441,20 @@ class TestAuditFolderLoQueSaleEnElPlano(unittest.TestCase):
             with open(os.path.join(carpeta, nombre), "wb") as fh:
                 fh.write(b"no es un mxd")
 
-        def falso_run(args, **_kw):
-            datos = dict(salidas[os.path.basename(args[-1])], ok=True)
+        self.abiertos = []
+
+        def falso_run(args, **kw):
+            nombre = os.path.basename(args[-1])
+            self.abiertos.append(nombre)
+            if salidas[nombre] == "TIMEOUT":
+                raise subprocess.TimeoutExpired(args, kw.get("timeout"))
+            datos = dict(salidas[nombre], ok=True)
             return subprocess.CompletedProcess(args, 0, json.dumps(datos).encode(), b"")
 
-        with unittest.mock.patch.object(servidor, "_arcmap_esta_abierto", return_value=False), \
-                unittest.mock.patch.object(servidor, "_python27_arcgis",
-                                           return_value=sys.executable), \
+        with unittest.mock.patch.object(servidor, "_python27_arcgis",
+                                        return_value=sys.executable), \
                 unittest.mock.patch("subprocess.run", side_effect=falso_run):
-            return servidor.audit_folder(carpeta)
+            return servidor.audit_folder(carpeta, timeout_por_documento=5)
 
     def test_suma_por_separado_lo_que_se_ve(self):
         r = self._auditar({
@@ -474,6 +479,41 @@ class TestAuditFolderLoQueSaleEnElPlano(unittest.TestCase):
         resumen se leería como «ninguna rota», que no se sabe."""
         r = servidor.audit_folder(RAIZ, con_capas=False)
         self.assertNotIn("num_rotas_en_plano", r["resumen"])
+
+
+class TestAuditFolderCorteTrasTimeouts(unittest.TestCase):
+    """Sin negativa por ArcMap abierto (descartada como causa el 2026-09-25), la
+    protección es el corte: si todo agota el timeout, una carpeta de 200 planos no
+    puede costar 200 timeouts. Pero un documento lento entre sanos no debe cortar."""
+
+    SANO = {"num_capas": 1, "num_rotas": 0, "num_rotas_en_plano": 0, "num_con_query": 0,
+            "num_con_query_en_plano": 0, "num_en_plano_desconocido": 0,
+            "marcos": [], "capas": []}
+
+    _auditar = TestAuditFolderLoQueSaleEnElPlano._auditar
+
+    def test_dos_timeouts_seguidos_cortan_el_resto(self):
+        r = self._auditar({"a.mxd": "TIMEOUT", "b.mxd": "TIMEOUT",
+                           "c.mxd": self.SANO, "d.mxd": self.SANO})
+        self.assertEqual(self.abiertos, ["a.mxd", "b.mxd"])
+        self.assertEqual(r["resumen"]["timeout"], 2)
+        self.assertEqual(r["resumen"]["sin_abrir"], 2)
+        self.assertTrue(r["documentos"][3]["sin_abrir"])
+        self.assertIn("CORTADA", r["aviso_capas"])
+
+    def test_timeout_aislado_no_corta(self):
+        r = self._auditar({"a.mxd": "TIMEOUT", "b.mxd": self.SANO,
+                           "c.mxd": "TIMEOUT", "d.mxd": self.SANO})
+        self.assertEqual(len(self.abiertos), 4)
+        self.assertEqual(r["resumen"]["sin_abrir"], 0)
+        self.assertEqual(r["resumen"]["con_capas"], 2)
+        self.assertNotIn("aviso_capas", r)
+
+    def test_arcmap_abierto_ya_no_impide_la_pasada_de_capas(self):
+        """Control del cambio: la 2.14.0 miraba tasklist y omitía la pasada 2."""
+        self.assertFalse(hasattr(servidor, "_arcmap_esta_abierto"))
+        r = self._auditar({"a.mxd": self.SANO})
+        self.assertEqual(r["resumen"]["con_capas"], 1)
 
 
 class TestArgumentosEstrictos(unittest.TestCase):

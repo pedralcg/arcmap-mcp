@@ -51,14 +51,14 @@ real de siete planos, 335 capas rotas en total y 30 en los planos. Un `None` es 
 «apagada», y se cuenta en `num_en_plano_desconocido`. No se mira el rango de escalas de la
 capa (arcpy.mapping 10.x no lo expone).
 
-**⚠️ `audit_folder` con `con_capas=True` exige ArcMap CERRADO.** El arcpy standalone se
-**bloquea al abrir un documento mientras ArcMap tiene tomada la licencia de Desktop**: el
-mismo `.mxd` abre en 0,7 s con ArcMap cerrado y sigue bloqueado a los 180 s con ArcMap
-abierto. Y no se ve venir, porque `import arcpy` tarda lo mismo en ambos casos. La
-herramienta lo detecta y omite esa pasada explicando por qué; se fuerza con
-`forzar_con_arcmap_abierto=True`, pero entonces cada documento agotará su timeout sin dar
-nada. Abre cada documento en un **proceso aparte con timeout**, así que uno atascado no
-arrastra al resto, y **anuncia siempre lo que trunca**.
+**`audit_folder` funciona con ArcMap abierto** (desde la 2.15.0). Hasta entonces se negaba,
+por una medición en la que el mismo `.mxd` pasó de 0,7 s a más de 180 s bloqueado con ArcMap
+abierto. No se ha vuelto a reproducir: el mismo documento abre en ~8,5 s con ArcMap cerrado,
+abierto con ese mismo `.mxd` y congelado. La protección mira ahora al síntoma: abre cada
+documento en un **proceso aparte con timeout**, así que uno atascado no arrastra al resto, y
+tras **dos timeouts seguidos** corta la pasada de capas para lo que queda, marcándolo con
+`sin_abrir` y explicándolo en `aviso_capas`. Siempre **anuncia lo que trunca**.
+`forzar_con_arcmap_abierto` se acepta por compatibilidad y ya no hace nada.
 
 ---
 
