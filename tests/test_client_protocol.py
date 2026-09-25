@@ -704,6 +704,77 @@ class TestSimbologiaParametros(unittest.TestCase):
                                         "nombre_simbolo": "Monte público"})
 
 
+class TestGuardarVerificaRutasRelativas(unittest.TestCase):
+    """save_mxd / save_mxd_as reabren lo guardado cuando se pide, o solas si el add-in
+    predice capas que se van a perder; y lo que cuenta son las rotas NUEVAS, no las que
+    ya estaban rotas en memoria."""
+
+    def setUp(self):
+        self.original = servidor._client
+        self.addCleanup(setattr, servidor, "_client", self.original)
+
+    def _cliente(self, resultado):
+        class Cliente(object):
+            llamadas = []
+
+            def send(self, ctype, params=None, timeout=None):
+                self.llamadas.append({"ctype": ctype, "params": params or {}})
+                return {"ok": True, "result": dict(resultado)}
+        servidor._client = Cliente()
+        return servidor._client
+
+    def test_sin_riesgo_no_reabre_ni_devuelve_la_lista_interna(self):
+        self._cliente({"guardado": True, "ruta": r"C:\a.mxd", "rotas_en_memoria": []})
+        with unittest.mock.patch.object(servidor, "_verificar_guardado") as ver:
+            r = servidor.save_mxd()
+        ver.assert_not_called()
+        self.assertNotIn("rotas_en_memoria", r["result"])
+        self.assertNotIn("verificacion", r["result"])
+
+    def test_con_riesgo_reabre_solo(self):
+        cli = self._cliente({"guardado": True, "ruta": r"C:\a.mxd",
+                             "capas_perderan_ruta": [{"ruta": "G/Capa"}],
+                             "rotas_en_memoria": [{"data_frame": "Capas", "ruta": "X"}]})
+        with unittest.mock.patch.object(servidor, "_verificar_guardado",
+                                        return_value={"reabierto": True}) as ver:
+            r = servidor.save_mxd()
+        ver.assert_called_once_with(r"C:\a.mxd", [{"data_frame": "Capas", "ruta": "X"}])
+        self.assertEqual(r["result"]["verificacion"], {"reabierto": True})
+        self.assertEqual(cli.llamadas[-1]["params"], {})
+
+    def test_verificar_false_lo_impide_aunque_haya_riesgo(self):
+        self._cliente({"guardado": True, "ruta": r"C:\a.mxd",
+                       "capas_perderan_ruta": [{"ruta": "G/Capa"}]})
+        with unittest.mock.patch.object(servidor, "_verificar_guardado") as ver:
+            servidor.save_mxd(verificar=False)
+        ver.assert_not_called()
+
+    def test_save_as_verifica_la_copia(self):
+        cli = self._cliente({"guardado": True, "salida": r"C:\copia.mxd"})
+        with unittest.mock.patch.object(servidor, "_verificar_guardado",
+                                        return_value={"reabierto": True}) as ver:
+            servidor.save_mxd_as(r"C:\copia.mxd", verificar=True)
+        ver.assert_called_once_with(r"C:\copia.mxd", [])
+        self.assertIs(cli.llamadas[-1]["params"]["verificar"], True)
+
+    def test_solo_cuentan_las_rotas_nuevas(self):
+        # El auditor da la ruta de grupo con "\" y el add-in con "/": son la misma capa.
+        auditado = {"ok": True, "num_rotas": 3, "capas": [
+            {"data_frame": "Capas", "nombre_largo": "Grupo\\Ya rota", "rota": True, "grupo": False},
+            {"data_frame": "Capas", "nombre_largo": "Grupo\\Nueva", "rota": True, "grupo": False,
+             "fuente": "\\p.shp"},
+            {"data_frame": "Capas", "nombre_largo": "Grupo", "rota": True, "grupo": True},
+            {"data_frame": "Capas", "nombre_largo": "Grupo\\Sana", "rota": False, "grupo": False},
+        ]}
+        proc = unittest.mock.Mock(stdout=json.dumps(auditado).encode("utf-8"))
+        with unittest.mock.patch.object(servidor, "_python27_arcgis", return_value=sys.executable), \
+                unittest.mock.patch("subprocess.run", return_value=proc):
+            v = servidor._verificar_guardado(r"C:\a.mxd", [{"data_frame": "Capas", "ruta": "Grupo/Ya rota"}])
+        self.assertTrue(v["reabierto"])
+        self.assertEqual([c["ruta"] for c in v["rotas_nuevas"]], ["Grupo\\Nueva"])
+        self.assertFalse(v["guardado_sin_perdidas"])
+
+
 class TestExportMxdLoteValida(unittest.TestCase):
     """Lo que se rechaza ANTES de lanzar un solo python.exe."""
 

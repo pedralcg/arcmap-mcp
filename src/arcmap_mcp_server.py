@@ -14,6 +14,7 @@ Arranque manual de prueba:
 
 import os
 import json
+import re
 import base64
 import socket
 import struct
@@ -1262,20 +1263,84 @@ def set_scale(escala: float) -> dict:
 # --------------------------------------------------------------------------- #
 
 @mcp.tool()
-def save_mxd() -> dict:
+def save_mxd(verificar: bool = None) -> dict:
     """
     Guarda el documento .mxd abierto en su ruta actual. Devuelve la ruta guardada.
     Útil para persistir los cambios que han hecho otras tools (def. query, textos,
     simbología). Para guardar en otra ruta sin tocar el original usa save_mxd_as.
 
+    **Rutas relativas que se pierden al guardar.** Con «Store relative pathnames»,
+    ArcMap 10.5 no escribe la ruta de una capa si la carpeta del .mxd más la ruta
+    relativa de su workspace llega a 260 caracteres: al reabrir queda
+    `\\fichero.shp` y la capa rota, aunque en memoria se vea bien. Antes de guardar,
+    la respuesta predice esas capas en `capas_perderan_ruta` y `aviso_rutas_relativas`.
+
+    `verificar`: tras guardar, **reabre el .mxd** con arcpy en un proceso aparte (sin
+    tocar la sesión) y lista en `verificacion.rotas_nuevas` las capas rotas al
+    reabrir que no lo estaban en memoria. Es la única comprobación que no miente.
+    Sin indicarlo, se verifica **solo si la predicción ha encontrado algo**;
+    `verificar=False` lo impide. Cuesta unos 10 s.
+
     Escribir un documento con decenas de capas y ráster pesado no cabe en el timeout
     corto: la espera la gobierna ARCMAP_SAVE_TIMEOUT.
     """
-    return _client.send("save_mxd", timeout=SAVE_TIMEOUT)
+    r = _client.send("save_mxd", {"verificar": True} if verificar else {}, timeout=SAVE_TIMEOUT)
+    return _tras_guardar(r, "ruta", verificar)
+
+
+def _tras_guardar(r, clave_ruta, verificar):
+    """Reabre lo guardado si se pidió, o si la predicción del add-in encontró capas que
+    se van a perder. `rotas_en_memoria` solo sirve para esa comparación y no se devuelve."""
+    if not r.get("ok"):
+        return r
+    res = r.get("result") or {}
+    memoria = res.pop("rotas_en_memoria", None) or []
+    if verificar or (verificar is None and res.get("capas_perderan_ruta")):
+        res["verificacion"] = _verificar_guardado(res.get(clave_ruta), memoria)
+    return r
+
+
+def _verificar_guardado(ruta, rotas_en_memoria, timeout=180):
+    """Reabre `ruta` con el auditor standalone y devuelve las capas rotas en disco que no
+    lo estaban en memoria. Las rutas de grupo se comparan con `/` (el auditor da
+    `Grupo\\Capa`, el add-in `Grupo/Capa`)."""
+    import subprocess
+
+    py27 = _python27_arcgis()
+    auditor = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auditor_mxd.py")
+    if not ruta or py27 is None or not os.path.isfile(auditor):
+        return {"reabierto": False, "motivo": "falta el Python 2.7 de ArcGIS (ARCMAP_PYTHON27) o el auditor"}
+    try:
+        proc = subprocess.run([py27, auditor, ruta], capture_output=True, timeout=timeout)
+        bruto = proc.stdout.decode("utf-8", "replace").strip()
+        datos = json.loads(bruto) if bruto else {"ok": False, "error": "sin salida"}
+    except subprocess.TimeoutExpired:
+        return {"reabierto": False, "motivo": "el auditor no abrió el .mxd en %s s" % timeout}
+    except (json.JSONDecodeError, OSError) as exc:
+        return {"reabierto": False, "motivo": "no se pudo auditar: %s" % exc}
+    if not datos.get("ok"):
+        return {"reabierto": False, "motivo": datos.get("error") or "desconocido"}
+
+    def clave(df, ruta_capa):
+        # El add-in numera los nombres repetidos ("Capa#2") para desambiguarlos; arcpy no.
+        ruta_capa = re.sub(r"#[0-9]+(?=/|$)", "", (ruta_capa or "").replace("\\", "/"))
+        return ((df or "").lower(), ruta_capa.lower())
+
+    antes = {clave(c.get("data_frame"), c.get("ruta")) for c in rotas_en_memoria}
+    nuevas = []
+    for c in datos.get("capas") or []:
+        if c.get("grupo") or not c.get("rota"):
+            continue
+        if clave(c.get("data_frame"), c.get("nombre_largo")) not in antes:
+            nuevas.append({"data_frame": c.get("data_frame"), "ruta": c.get("nombre_largo"),
+                           "fuente_al_reabrir": c.get("fuente")})
+    return {"reabierto": True, "rotas_al_reabrir": datos.get("num_rotas"),
+            "rotas_en_memoria": len(rotas_en_memoria), "rotas_nuevas": nuevas,
+            "guardado_sin_perdidas": not nuevas}
 
 
 @mcp.tool()
-def save_mxd_as(salida: str, sobrescribir: bool = False) -> dict:
+def save_mxd_as(salida: str, sobrescribir: bool = False, verificar: bool = None) -> dict:
     """
     Guarda una COPIA del .mxd en `salida` (no cambia el documento activo ni su ruta).
     `salida` es la ruta de destino (.mxd), ABSOLUTA y en una carpeta que exista.
@@ -1286,10 +1351,19 @@ def save_mxd_as(salida: str, sobrescribir: bool = False) -> dict:
     llamada falla sin tocarlo y dice cómo forzarlo. Al REGENERAR una serie de .mxd
     (uno por capa, p. ej.) pasa `sobrescribir=True`. La respuesta trae `sobrescrito`.
 
+    **Rutas relativas**: como en `save_mxd`, la respuesta predice las capas que se
+    perderán (`capas_perderan_ruta`), calculadas contra la carpeta de DESTINO: una copia
+    más profunda que el original puede romper capas que en él guardan bien. `verificar`
+    reabre la copia y lista `verificacion.rotas_nuevas`; sin indicarlo, solo si la
+    predicción ha encontrado algo.
+
     Como `save_mxd`, la espera la gobierna ARCMAP_SAVE_TIMEOUT.
     """
-    return _client.send("save_mxd_as", {"salida": salida, "sobrescribir": sobrescribir},
-                        timeout=SAVE_TIMEOUT)
+    params = {"salida": salida, "sobrescribir": sobrescribir}
+    if verificar:
+        params["verificar"] = True
+    return _tras_guardar(_client.send("save_mxd_as", params, timeout=SAVE_TIMEOUT),
+                         "salida", verificar)
 
 
 @mcp.tool()
@@ -1316,6 +1390,11 @@ def repair_data_source(capa: str, ruta_antigua: str, ruta_nueva: str,
     el activo, y una capa rota de un data frame secundario se listaba pero no se
     podía reparar). `data_frame` acota la búsqueda a uno; si el nombre casa en más
     de un sitio y no lo indicas, la llamada falla listando los candidatos.
+
+    **Reparada en memoria no es reparada en disco.** Si el documento guarda rutas
+    relativas y la carpeta del .mxd más la ruta relativa del workspace nuevo llega a
+    260 caracteres, ArcMap 10.5 perderá la ruta al guardar (queda `\\fichero.shp`). La
+    respuesta lo avisa en `aviso_ruta_relativa` y `riesgo_ruta_relativa` (no bloquea).
     """
     params = {"capa": capa, "ruta_antigua": ruta_antigua,
               "ruta_nueva": ruta_nueva, "validar": validar}

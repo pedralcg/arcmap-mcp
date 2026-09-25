@@ -327,10 +327,20 @@ el menú de marcadores no se distinguen. La búsqueda por nombre ignora mayúscu
 | Tool | Qué hace | Modo |
 |---|---|---|
 | `run_geoprocessing` | Geoproceso por nombre punteado (`analysis.Buffer`, `management.GetCount`, `sa.Slope`…) + params, sin escribir código. Resuelve nombres de capa de la TOC (honra def. query/selección) | **nativo** — ocupa la interfaz mientras dura |
-| `save_mxd` | Guarda el .mxd en su ruta actual | nativo |
-| `save_mxd_as` | Guarda una copia en otra ruta (absoluta). **`sobrescribir=False` por defecto**: si el destino existe, falla sin tocarlo. Al regenerar una serie de .mxd, pasa `sobrescribir=True` | nativo |
+| `save_mxd` | Guarda el .mxd en su ruta actual. Predice las capas que perderán la ruta relativa (`capas_perderan_ruta`) y, con `verificar` o si predice alguna, **reabre** lo guardado y lista las rotas nuevas | nativo; la verificación, arcpy standalone |
+| `save_mxd_as` | Guarda una copia en otra ruta (absoluta). **`sobrescribir=False` por defecto**: si el destino existe, falla sin tocarlo. Al regenerar una serie de .mxd, pasa `sobrescribir=True`. Predice y verifica las rutas relativas como `save_mxd`, contra la carpeta de destino | nativo |
 | `list_broken_data_sources` | Capas y tablas standalone con ruta rota (muy común en ArcMap), de **todos** los data frames, con `data_frame` y `ruta` | nativo |
-| `repair_data_source` | Reapunta la fuente de una capa (verifica releyendo la fuente). Busca en todos los data frames; `data_frame` acota | nativo |
+| `repair_data_source` | Reapunta la fuente de una capa (verifica releyendo la fuente). Busca en todos los data frames; `data_frame` acota. Avisa (`aviso_ruta_relativa`) si la ruta nueva se va a perder al guardar | nativo |
+
+> **Reparada en memoria no es reparada en disco.** Con *Store relative pathnames*, ArcMap
+> 10.5 concatena sin normalizar la carpeta del .mxd y la ruta relativa del workspace de cada
+> capa (`C:\planos\..\..\datos`). Si esa cadena llega a **260 caracteres** (MAX_PATH), no
+> escribe el workspace: al reabrir la fuente es `\fichero.shp` y la capa está rota, aunque en
+> memoria se vea bien. No depende de la longitud del dato: en la medición del 2026-09-25 un
+> dato a 252 caracteres guardaba bien con el .mxd en una carpeta corta, y uno a 43 se perdía
+> con el .mxd en una carpeta de 247. Por eso `repair_data_source` avisa y `save_mxd` /
+> `save_mxd_as` predicen y, si hace falta, reabren. Arreglo: acortar la carpeta de los datos o
+> la del .mxd, o guardar ese .mxd con rutas absolutas.
 
 > **Multivalor en `run_geoprocessing`.** Un parámetro que admite varias entradas (Merge,
 > Union, Intersect…) se pasa como **lista dentro de `params`**:

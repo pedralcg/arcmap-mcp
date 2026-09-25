@@ -689,6 +689,96 @@ if esri:
 else:
     fallos.append(("list_style_symbols", "ESRI.style no aparece entre los cargados: " + str(cargados)[:150]))
 
+sys.stdout.write("--- rutas relativas largas (2.15.0) ---" + chr(10))
+# Con rutas relativas, ArcMap 10.5 pierde al guardar el workspace de una capa si
+# len(carpeta del .mxd) + 1 + len(relativa del workspace) >= 260 (medido 2026-09-25).
+# Una copia del shp a la distancia justa (262) contra otra cercana. El control fuerte
+# es la COPIA REABIERTA: lo que el add-in predice tiene que ser exactamente lo que
+# sale roto al reabrir, ni mas ni menos.
+import glob
+import re
+import subprocess
+
+info = enviar("get_arcmap_info")
+doc_mxd = (info.get("result") or {}).get("mxd") if info.get("ok") else None
+PY27 = (glob.glob("C:" + SEP + "Python27" + SEP + "ArcGIS*" + SEP + "python.exe") or [None])[0]
+AUDITOR = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "src", "auditor_mxd.py")
+
+
+def concatenada(carpeta, ws):
+    return len(carpeta) + 1 + len(os.path.relpath(ws, carpeta))
+
+
+def copiar_como_r(destino):
+    if not os.path.isdir(destino):
+        os.makedirs(destino)
+    base = os.path.splitext(VEC)[0]
+    for f in glob.glob(base + ".*"):
+        shutil.copy(f, os.path.join(destino, "r" + f[len(base):]))
+    return os.path.join(destino, "r.shp")
+
+
+RAIZ_RUTAS = "C:" + SEP + "temp" + SEP + "arcmap-mcp-regresion" + SEP + "rutas_relativas"
+if doc_mxd and doc_mxd.lower().endswith(".mxd") and PY27:
+    carpeta_doc = os.path.dirname(doc_mxd)
+    shutil.rmtree(RAIZ_RUTAS, ignore_errors=True)
+    cerca = RAIZ_RUTAS + SEP + "cerca"
+    lejos = RAIZ_RUTAS + SEP + "lejos"
+    # Se alarga "lejos" a tramos de <=100 hasta que la suma llegue a 262.
+    while concatenada(carpeta_doc, lejos) < 262:
+        falta = 262 - concatenada(carpeta_doc, lejos)
+        lejos = lejos + "x" if falta == 1 else lejos + SEP + "x" * min(100, falta - 1)
+    if concatenada(carpeta_doc, lejos) != 262 or len(lejos) > 245:
+        sys.stdout.write("  [---] no se pudo fabricar la ruta a 262 (%d, %d car.): bloque saltado%s"
+                         % (concatenada(carpeta_doc, lejos), len(lejos), chr(10)))
+    else:
+        shp_cerca = copiar_como_r(cerca)
+        copiar_como_r(lejos)
+        CAPA_R = "Ruta larga (regresion)"
+        t("add_layer", {"fuente": shp_cerca, "nombre": CAPA_R, "en_leyenda": False})
+        r = t("repair_data_source", {"capa": CAPA_R, "ruta_antigua": cerca, "ruta_nueva": lejos},
+              nota="(a 262: avisa)")
+        if r and r.get("ok"):
+            riesgo = r["result"].get("riesgo_ruta_relativa") or {}
+            comprobar_sim("repair_data_source avisa de que se perdera al guardar",
+                          r["result"]["aplicado"] and bool(r["result"].get("aviso_ruta_relativa"))
+                          and riesgo.get("longitud") == 262, r["result"])
+        r = t("repair_data_source", {"capa": CAPA_R, "ruta_antigua": lejos, "ruta_nueva": cerca},
+              nota="(cerca: sin aviso)")
+        if r and r.get("ok"):
+            comprobar_sim("repair_data_source no avisa con una ruta que cabe",
+                          r["result"]["aplicado"] and "aviso_ruta_relativa" not in r["result"], r["result"])
+        t("repair_data_source", {"capa": CAPA_R, "ruta_antigua": cerca, "ruta_nueva": lejos})
+
+        copia_mxd = os.path.join(carpeta_doc, "regresion_rutas_copia.mxd")
+        r = t("save_mxd_as", {"salida": copia_mxd, "sobrescribir": True}, nota="(copia junto al original)")
+        if r and r.get("ok"):
+            res = r["result"]
+            predichas = {(c["data_frame"].lower(), c["ruta"].lower()) for c in res.get("capas_perderan_ruta", [])}
+            # El add-in numera los nombres repetidos ("Capa#2"); arcpy no.
+            memoria = {(c["data_frame"].lower(), re.sub(r"#[0-9]+(?=/|$)", "", c["ruta"]).lower())
+                       for c in res.get("rotas_en_memoria", [])}
+            comprobar_sim("save_mxd_as predice la capa lejana",
+                          any(ruta == CAPA_R.lower() for _, ruta in predichas), res.get("capas_perderan_ruta"))
+            proc = subprocess.run([PY27, AUDITOR, copia_mxd], capture_output=True, timeout=240)
+            auditado = json.loads(proc.stdout.decode("utf-8", "replace") or "{}")
+            if auditado.get("ok"):
+                en_disco = {(c["data_frame"].lower(), c["nombre_largo"].replace(SEP, "/").lower())
+                            for c in auditado["capas"] if c.get("rota") and not c.get("grupo")}
+                nuevas = en_disco - memoria
+                comprobar_sim("al reabrir la copia se rompe exactamente lo predicho",
+                              nuevas == predichas, {"predichas": sorted(predichas), "nuevas": sorted(nuevas)})
+            else:
+                fallos.append(("save_mxd_as", "el auditor no abrio la copia: " + str(auditado)[:150]))
+            try:
+                os.remove(copia_mxd)
+            except OSError:
+                pass
+        t("remove_layer", {"capa": CAPA_R})
+        shutil.rmtree(RAIZ_RUTAS, ignore_errors=True)
+else:
+    sys.stdout.write("  [---] documento sin ruta .mxd o sin Python 2.7 de ArcGIS: bloque saltado" + chr(10))
+
 sys.stdout.write("--- limpieza ---" + chr(10))
 t("remove_layer", {"capa": "real_NUEVO.tif"})
 t("remove_layer", {"capa": NOMBRE_VEC})

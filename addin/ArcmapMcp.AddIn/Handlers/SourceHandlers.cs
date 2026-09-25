@@ -291,6 +291,24 @@ namespace ArcmapMcp.AddIn.Handlers
             };
             if (aviso != null)
                 salida["aviso"] = aviso;
+
+            // Reparada en memoria no es reparada en disco: con rutas relativas y un
+            // workspace demasiado lejos del .mxd, el guardado la vuelve a romper.
+            if (aplicado)
+            {
+                try
+                {
+                    string mxd = ArcSession.MxdPath(appRep);
+                    JObject riesgo = doc.RelativePaths ? RutasRelativas.Riesgo(mxd, wsNuevo) : null;
+                    if (riesgo != null)
+                    {
+                        salida["riesgo_ruta_relativa"] = riesgo;
+                        salida["aviso_ruta_relativa"] = "Reparada en memoria, pero se va a ROMPER al guardar: "
+                            + RutasRelativas.Aviso(1, mxd);
+                    }
+                }
+                catch (Exception ex) { Log.Warn("repair_data_source: no se pudo evaluar la ruta relativa: " + ex.Message); }
+            }
             return Protocol.Result(salida);
         }
 
