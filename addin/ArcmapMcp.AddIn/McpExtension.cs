@@ -45,7 +45,12 @@ namespace ArcmapMcp.AddIn
             // Capturar el dispatcher AQUÍ (hilo UI), jamás desde el thread del
             // listener: es la única vía segura hacia ArcObjects.
             StaDispatcher.CaptureCurrent();
-            Log.Info("Extensión cargada; dispatcher STA capturado (thread "
+            // El PID separa en el log los arranques de ArcMaps distintos: sin él, dos
+            // ArcMap abiertos a la vez eran indistinguibles de uno que carga la
+            // extensión varias veces.
+            Process yo = Process.GetCurrentProcess();
+            Log.Info("Extensión cargada en " + yo.ProcessName + ".exe PID " + yo.Id
+                     + "; dispatcher STA capturado (thread "
                      + Thread.CurrentThread.ManagedThreadId + ", "
                      + Thread.CurrentThread.GetApartmentState() + ")");
 
@@ -157,6 +162,32 @@ namespace ArcmapMcp.AddIn
                 _server.Start();
                 _duenoServidor = this;
                 return null;
+            }
+            catch (System.Net.Sockets.SocketException ex)
+                when (ex.SocketErrorCode == System.Net.Sockets.SocketError.AddressAlreadyInUse)
+            {
+                _server = null;
+                // Caso previsto: WARN con el dueño del puerto, sin traza ni contador de
+                // errores. Con el PID real, el consejo deja de ser "busca el <PID>".
+                PuertoOcupado.Dueno dueno = PuertoOcupado.Buscar(McpServer.Port);
+                string quien = dueno != null ? dueno.Describir() : "dueño desconocido";
+                Log.Warn("Puerto " + McpServer.Port + " ocupado por " + quien
+                         + "; el puente no arranca en este ArcMap.");
+                if (dueno != null && dueno.PareceZombi)
+                    return ex.Message + "\n\nEl puerto " + McpServer.Port + " lo tiene " + quien
+                        + ": parece un ArcMap zombi (vivo pero sin ventana). Ciérralo con"
+                        + " Stop-Process -Id " + dueno.Pid + " -Force y vuelve a arrancar el puente.";
+                if (dueno != null)
+                    return ex.Message + "\n\nEl puerto " + McpServer.Port + " lo tiene " + quien
+                        + ". Si ese es el ArcMap que quieres controlar, no hay que hacer nada."
+                        + " Si quieres usar ESTE, cierra aquel o exporta ARCMAP_BRIDGE_PORT=<otro>"
+                        + " y vuelve a abrir ArcMap (y la MISMA variable donde corra el servidor MCP).";
+                return ex.Message + "\n\nCasi siempre es que el puerto " + McpServer.Port
+                    + " ya está cogido por otro ArcMap. Dos salidas:\n"
+                    + "  · Usar otro puerto: exporta ARCMAP_BRIDGE_PORT=<otro> y vuelve a abrir"
+                    + " ArcMap (y la MISMA variable donde corra el servidor MCP).\n"
+                    + "  · Si el ArcMap que lo sujeta está zombi (vivo pero sin ventana),"
+                    + " matarlo: Stop-Process -Id <PID> -Force.";
             }
             catch (System.Exception ex)
             {
