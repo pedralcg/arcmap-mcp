@@ -703,6 +703,11 @@ class TestSimbologiaParametros(unittest.TestCase):
         self.assertEqual(ll["params"], {"capa": "ENP", "estilo": "Usuario",
                                         "nombre_simbolo": "Monte público"})
 
+    def test_apply_style_solo_por_id(self):
+        # El nombre no es único (ESRI.style trae dos «Verde» en la misma categoría).
+        ll = self._llamar("apply_style_symbol", {"capa": "ENP", "estilo": "ESRI", "id_simbolo": 12})
+        self.assertEqual(ll["params"], {"capa": "ENP", "estilo": "ESRI", "id_simbolo": 12})
+
 
 class TestTocYServicios(unittest.TestCase):
     """move_layer y el WMS de add_layer: solo viaja lo indicado. Un `posicion` o un

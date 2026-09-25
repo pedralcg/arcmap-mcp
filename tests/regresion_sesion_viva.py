@@ -653,16 +653,25 @@ if esri:
                   simbolos)
     if simbolos:
         elegido = simbolos[0]
+        # Por id: el nombre no es unico ni con su categoria (ESRI.style trae dos "Verde"
+        # en "Predeterminado"; asi fallo la primera pasada del 2026-09-25).
         r = t("apply_style_symbol", {"capa": NOMBRE_VEC, "estilo": "ESRI",
-                                     "nombre_simbolo": elegido["nombre"],
-                                     "categoria_estilo": elegido["categoria"], "etiqueta": "Del estilo"},
-              nota="(" + elegido["nombre"] + ")")
+                                     "id_simbolo": elegido["id"], "etiqueta": "Del estilo"},
+              nota="(" + elegido["nombre"] + ", id " + str(elegido["id"]) + ")")
         if r and r.get("ok"):
             res = r["result"]
             comprobar_sim("apply_style_symbol deja un simbolo unico con el del estilo",
                           res["renderer"] == "simple" and len(res["clases"]) == 1
                           and res["clases"][0]["etiqueta"] == "Del estilo"
-                          and res["simbolo_de_estilo"]["nombre"] == elegido["nombre"], res)
+                          and res["simbolo_de_estilo"]["id"] == elegido["id"], res)
+        todos = enviar("list_style_symbols", {"estilo": "ESRI", "clase": "relleno", "limite": 2000})
+        nombres = [s["nombre"] for s in (todos.get("result") or {}).get("simbolos", [])]
+        repetidos = sorted({n for n in nombres if n and nombres.count(n) > 1})
+        if repetidos:
+            r = t("apply_style_symbol", {"capa": NOMBRE_VEC, "estilo": "ESRI", "nombre_simbolo": repetidos[0]},
+                  espera_ok=False, nota="(" + repetidos[0] + " repetido: pide id)")
+            comprobar_sim("un nombre repetido falla listando los id",
+                          bool(r) and "id_simbolo" in str(r.get("error", "")), r)
         t("apply_style_symbol", {"capa": NOMBRE_VEC, "estilo": "ESRI", "nombre_simbolo": "no_existe_este"},
           espera_ok=False, nota="(simbolo inexistente)")
     lineas = enviar("list_style_symbols", {"estilo": "ESRI", "clase": "linea", "limite": 1})
@@ -781,6 +790,9 @@ def copiar_como_r(destino):
         os.makedirs(destino)
     base = os.path.splitext(VEC)[0]
     for f in glob.glob(base + ".*"):
+        # Fuera los .lock: ArcMap los tiene abiertos mientras la capa esta en el mapa.
+        if f.lower().endswith(".lock"):
+            continue
         shutil.copy(f, os.path.join(destino, "r" + f[len(base):]))
     return os.path.join(destino, "r.shp")
 

@@ -71,6 +71,9 @@ namespace ArcmapMcp.AddIn.Handlers
                             {
                                 ["nombre"] = nombre,
                                 ["categoria"] = categoria,
+                                // El nombre NO es único ni con su categoría: ESRI.style trae
+                                // dos «Verde» en «Predeterminado». El id sí.
+                                ["id"] = it.ID,
                                 ["clase"] = k.Nombre,
                                 ["tipo_simbolo"] = TipoSimbolo(it.Item as ISymbol)
                             });
@@ -103,8 +106,10 @@ namespace ArcmapMcp.AddIn.Handlers
                 throw new ArgumentException("Indica 'estilo': ruta a un .style o nombre de uno cargado en ArcMap"
                     + " (list_style_symbols sin parámetros los lista).");
             string nombre = Texto(parameters["nombre_simbolo"]);
-            if (nombre == null)
-                throw new ArgumentException("Indica 'nombre_simbolo' (list_style_symbols da los nombres).");
+            int? id = Parametros.Dado(parameters["id_simbolo"])
+                ? Parametros.LeerEntero(parameters["id_simbolo"], "id_simbolo", 0, 0, int.MaxValue) : (int?)null;
+            if (nombre == null && id == null)
+                throw new ArgumentException("Indica 'nombre_simbolo' o 'id_simbolo' (list_style_symbols da los dos).");
             string categoria = Texto(parameters["categoria_estilo"]);
             string etiqueta = Texto(parameters["etiqueta"]);
 
@@ -120,26 +125,30 @@ namespace ArcmapMcp.AddIn.Handlers
                 foreach (IStyleGalleryItem it in Items(galeria, clase.Nombre, uso.Ruta))
                 {
                     string n = it.Name ?? "";
-                    if (string.Equals(n, nombre, StringComparison.OrdinalIgnoreCase))
-                    {
-                        if (categoria == null || string.Equals(it.Category ?? "", categoria, StringComparison.OrdinalIgnoreCase))
-                            exactos.Add(it);
-                    }
-                    else if (parecidos.Count < 10 && n.IndexOf(nombre, StringComparison.OrdinalIgnoreCase) >= 0)
+                    bool casaNombre = nombre == null || string.Equals(n, nombre, StringComparison.OrdinalIgnoreCase);
+                    bool casaCategoria = categoria == null
+                        || string.Equals(it.Category ?? "", categoria, StringComparison.OrdinalIgnoreCase);
+                    bool casaId = id == null || it.ID == id.Value;
+                    if (casaNombre && casaCategoria && casaId)
+                        exactos.Add(it);
+                    else if (nombre != null && !casaNombre && parecidos.Count < 10
+                             && n.IndexOf(nombre, StringComparison.OrdinalIgnoreCase) >= 0)
                         parecidos.Add(n);
                 }
+                string pedido = (nombre != null ? "'" + nombre + "'" : "") + (id != null ? " con id " + id : "");
                 if (exactos.Count == 0)
-                    throw new ArgumentException("No hay ningún símbolo '" + nombre + "'"
+                    throw new ArgumentException("No hay ningún símbolo " + pedido
                         + (categoria != null ? " en la categoría '" + categoria + "'" : "")
                         + " en la clase '" + clase.Nombre + "' de " + uso.RutaCompleta + "."
                         + (parecidos.Count > 0 ? " Parecidos: " + string.Join(" | ", parecidos) + "." : "")
                         + " Busca con list_style_symbols(estilo, patron=...).");
                 if (exactos.Count > 1)
-                    throw new ArgumentException("Hay " + exactos.Count + " símbolos '" + nombre + "' en " + uso.RutaCompleta
-                        + ", en las categorías: " + string.Join(" | ", exactos.ConvertAll(i => "'" + (i.Category ?? "") + "'"))
-                        + ". Indica 'categoria_estilo'.");
+                    throw new ArgumentException("Hay " + exactos.Count + " símbolos " + pedido + " en " + uso.RutaCompleta
+                        + ": " + string.Join(" | ", exactos.ConvertAll(i => "id " + i.ID + " (categoría '" + (i.Category ?? "") + "')"))
+                        + ". Indica 'id_simbolo' (o 'categoria_estilo' si difieren en categoría).");
 
                 IStyleGalleryItem elegido = exactos[0];
+                nombre = elegido.Name; // con solo id_simbolo, para los mensajes de abajo
                 ISymbol delEstilo = elegido.Item as ISymbol;
                 if (delEstilo == null)
                     throw new ArgumentException("'" + nombre + "' no es un símbolo.");
@@ -152,6 +161,7 @@ namespace ArcmapMcp.AddIn.Handlers
                     ["estaba_cargado"] = uso.EstabaCargado,
                     ["nombre"] = elegido.Name,
                     ["categoria"] = elegido.Category,
+                    ["id"] = elegido.ID,
                     ["clase"] = clase.Nombre
                 };
             }

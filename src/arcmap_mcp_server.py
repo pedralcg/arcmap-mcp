@@ -1225,8 +1225,10 @@ def list_style_symbols(estilo: str = None, clase: str = None, patron: str = None
       `?`, comodín sobre el texto entero. Sin distinguir mayúsculas.
     - `limite` (1-2000): cuántos se devuelven; `total` y `truncado` dicen si hay más.
 
-    Cada símbolo trae `nombre`, `categoria`, `clase` y `tipo_simbolo`. El `nombre` (y,
-    si se repite, la `categoria`) es lo que pide `apply_style_symbol`.
+    Cada símbolo trae `nombre`, `categoria`, `id`, `clase` y `tipo_simbolo`. El
+    `nombre` es lo que pide `apply_style_symbol`; si se repite, el `id` lo desempata
+    (el nombre no es único ni dentro de su categoría: `ESRI.style` trae dos «Verde»
+    en «Predeterminado»).
     """
     params: dict = {"limite": limite}
     params.update({k: v for k, v in {"estilo": estilo, "clase": clase,
@@ -1235,8 +1237,9 @@ def list_style_symbols(estilo: str = None, clase: str = None, patron: str = None
 
 
 @mcp.tool()
-def apply_style_symbol(capa: str, estilo: str, nombre_simbolo: str, clase: str = None,
-                       categoria_estilo: str = None, etiqueta: str = None) -> dict:
+def apply_style_symbol(capa: str, estilo: str, nombre_simbolo: str = None, clase: str = None,
+                       categoria_estilo: str = None, etiqueta: str = None,
+                       id_simbolo: int = None) -> dict:
     """
     Pone a una capa de ENTIDADES, como símbolo único, un símbolo de un estilo `.style`
     (por ejemplo, el relleno de «Monte público» del estilo de la empresa). Sustituye la
@@ -1246,8 +1249,8 @@ def apply_style_symbol(capa: str, estilo: str, nombre_simbolo: str, clase: str =
     - `estilo`: nombre de un estilo cargado o ruta ABSOLUTA a un `.style` (se carga
       solo durante la llamada). `list_style_symbols` da los nombres.
     - `nombre_simbolo`: el nombre exacto (sin distinguir mayúsculas). Si hay varios con
-      el mismo nombre en categorías distintas, la llamada falla listándolas y hay que
-      pasar `categoria_estilo`.
+      ese nombre, la llamada falla listando su `id` y su categoría: se desempata con
+      `id_simbolo` (o `categoria_estilo`). Con `id_simbolo` solo, no hace falta el nombre.
     - `clase`: por defecto la que toca a la geometría de la capa (relleno para
       polígonos, línea, marcador para puntos). Un símbolo de otra geometría es error.
     - `etiqueta`: el texto de la entrada en la TOC.
@@ -1257,7 +1260,7 @@ def apply_style_symbol(capa: str, estilo: str, nombre_simbolo: str, clase: str =
     """
     return _client.send("apply_style_symbol", _params_simbolo(
         capa, estilo=estilo, nombre_simbolo=nombre_simbolo, clase=clase,
-        categoria_estilo=categoria_estilo, etiqueta=etiqueta))
+        categoria_estilo=categoria_estilo, etiqueta=etiqueta, id_simbolo=id_simbolo))
 
 
 @mcp.tool()
