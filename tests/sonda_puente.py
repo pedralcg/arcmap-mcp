@@ -49,30 +49,46 @@ else:
             # convertir enteros simples (p.ej. dpi=300)
             params[k] = int(v) if v.isdigit() else v
 
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.settimeout(20)
-try:
-    s.connect((HOST, PORT))
-except Exception as e:
-    print("NO HAY PUENTE en %s:%s -> %s" % (HOST, PORT, e))
-    print("Abre ArcMap y pulsa Iniciar en la barra arcmap-mcp.")
-    sys.exit(1)
-
-s.sendall(json.dumps({"type": cmd, "params": params}).encode("utf-8"))
-
-buf = b""
-resp = None
-while True:
-    chunk = s.recv(65536)
-    if not chunk:
-        break
-    buf += chunk
+def enviar_una():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(20)
     try:
-        resp = json.loads(buf.decode("utf-8"))
-        break
-    except ValueError:
-        continue
-s.close()
+        s.connect((HOST, PORT))
+    except Exception as e:
+        print("NO HAY PUENTE en %s:%s -> %s" % (HOST, PORT, e))
+        print("Abre ArcMap y pulsa Iniciar en la barra arcmap-mcp.")
+        sys.exit(1)
+
+    s.sendall(json.dumps({"type": cmd, "params": params}).encode("utf-8"))
+
+    buf = b""
+    resp = None
+    while True:
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+        try:
+            resp = json.loads(buf.decode("utf-8"))
+            break
+        except ValueError:
+            continue
+    s.close()
+    return resp
+
+
+# Un export con el mapa aun dibujando vuelve al momento con "dibujando: " (ADR-007: la
+# espera del E_PENDING va FUERA de ArcMap). El servidor MCP reintenta cada 3 s hasta
+# ARCMAP_ESPERA_DIBUJO; la sonda hace lo mismo, con tope de 120 s, y lo dice.
+import time
+resp = enviar_una()
+esperado = 0
+while (resp and not resp.get("ok") and str(resp.get("error", "")).startswith("dibujando: ")
+       and esperado < 120):
+    sys.stderr.write("(ArcMap dibujando; reintento en 3 s)\n")
+    time.sleep(3)
+    esperado += 3
+    resp = enviar_una()
 
 if resp is None:
     print("Sin respuesta valida del puente.")

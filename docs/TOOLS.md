@@ -5,8 +5,8 @@
 > lista existen solo para lo **repetitivo y de alto valor** —sobre todo las series de
 > planos (Data Driven Pages)—, no para replicar toda la API.
 
-**66 herramientas** sobre ArcMap 10.5. Unas **39 están cubiertas por la regresión en sesión
-viva** (`tests/regresion_sesion_viva.py`, 147 comprobaciones); el resto se ha ejercitado a
+**66 herramientas** sobre ArcMap 10.5. Unas **42 están cubiertas por la regresión en sesión
+viva** (`tests/regresion_sesion_viva.py`, 194 comprobaciones); el resto se ha ejercitado a
 mano en trabajo real, pero **no automáticamente**. El README, en «Herramientas MCP», explica
 por qué la distinción importa.
 
