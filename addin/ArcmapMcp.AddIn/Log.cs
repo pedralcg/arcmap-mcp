@@ -34,6 +34,15 @@ namespace ArcmapMcp.AddIn
             WriteLine("INFO ", msg);
         }
 
+        /// <summary>Algo que no ha ido como se quería pero es un caso previsto (el
+        /// puerto lo tiene otro ArcMap). No suma al contador de errores del botón
+        /// "Estado" ni lleva traza: con ellos, 260 de 1.483 [ERROR] del log eran esto
+        /// y tapaban los fallos de verdad (revisión del 2026-09-25).</summary>
+        public static void Warn(string msg)
+        {
+            WriteLine("WARN ", msg);
+        }
+
         public static void Error(string msg, Exception ex = null)
         {
             Estadisticas.RegistrarError(); // el contador que ve el botón "Estado"

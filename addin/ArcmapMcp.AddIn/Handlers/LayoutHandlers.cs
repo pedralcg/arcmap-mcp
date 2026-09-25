@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using ESRI.ArcGIS.ArcMapUI;
 using ESRI.ArcGIS.Carto;
+using ESRI.ArcGIS.Display;
 using ESRI.ArcGIS.Framework;
 using Newtonsoft.Json.Linq;
 
@@ -282,6 +283,201 @@ namespace ArcmapMcp.AddIn.Handlers
         private static string Texto(ElementoLayout e)
         {
             return ((ITextElement)e.Elemento).Text ?? "";
+        }
+
+        // ------------------------------------------------------------------ leyendas
+
+        /// <summary>Leyendas del layout que dibujan este mapa (también las que viven
+        /// dentro de un grupo de elementos).</summary>
+        internal static List<ILegend> LeyendasDelMapa(IMxDocument doc, IMap map)
+        {
+            var salida = new List<ILegend>();
+            foreach (ElementoLayout e in Elementos((IGraphicsContainer)doc.PageLayout))
+            {
+                ILegend lg = Leyenda(e);
+                if (lg != null && ReferenceEquals(lg.Map, map))
+                    salida.Add(lg);
+            }
+            return salida;
+        }
+
+        private static ILegend Leyenda(ElementoLayout e)
+        {
+            IMapSurroundFrame msf = e.Elemento as IMapSurroundFrame;
+            return msf != null ? msf.MapSurround as ILegend : null;
+        }
+
+        private static bool? LeerInterruptor(JObject parameters, string nombre)
+        {
+            JToken t = parameters[nombre];
+            if (t == null || t.Type == JTokenType.Null)
+                return null;
+            return Parametros.LeerBool(t, nombre, false);
+        }
+
+        private sealed class ItemEnLeyenda
+        {
+            public ElementoLayout Elemento;
+            public string NombreLeyenda;
+            public ILegend Leyenda;
+            public int Indice;
+            public ILegendItem Item;
+        }
+
+        /// <summary>
+        /// set_legend_item — cambia QUÉ muestra la entrada de una capa en la leyenda
+        /// (nombre de capa, encabezado, etiquetas de clase) sin tocar CÓMO se ve.
+        ///
+        /// La vía de arcpy (`legend.updateItem` con un estilo de ESRI.style) aplica el
+        /// estilo entero: en el 23_02 de ID2018 puso el nombre en negrita grande y los
+        /// años pequeños, y hubo que revertir. Aquí solo se tocan los interruptores de
+        /// ILegendItem; los símbolos de texto no se escriben, y se devuelven leídos
+        /// para que se vea que no han cambiado.
+        /// </summary>
+        public static JObject SetLegendItem(JObject parameters)
+        {
+            string capa = (string)parameters["capa"];
+            if (string.IsNullOrEmpty(capa))
+                throw new ArgumentException("Indica 'capa': el nombre de la capa tal como aparece en la leyenda.");
+            string filtroLeyenda = (string)parameters["leyenda"];
+            bool? mostrarNombre = LeerInterruptor(parameters, "mostrar_nombre");
+            bool? mostrarEncabezado = LeerInterruptor(parameters, "mostrar_encabezado");
+            bool? mostrarEtiquetas = LeerInterruptor(parameters, "mostrar_etiquetas");
+
+            IApplication app = ArcSession.App();
+            IMxDocument doc = ArcSession.Doc(app);
+            IGraphicsContainer gc = (IGraphicsContainer)doc.PageLayout;
+
+            var leyendas = new List<Tuple<ElementoLayout, string>>();
+            int n = 0;
+            foreach (ElementoLayout e in Elementos(gc))
+                if (Leyenda(e) != null)
+                    leyendas.Add(Tuple.Create(e, e.Nombre.Length > 0 ? e.Nombre : "(leyenda sin nombre #" + (++n) + ")"));
+            if (leyendas.Count == 0)
+                throw new ArgumentException("El layout no tiene ninguna leyenda.");
+            if (!string.IsNullOrEmpty(filtroLeyenda))
+            {
+                var filtradas = leyendas
+                    .Where(l => string.Equals(l.Item2, filtroLeyenda, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                if (filtradas.Count == 0)
+                    throw new ArgumentException("No hay ninguna leyenda llamada '" + filtroLeyenda
+                        + "'. Leyendas del layout: " + string.Join(", ", leyendas.Select(l => l.Item2)));
+                leyendas = filtradas;
+            }
+
+            var candidatos = new List<ItemEnLeyenda>();
+            var contenido = new List<string>();
+            foreach (var l in leyendas)
+            {
+                ILegend lg = Leyenda(l.Item1);
+                var nombres = new List<string>();
+                for (int k = 0; k < lg.ItemCount; k++)
+                {
+                    ILegendItem it = lg.get_Item(k);
+                    string nombreCapa = it.Layer != null ? it.Layer.Name : "";
+                    nombres.Add(nombreCapa);
+                    if (string.Equals(nombreCapa, capa, StringComparison.OrdinalIgnoreCase))
+                        candidatos.Add(new ItemEnLeyenda
+                        {
+                            Elemento = l.Item1, NombreLeyenda = l.Item2, Leyenda = lg, Indice = k, Item = it
+                        });
+                }
+                contenido.Add(l.Item2 + ": " + (nombres.Count > 0 ? string.Join(" | ", nombres) : "(vacía)"));
+            }
+
+            if (candidatos.Count == 0)
+                throw new ArgumentException("La capa '" + capa + "' no tiene entrada en "
+                    + (string.IsNullOrEmpty(filtroLeyenda) ? "ninguna leyenda" : "la leyenda '" + filtroLeyenda + "'")
+                    + ". Contenido: " + string.Join(" · ", contenido));
+
+            ItemEnLeyenda objetivo;
+            JToken tIndice = parameters["indice"];
+            if (candidatos.Count == 1)
+                objetivo = candidatos[0];
+            else if (tIndice != null && tIndice.Type != JTokenType.Null)
+                objetivo = candidatos[Parametros.LeerEntero(tIndice, "indice", 1, 1, candidatos.Count) - 1];
+            else
+            {
+                int i = 0;
+                throw new ArgumentException("La capa '" + capa + "' tiene " + candidatos.Count
+                    + " entradas de leyenda y no se elige por ti. Indica 'leyenda' o pasa 'indice' con el"
+                    + " número de esta lista: " + string.Join(" | ", candidatos.Select(c =>
+                        "[" + (++i) + "] " + c.NombreLeyenda + ", posición " + (c.Indice + 1))));
+            }
+
+            if (mostrarNombre == null && mostrarEncabezado == null && mostrarEtiquetas == null)
+                return Protocol.Result(EstadoItem(objetivo, null));
+
+            JObject antes = Interruptores(objetivo.Item);
+            if (mostrarNombre.HasValue) objetivo.Item.ShowLayerName = mostrarNombre.Value;
+            if (mostrarEncabezado.HasValue) objetivo.Item.ShowHeading = mostrarEncabezado.Value;
+            if (mostrarEtiquetas.HasValue) objetivo.Item.ShowLabels = mostrarEtiquetas.Value;
+
+            // Refresh reconstruye la leyenda con los interruptores nuevos; sin el
+            // UpdateElement del elemento de primer nivel, el cambio no se consolida
+            // y el export sale con la leyenda vieja (mismo motivo que set_text_element).
+            objetivo.Leyenda.Refresh();
+            try { gc.UpdateElement(objetivo.Elemento.Raiz); }
+            catch { /* sin contenedor propio: basta el refresco */ }
+            ((IActiveView)doc.PageLayout).PartialRefresh(esriViewDrawPhase.esriViewGraphics, null, null);
+            doc.ActiveView.Refresh();
+
+            return Protocol.Result(EstadoItem(objetivo, antes));
+        }
+
+        private static JObject Interruptores(ILegendItem it)
+        {
+            return new JObject
+            {
+                ["mostrar_nombre"] = it.ShowLayerName,
+                ["mostrar_encabezado"] = it.ShowHeading,
+                ["mostrar_etiquetas"] = it.ShowLabels
+            };
+        }
+
+        private static JObject EstadoItem(ItemEnLeyenda o, JObject antes)
+        {
+            var r = new JObject
+            {
+                ["leyenda"] = o.NombreLeyenda,
+                ["capa"] = o.Item.Layer != null ? o.Item.Layer.Name : null,
+                ["posicion_en_leyenda"] = o.Indice + 1,
+                ["cambiado"] = antes != null,
+                ["ahora"] = Interruptores(o.Item),
+                // Leídos, nunca escritos: la prueba de que el cambio no ha tocado el aspecto.
+                ["fuentes"] = new JObject
+                {
+                    ["nombre_capa"] = Fuente(o.Item.LayerNameSymbol),
+                    ["encabezado"] = Fuente(o.Item.HeadingSymbol),
+                    ["etiquetas"] = o.Item.LegendClassFormat != null
+                        ? Fuente(o.Item.LegendClassFormat.LabelSymbol) : null
+                }
+            };
+            if (antes != null)
+                r["antes"] = antes;
+            return r;
+        }
+
+        private static JToken Fuente(ITextSymbol sym)
+        {
+            if (sym == null)
+                return null;
+            try
+            {
+                stdole.IFontDisp f = sym.Font;
+                return new JObject
+                {
+                    ["fuente"] = f.Name,
+                    ["tamano"] = (double)f.Size,
+                    ["negrita"] = f.Bold,
+                    ["cursiva"] = f.Italic
+                };
+            }
+            catch
+            {
+                return new JObject { ["tamano"] = sym.Size };
+            }
         }
     }
 }

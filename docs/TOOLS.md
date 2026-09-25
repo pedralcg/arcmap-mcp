@@ -5,8 +5,8 @@
 > lista existen solo para lo **repetitivo y de alto valor** —sobre todo las series de
 > planos (Data Driven Pages)—, no para replicar toda la API.
 
-**58 herramientas** sobre ArcMap 10.5. Unas **34 están cubiertas por la regresión en sesión
-viva** (`tests/regresion_sesion_viva.py`, 106 comprobaciones); el resto se ha ejercitado a
+**60 herramientas** sobre ArcMap 10.5. Unas **36 están cubiertas por la regresión en sesión
+viva** (`tests/regresion_sesion_viva.py`, 114 comprobaciones); el resto se ha ejercitado a
 mano en trabajo real, pero **no automáticamente**. El README, en «Herramientas MCP», explica
 por qué la distinción importa.
 
@@ -118,6 +118,7 @@ arrastra al resto, y **anuncia siempre lo que trunca**.
 | `export_ddp` | Exporta el atlas a PDF: todas (`modo="ALL"`) / activa (`modo="CURRENT"`) / `rango` de IDs / lista de `valores`; multipágina o 1 PDF por página | snapshot |
 | `goto_ddp_page` | Encuadra la vista al extent de una página (por nº o valor de índice) | snapshot + nativo |
 | `list_layout_elements` | Lista elementos del layout (texto, leyenda, imagen) con nombre/tipo, **incluidos los de dentro de un grupo** (el cajetín agrupado), con su `grupo` | nativo |
+| `set_legend_item` | Qué muestra la entrada de una capa en la leyenda (nombre de capa, encabezado, etiquetas) **sin cambiar las fuentes**; devuelve las fuentes leídas como prueba. Si la capa está en varias leyendas no elige: desempate con `leyenda` o `indice` | nativo |
 | `set_text_element` | Cambia el texto de un elemento (título, fecha, nº plano), también dentro de un grupo. Si el selector casa con varios no elige: los lista numerados y se desempata con `grupo` o, en último caso, `indice` | nativo |
 | `set_definition_query` | Fija/limpia la def. query de una capa (planos temáticos por filtro) | nativo |
 | `set_layer_visibility` | Enciende/apaga capa o grupo (la leyenda del layout se actualiza) | nativo |
@@ -177,7 +178,8 @@ respetan definition query y selección, igual que la tabla de atributos).
 | `list_fields` | Campos de capa/tabla (nombre, tipo) |
 | `get_layer_info` | Detalle de una capa: campos, tipo geom, extent, CRS, count |
 | `get_layer_features` | Lee FILAS de atributos (respeta def. query/selección). `limite` entre 1 y 5000; admite campos de una tabla unida |
-| `add_layer` | Añade capa desde shp/fgdb/raster al df |
+| `add_layer` | Añade capa desde shp/fgdb/ráster/`.lyr` al df. `en_leyenda=False`: no entra en la leyenda del plano (las leyendas de ArcMap añaden solas cada capa nueva) |
+| `add_group` | Crea una capa de **grupo** vacía (en la raíz o dentro de otro grupo), encendida o apagada y, si se quiere, fuera de la leyenda |
 | `remove_layer` | Quita capa por nombre |
 | `apply_symbology_from_layer` | Aplica un `.lyr` (estilos canónicos) a una capa |
 | `set_scale` | Fija la escala del df activo |
