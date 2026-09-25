@@ -424,6 +424,58 @@ class TestAuditFolderValida(unittest.TestCase):
         self.assertEqual(r["mxd_encontrados"], 0)  # la raíz del repo no tiene .mxd
 
 
+class TestAuditFolderLoQueSaleEnElPlano(unittest.TestCase):
+    """El resumen tiene que dar el número que importa para el plano, no solo el total.
+
+    En ID2018 (bloque 02) había 2.335 capas rotas y solo 87 se dibujaban: con el total
+    a secas, la auditoría señalaba 27 veces más problemas de los que había. Aquí el
+    auditor Python 2.7 se sustituye por su salida, para probar solo el agregado.
+    """
+
+    def _auditar(self, salidas):
+        import subprocess
+        import tempfile
+        carpeta = tempfile.mkdtemp(prefix="audit_plano_")
+        self.addCleanup(lambda: __import__("shutil").rmtree(carpeta, ignore_errors=True))
+        for nombre in salidas:
+            with open(os.path.join(carpeta, nombre), "wb") as fh:
+                fh.write(b"no es un mxd")
+
+        def falso_run(args, **_kw):
+            datos = dict(salidas[os.path.basename(args[-1])], ok=True)
+            return subprocess.CompletedProcess(args, 0, json.dumps(datos).encode(), b"")
+
+        with unittest.mock.patch.object(servidor, "_arcmap_esta_abierto", return_value=False), \
+                unittest.mock.patch.object(servidor, "_python27_arcgis",
+                                           return_value=sys.executable), \
+                unittest.mock.patch("subprocess.run", side_effect=falso_run):
+            return servidor.audit_folder(carpeta)
+
+    def test_suma_por_separado_lo_que_se_ve(self):
+        r = self._auditar({
+            "a.mxd": {"num_capas": 40, "num_rotas": 30, "num_rotas_en_plano": 2,
+                      "num_con_query": 5, "num_con_query_en_plano": 1,
+                      "num_en_plano_desconocido": 0, "marcos": [], "capas": []},
+            "b.mxd": {"num_capas": 10, "num_rotas": 4, "num_rotas_en_plano": 0,
+                      "num_con_query": 3, "num_con_query_en_plano": 3,
+                      "num_en_plano_desconocido": 1, "marcos": [], "capas": []},
+        })
+        self.assertTrue(r["ok"], r)
+        res = r["resumen"]
+        self.assertEqual((res["num_rotas"], res["num_rotas_en_plano"]), (34, 2))
+        self.assertEqual((res["num_con_query"], res["num_con_query_en_plano"]), (8, 4))
+        self.assertEqual(res["num_en_plano_desconocido"], 1)
+        fila = r["documentos"][0]
+        self.assertEqual(fila["num_rotas_en_plano"], 2)
+        self.assertIn("marcos", fila)
+
+    def test_sin_pasada_de_capas_no_inventa_ceros(self):
+        """Con `con_capas=False` no se abrió nada: un `num_rotas_en_plano: 0` en el
+        resumen se leería como «ninguna rota», que no se sabe."""
+        r = servidor.audit_folder(RAIZ, con_capas=False)
+        self.assertNotIn("num_rotas_en_plano", r["resumen"])
+
+
 class TestArgumentosEstrictos(unittest.TestCase):
     """Un argumento que la tool no declara es ERROR, no se ignora.
 

@@ -32,7 +32,7 @@ normal falla, que es cuando más falta hace saber algo.
 | Tool | Qué hace |
 |---|---|
 | `describe_mxd` | Versión declarada de un `.mxd` **sin abrirlo**, más un veredicto frente a la versión de ArcMap. Milisegundos, sin arcpy y sin licencia |
-| `audit_folder` | Inventario de TODOS los `.mxd` de una carpeta: versión, capas, fuentes rotas y definition queries |
+| `audit_folder` | Inventario de TODOS los `.mxd` de una carpeta: versión, capas, fuentes rotas y definition queries, **separando lo que sale en el plano** (capa y grupos encendidos, marco dentro de la hoja) de lo que solo está en el documento |
 
 **`describe_mxd` descarta tanto como acusa.** `arcpy.mapping.MapDocument()` falla con un
 mensaje genérico ("no puede abrir documento de mapa") que vale igual para una ruta mala, un
@@ -40,6 +40,16 @@ fichero corrupto o un documento de versión superior. Si la versión declarada e
 de tu ArcMap, ahí está la causa; si coincide, la versión queda **descartada** y hay que mirar
 otra cosa. Ojo con lo que no garantiza: es lo que el documento dice de sí mismo, no
 necesariamente la versión de la aplicación que lo grabó.
+
+**`audit_folder` cuenta dos veces, y el número que importa es el del plano.**
+`num_rotas_en_plano` y `num_con_query_en_plano` (por documento y sumados en `resumen`) solo
+cuentan capas que se dibujan: encendidas ellas y todos sus grupos (`visible_efectivo`) y en un
+marco que cae al menos en parte en la hoja (`marcos[].en_pagina`: `dentro` / `parcial` /
+`fuera`). Los totales `num_rotas` y `num_con_query` siguen ahí, pero en una serie real
+arrastran grupos apagados y «Nuevo marco de datos» olvidados fuera de la hoja: en una serie
+real de siete planos, 335 capas rotas en total y 30 en los planos. Un `None` es «no se pudo leer», no
+«apagada», y se cuenta en `num_en_plano_desconocido`. No se mira el rango de escalas de la
+capa (arcpy.mapping 10.x no lo expone).
 
 **⚠️ `audit_folder` con `con_capas=True` exige ArcMap CERRADO.** El arcpy standalone se
 **bloquea al abrir un documento mientras ArcMap tiene tomada la licencia de Desktop**: el

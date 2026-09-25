@@ -1598,6 +1598,15 @@ def describe_mxd(ruta: str) -> dict:
     }
 
 
+# Lo que `audit_folder` copia del auditor a cada documento, y lo que suma en el
+# resumen. Los `_en_plano` van primero a propósito: son los que dicen si el plano
+# sale mal; los totales incluyen capas en grupos apagados y marcos fuera de la hoja.
+_CLAVES_AUDITOR = ("num_rotas_en_plano", "num_con_query_en_plano", "num_capas",
+                   "num_rotas", "num_con_query", "num_en_plano_desconocido")
+_SUMAS_AUDITOR = ("num_rotas_en_plano", "num_rotas", "num_con_query_en_plano",
+                  "num_con_query", "num_en_plano_desconocido")
+
+
 def _arcmap_esta_abierto():
     """True si hay un ArcMap.exe corriendo. None si no se pudo averiguar.
 
@@ -1669,6 +1678,19 @@ def audit_folder(ruta: str, con_capas: bool = True, timeout_por_documento: int =
     documento más ~6 s de `import arcpy` por proceso. Empieza con `con_capas=False`
     para tener el mapa de versiones al instante.
 
+    **QUÉ SALE EN EL PLANO Y QUÉ NO.** Lee primero `num_rotas_en_plano` y
+    `num_con_query_en_plano` (por documento y sumados en `resumen`), no los totales:
+    `num_rotas` cuenta también capas dentro de grupos apagados y en marcos fuera de
+    la hoja, que no se dibujan. En una serie real de planos había 2.335
+    capas rotas y solo 87 salían en los planos. Cada capa trae:
+    - `data_frame` y `nombre_largo` (la ruta de grupos, `Grupo\\Capa`);
+    - `visible` (su casilla), `visible_efectivo` (ella y todos sus grupos) y
+      `en_plano` (además, su marco cae al menos en parte en la hoja).
+    Cada documento trae `marcos`, con posición, tamaño y `en_pagina`
+    (`dentro` / `parcial` / `fuera`). Un `None` en cualquiera de esos campos es «no se
+    pudo leer», no «apagada»; se cuentan en `num_en_plano_desconocido`. Lo que NO se
+    mira: el rango de escalas de la capa, que arcpy.mapping 10.x no expone.
+
     `max_documentos` corta la lista (por defecto 200) y **lo dice** en la
     respuesta: nunca trunca en silencio. `max_documentos` y `timeout_por_documento`
     tienen que ser enteros >= 1; con 0 o negativos la auditoría se devuelve vacía o
@@ -1738,6 +1760,8 @@ def audit_folder(ruta: str, con_capas: bool = True, timeout_por_documento: int =
 
     resultados = []
     resumen = {"con_capas": 0, "timeout": 0, "error_al_abrir": 0, "ilegibles": 0}
+    if con_capas:
+        resumen.update((clave, 0) for clave in _SUMAS_AUDITOR)
     versiones: dict = {}
 
     for doc in documentos:
@@ -1762,9 +1786,11 @@ def audit_folder(ruta: str, con_capas: bool = True, timeout_por_documento: int =
                 bruto = proc.stdout.decode("utf-8", "replace").strip()
                 datos = json.loads(bruto) if bruto else {"ok": False, "error": "sin salida"}
                 if datos.get("ok"):
-                    fila["num_capas"] = datos.get("num_capas")
-                    fila["num_rotas"] = datos.get("num_rotas")
-                    fila["num_con_query"] = datos.get("num_con_query")
+                    for clave in _CLAVES_AUDITOR:
+                        fila[clave] = datos.get(clave)
+                    for clave in _SUMAS_AUDITOR:
+                        resumen[clave] += datos.get(clave) or 0
+                    fila["marcos"] = datos.get("marcos")
                     fila["capas"] = datos.get("capas")
                     resumen["con_capas"] += 1
                 else:
