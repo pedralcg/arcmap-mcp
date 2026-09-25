@@ -550,6 +550,88 @@ else:
     if not inicial.get("ok"):
         fallos.append(("set_labels", str(inicial.get("error"))[:110]))
 
+sys.stdout.write("--- simbolo unico y edit_symbol (2.15.0) ---" + chr(10))
+# El control de edit_symbol es lo que NO debe cambiar: al tocar el borde, el relleno
+# sigue igual; al tocar una categoria, la de al lado sigue igual. Una tool que
+# rehiciera la simbologia pasaria "lee de vuelta lo pedido" y fallaria aqui.
+
+
+def comprobar_sim(nombre, bien, det=""):
+    global ok_n
+    if bien:
+        ok_n += 1
+    else:
+        fallos.append((nombre, str(det)[:200]))
+    sys.stdout.write("  [%s] %s%s" % ("OK " if bien else "FALLO", nombre, chr(10)))
+
+
+r = t("set_single_symbology", {"capa": NOMBRE_VEC, "color_relleno": "#A8D5A2",
+                               "color_borde": [46, 125, 50], "grosor_borde": 1.2,
+                               "transparencia": 30, "etiqueta": "ENP"})
+if r and r.get("ok"):
+    res = r["result"]
+    k = res["clases"][0]
+    comprobar_sim("set_single_symbology deja UNA clase con lo pedido",
+                  res["renderer"] == "simple" and len(res["clases"]) == 1
+                  and k["color_relleno"] == "#A8D5A2" and k["color_borde"] == "#2E7D32"
+                  and k["grosor_borde"] == 1.2 and res["transparencia"] == 30
+                  and k["etiqueta"] == "ENP", res)
+    r2 = t("edit_symbol", {"capa": NOMBRE_VEC, "color_borde": "#000000"}, nota="(solo el borde)")
+    if r2 and r2.get("ok"):
+        k2 = r2["result"]["clases"][0]
+        comprobar_sim("edit_symbol no toca el relleno al cambiar el borde",
+                      k2["color_borde"] == "#000000" and k2["color_relleno"] == "#A8D5A2"
+                      and k2["grosor_borde"] == 1.2, k2)
+t("set_single_symbology", {"capa": NOMBRE_VEC, "tamano": 5}, espera_ok=False,
+  nota="(tamano en poligonos: error)")
+t("set_single_symbology", {"capa": NOMBRE_VEC, "sin_relleno": True, "color_relleno": "#FFFFFF"},
+  espera_ok=False, nota="(sin_relleno y color a la vez)")
+r = t("set_single_symbology", {"capa": NOMBRE_VEC, "sin_relleno": True}, nota="(hueco)")
+if r and r.get("ok"):
+    comprobar_sim("sin_relleno deja el poligono hueco", r["result"]["clases"][0]["sin_relleno"] is True,
+                  r["result"])
+
+t("set_graduated_symbology", {"capa": NOMBRE_VEC, "campo": "Superficie"})
+leido = enviar("edit_symbol", {"capa": NOMBRE_VEC})
+if leido.get("ok") and len(leido["result"]["clases"]) >= 2:
+    antes = leido["result"]["clases"]
+    r = t("edit_symbol", {"capa": NOMBRE_VEC, "categoria": "1", "color_relleno": "#FF0000"},
+          nota="(rangos, clase 1)")
+    if r and r.get("ok"):
+        ahora = r["result"]["clases"]
+        comprobar_sim("edit_symbol cambia la clase 1 y deja la 2",
+                      ahora[0]["color_relleno"] == "#FF0000"
+                      and ahora[1]["color_relleno"] == antes[1]["color_relleno"]
+                      and r["result"]["renderer"] == "rangos"
+                      and len(ahora) == len(antes), {"antes": antes[:2], "ahora": ahora[:2]})
+    t("edit_symbol", {"capa": NOMBRE_VEC, "color_relleno": "#00FF00"}, espera_ok=False,
+      nota="(relleno a todas: borraria la clasificacion)")
+    r = t("edit_symbol", {"capa": NOMBRE_VEC, "grosor_borde": 0.2}, nota="(borde en todas)")
+    if r and r.get("ok"):
+        comprobar_sim("el borde cambia en todas y los rellenos se quedan",
+                      all(c["grosor_borde"] == 0.2 for c in r["result"]["clases"])
+                      and r["result"]["clases"][1]["color_relleno"] == antes[1]["color_relleno"],
+                      r["result"]["clases"][:2])
+    t("edit_symbol", {"capa": NOMBRE_VEC, "categoria": "no_existe", "color_relleno": "#FF0000"},
+      espera_ok=False, nota="(categoria inexistente)")
+else:
+    fallos.append(("edit_symbol", "no se pudo leer la graduada: " + str(leido)[:150]))
+
+t("set_unique_values_symbology", {"capa": NOMBRE_VEC, "campo": "Municipio"})
+leido = enviar("edit_symbol", {"capa": NOMBRE_VEC})
+if leido.get("ok") and len(leido["result"]["clases"]) >= 2:
+    c0, c1 = leido["result"]["clases"][0], leido["result"]["clases"][1]
+    r = t("edit_symbol", {"capa": NOMBRE_VEC, "categoria": c0["categoria"], "color_relleno": "#123456"},
+          nota="(valores unicos, por valor)")
+    if r and r.get("ok"):
+        ahora = r["result"]["clases"]
+        comprobar_sim("edit_symbol cambia un valor unico y deja el siguiente",
+                      ahora[0]["color_relleno"] == "#123456"
+                      and ahora[1]["color_relleno"] == c1["color_relleno"]
+                      and r["result"]["categorias_cambiadas"] == [c0["etiqueta"]], ahora[:2])
+else:
+    fallos.append(("edit_symbol", "no se pudo leer los valores unicos: " + str(leido)[:150]))
+
 sys.stdout.write("--- limpieza ---" + chr(10))
 t("remove_layer", {"capa": "real_NUEVO.tif"})
 t("remove_layer", {"capa": NOMBRE_VEC})

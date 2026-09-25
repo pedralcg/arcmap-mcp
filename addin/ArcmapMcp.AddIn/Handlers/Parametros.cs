@@ -72,6 +72,20 @@ namespace ArcmapMcp.AddIn.Handlers
             return new RgbColorClass { Red = r, Green = g, Blue = b };
         }
 
+        /// <summary>Un color leído de ArcObjects como "#RRGGBB", para devolverlo en la
+        /// misma notación en que se pide. null si no hay color o es "sin color"
+        /// (NullColor: un relleno hueco).</summary>
+        public static string Hex(IColor c)
+        {
+            if (c == null || c.NullColor)
+                return null;
+            IRgbColor rgb = c as IRgbColor;
+            if (rgb != null)
+                return string.Format("#{0:X2}{1:X2}{2:X2}", rgb.Red, rgb.Green, rgb.Blue);
+            int v = c.RGB; // 0x00BBGGRR
+            return string.Format("#{0:X2}{1:X2}{2:X2}", v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF);
+        }
+
         /// <summary>Entero del contrato JSON con null-check y rango. Un JSON null
         /// vale como "no lo mando" (el relay manda null en los opcionales), no como
         /// error de tipo.</summary>
@@ -95,6 +109,28 @@ namespace ArcmapMcp.AddIn.Handlers
             if (v < min || v > max)
                 throw new ArgumentException("'" + nombre + "' debe estar entre " + min + " y " + max
                     + ". Recibido: " + v);
+            return v;
+        }
+
+        /// <summary>¿Viene el parámetro? Ausente y JSON null valen lo mismo: el relay
+        /// manda null en los opcionales que no se pasan.</summary>
+        public static bool Dado(JToken t)
+        {
+            return t != null && t.Type != JTokenType.Null;
+        }
+
+        /// <summary>Número opcional con rango: null si no viene, error si no es un
+        /// número o se sale del rango. Para los parámetros "solo cambia lo que pases".</summary>
+        public static double? LeerDouble(JToken t, string nombre, double min, double max)
+        {
+            if (!Dado(t))
+                return null;
+            if (t.Type != JTokenType.Integer && t.Type != JTokenType.Float)
+                throw new ArgumentException("'" + nombre + "' debe ser un número. Recibido: " + Texto(t));
+            double v = (double)t;
+            if (v < min || v > max)
+                throw new ArgumentException("'" + nombre + "' debe estar entre " + min + " y " + max
+                    + ". Recibido: " + Texto(t));
             return v;
         }
 

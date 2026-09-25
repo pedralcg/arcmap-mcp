@@ -475,6 +475,8 @@ namespace ArcmapMcp.AddIn
                 { "set_graduated_symbology",    Handlers.LayerHandlers.SetGraduatedSymbology },
                 { "set_raster_symbology",       Handlers.RasterSymbologyHandlers.SetRasterSymbology },
                 { "set_unique_values_symbology", Handlers.UniqueValuesHandlers.SetUniqueValuesSymbology },
+                { "set_single_symbology",       Handlers.SymbolHandlers.SetSingleSymbology },
+                { "edit_symbol",                Handlers.SymbolHandlers.EditSymbol },
                 { "get_bookmarks",              Handlers.BookmarkHandlers.GetBookmarks },
                 { "add_bookmark",               Handlers.BookmarkHandlers.AddBookmark },
                 { "remove_bookmark",            Handlers.BookmarkHandlers.RemoveBookmark },

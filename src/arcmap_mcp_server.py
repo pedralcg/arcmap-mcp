@@ -1105,6 +1105,69 @@ def set_unique_values_symbology(capa: str, campo: str, tamano: float = None,
     return _client.send("set_unique_values_symbology", params)
 
 
+def _params_simbolo(capa, **valores):
+    """Solo viaja lo que se pasa: un null que llegara al add-in sería indistinguible
+    de «quítalo»."""
+    params: dict = {"capa": capa}
+    params.update({k: v for k, v in valores.items() if v is not None})
+    return params
+
+
+@mcp.tool()
+def set_single_symbology(capa: str, color_relleno: list | str = None,
+                         color_borde: list | str = None, grosor_borde: float = None,
+                         sin_relleno: bool = None, tamano: float = None,
+                         transparencia: float = None, etiqueta: str = None) -> dict:
+    """
+    Pone a una capa de ENTIDADES **un solo símbolo** (sin clasificar), con los colores
+    que pidas. Sustituye la simbología que tenga.
+
+    Es lo que no se podía hacer: forzar la graduada o los valores únicos a un solo color
+    llena la tabla de contenidos con una entrada por entidad, y recargar la capa la trae
+    con un color aleatorio. Sin colores, sale gris neutro, siempre el mismo.
+
+    - Polígonos: `color_relleno`, `color_borde`, `grosor_borde` (pt); `sin_relleno=True`
+      deja solo el contorno.
+    - Líneas: el color de la línea es `color_borde` y su ancho `grosor_borde`. Pasar
+      `color_relleno` a una línea es error.
+    - Puntos: `color_relleno`, `tamano` (pt) y, opcional, `color_borde`/`grosor_borde`.
+    - `transparencia` 0-100, de la capa. `etiqueta`: el texto de la entrada en la TOC.
+    - Colores: `[R, G, B]` o `"#RRGGBB"`; mal formado es error.
+
+    Para cambiar un color de una simbología que ya está montada (una categoría de unos
+    valores únicos, por ejemplo) sin rehacerla, usa `edit_symbol`.
+    """
+    return _client.send("set_single_symbology", _params_simbolo(
+        capa, color_relleno=color_relleno, color_borde=color_borde, grosor_borde=grosor_borde,
+        sin_relleno=sin_relleno, tamano=tamano, transparencia=transparencia, etiqueta=etiqueta))
+
+
+@mcp.tool()
+def edit_symbol(capa: str, categoria: str | int = None, color_relleno: list | str = None,
+                color_borde: list | str = None, grosor_borde: float = None,
+                sin_relleno: bool = None, tamano: float = None,
+                transparencia: float = None) -> dict:
+    """
+    Cambia SOLO lo que pidas de la simbología que la capa YA tiene, sin rehacerla:
+    símbolo único, valores únicos o rangos. El resto del símbolo (tipo, patrón, lo que no
+    se pida) y las demás categorías se quedan como estaban.
+
+    - `categoria`: en valores únicos, el valor o su etiqueta; en rangos, el número de la
+      clase (1..n) o su etiqueta. Sin ella se aplica a TODAS las categorías, pero solo lo
+      que no borra la clasificación (borde, grosor, tamaño, transparencia): cambiar el
+      relleno de todas a la vez es error.
+    - Los demás parámetros, como en `set_single_symbology`.
+
+    Sin nada que cambiar, devuelve la simbología actual: úsalo así para ver las
+    categorías y sus colores antes de tocar. La respuesta trae cada clase leída de vuelta,
+    `categorias_cambiadas` y el estado `antes`.
+    """
+    return _client.send("edit_symbol", _params_simbolo(
+        capa, categoria=None if categoria is None else str(categoria), color_relleno=color_relleno, color_borde=color_borde,
+        grosor_borde=grosor_borde, sin_relleno=sin_relleno, tamano=tamano,
+        transparencia=transparencia))
+
+
 @mcp.tool()
 def get_bookmarks() -> dict:
     """Lista los marcadores espaciales del data frame activo, con su extensión."""

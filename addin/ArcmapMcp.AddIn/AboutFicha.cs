@@ -36,7 +36,7 @@ namespace ArcmapMcp.AddIn
         // 1:1 — cada comando del puente es una @mcp.tool de src/arcmap_mcp_server.py
         // (execute_code es la de execute_arcpy) — verificada el 2026-09-23:
         // 46 nativos + 9 de fondo + 3 sin puente = 58 tools. 2.14.0: 48 nativos
-        // (add_group, set_legend_item) = 60. 2.15.0: 49 nativos (set_labels) = 61.
+        // (add_group, set_legend_item) = 60. 2.15.0: 51 nativos (set_labels, set_single_symbology, edit_symbol) = 63.
         private static int NumHerramientas
         {
             get { return McpServer.NumComandos + ToolsSinPuente; }

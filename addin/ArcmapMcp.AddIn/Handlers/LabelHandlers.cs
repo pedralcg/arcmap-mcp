@@ -33,14 +33,14 @@ namespace ArcmapMcp.AddIn.Handlers
 
             string expresion = Texto(parameters["expresion"]);
             string filtroClase = Texto(parameters["clase"]);
-            double? tamano = LeerDouble(parameters["tamano"], "tamano", 1, 500);
-            double? halo = LeerDouble(parameters["halo"], "halo", 0, 50);
-            bool hayColor = Dado(parameters["color"]);
-            bool hayColorHalo = Dado(parameters["color_halo"]);
+            double? tamano = Parametros.LeerDouble(parameters["tamano"], "tamano", 1, 500);
+            double? halo = Parametros.LeerDouble(parameters["halo"], "halo", 0, 50);
+            bool hayColor = Parametros.Dado(parameters["color"]);
+            bool hayColorHalo = Parametros.Dado(parameters["color_halo"]);
             IColor color = hayColor ? Parametros.LeerColor(parameters["color"], "color", 0, 0, 0) : null;
             IColor colorHalo = Parametros.LeerColor(parameters["color_halo"], "color_halo", 255, 255, 255);
             JToken tActivar = parameters["activar"];
-            bool? activar = Dado(tActivar) ? Parametros.LeerBool(tActivar, "activar", true) : (bool?)null;
+            bool? activar = Parametros.Dado(tActivar) ? Parametros.LeerBool(tActivar, "activar", true) : (bool?)null;
 
             if (halo == null && hayColorHalo)
                 throw new ArgumentException("'color_halo' sin 'halo' no hace nada: indica también el grosor"
@@ -216,11 +216,11 @@ namespace ArcmapMcp.AddIn.Handlers
                     if (ts != null)
                     {
                         c["tamano"] = ts.Size;
-                        c["color"] = Hex(ts.Color);
+                        c["color"] = Parametros.Hex(ts.Color);
                         IMask m = ts as IMask;
                         bool conHalo = m != null && m.MaskStyle == esriMaskStyle.esriMSHalo;
                         c["halo"] = conHalo ? m.MaskSize : 0.0;
-                        c["color_halo"] = conHalo && m.MaskSymbol != null ? Hex(m.MaskSymbol.Color) : null;
+                        c["color_halo"] = conHalo && m.MaskSymbol != null ? Parametros.Hex(m.MaskSymbol.Color) : null;
                     }
                 }
                 string filtro = null;
@@ -243,37 +243,10 @@ namespace ArcmapMcp.AddIn.Handlers
             return r;
         }
 
-        private static string Hex(IColor c)
-        {
-            if (c == null)
-                return null;
-            IRgbColor rgb = c as IRgbColor;
-            if (rgb != null)
-                return string.Format("#{0:X2}{1:X2}{2:X2}", rgb.Red, rgb.Green, rgb.Blue);
-            int v = c.RGB; // 0x00BBGGRR
-            return string.Format("#{0:X2}{1:X2}{2:X2}", v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF);
-        }
-
-        private static bool Dado(JToken t)
-        {
-            return t != null && t.Type != JTokenType.Null;
-        }
-
         private static string Texto(JToken t)
         {
-            return Dado(t) ? (string)t : null;
+            return Parametros.Dado(t) ? (string)t : null;
         }
 
-        private static double? LeerDouble(JToken t, string nombre, double min, double max)
-        {
-            if (!Dado(t))
-                return null;
-            if (t.Type != JTokenType.Integer && t.Type != JTokenType.Float)
-                throw new ArgumentException("'" + nombre + "' debe ser un número. Recibido: " + t);
-            double v = (double)t;
-            if (v < min || v > max)
-                throw new ArgumentException("'" + nombre + "' debe estar entre " + min + " y " + max + ". Recibido: " + v);
-            return v;
-        }
     }
 }

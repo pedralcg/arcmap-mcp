@@ -5,7 +5,7 @@
 > lista existen solo para lo **repetitivo y de alto valor** —sobre todo las series de
 > planos (Data Driven Pages)—, no para replicar toda la API.
 
-**61 herramientas** sobre ArcMap 10.5. Unas **37 están cubiertas por la regresión en sesión
+**63 herramientas** sobre ArcMap 10.5. Unas **37 están cubiertas por la regresión en sesión
 viva** (`tests/regresion_sesion_viva.py`, 129 comprobaciones); el resto se ha ejercitado a
 mano en trabajo real, pero **no automáticamente**. El README, en «Herramientas MCP», explica
 por qué la distinción importa.
@@ -209,7 +209,18 @@ respuesta lo avisa y te manda aquí.
 | `set_unique_values_symbology` | Categorías por valores únicos de un campo (capas de ENTIDADES) |
 | `set_raster_symbology` | RÁSTER: `modo="clasificado"` (2-32 clases), `"estirado"` (rampa continua) o `"unico"` (un color por valor de píxel) |
 | `apply_symbology_from_layer` | Aplica un `.lyr` plantilla ya preparado |
+| `set_single_symbology` | **Un solo símbolo** (sin clasificar) con los colores pedidos: relleno, borde y grosor, hueco, tamaño en puntos, transparencia. Sin colores sale gris neutro, siempre el mismo |
+| `edit_symbol` | Cambia **solo lo pedido** de la simbología que ya tiene la capa (símbolo único, valores únicos o rangos), sin rehacerla; `categoria` elige la clase. Sin nada que cambiar, la lee |
 | `set_labels` | Etiquetas de una capa de ENTIDADES: expresión, tamaño, color y halo; enciende o apaga. Devuelve cómo quedó cada clase **leída de la capa** y el motor del mapa (Maplex o estándar) |
+
+**Un color, sin rehacer la leyenda.** Antes de `set_single_symbology` no había forma de dejar
+una capa con un solo color: forzar la graduada o los valores únicos a un color pinta bien el
+mapa pero llena la tabla de contenidos con una entrada por entidad, y recargar la capa la trae
+con un color aleatorio. `edit_symbol` trabaja sobre una **copia** del símbolo de cada clase y
+cambia solo lo pedido, así que el tipo de símbolo, los patrones y las demás categorías no se
+tocan. Sin `categoria`, en una capa clasificada cambia lo común a todas (borde, grosor, tamaño,
+transparencia) y **se niega a cambiar el relleno de todas**, que borraría la clasificación. Lo
+que no aplica a la geometría (relleno en líneas, `tamano` en polígonos) es error, no se ignora.
 
 **`set_labels` modifica las clases de etiquetas que ya tiene la capa; no las sustituye.**
 La vía obvia en ArcObjects, vaciar las clases y crear unas nuevas, tiene un fallo silencioso: en un

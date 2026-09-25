@@ -650,6 +650,40 @@ class TestSetLabelsParametros(unittest.TestCase):
         self.assertIs(ll["params"]["activar"], False)
 
 
+class TestSimbologiaParametros(unittest.TestCase):
+    """set_single_symbology y edit_symbol: solo viaja lo indicado, y `categoria`
+    numérica (la clase 2 de unos rangos) llega como texto, que es como la compara el
+    add-in contra valores y etiquetas."""
+
+    def setUp(self):
+        self.espia = ClienteEspia()
+        self.original = servidor._client
+        servidor._client = self.espia
+        self.addCleanup(setattr, servidor, "_client", self.original)
+
+    def _llamar(self, tool, args):
+        import asyncio
+        asyncio.run(servidor.mcp.call_tool(tool, args))
+        return self.espia.llamadas[-1]
+
+    def test_single_solo_lo_indicado(self):
+        ll = self._llamar("set_single_symbology", {"capa": "ENP", "color_relleno": "#A8D5A2",
+                                                   "sin_relleno": False})
+        self.assertEqual(ll["ctype"], "set_single_symbology")
+        self.assertEqual(ll["params"], {"capa": "ENP", "color_relleno": "#A8D5A2",
+                                        "sin_relleno": False})
+
+    def test_edit_categoria_numerica_viaja_como_texto(self):
+        ll = self._llamar("edit_symbol", {"capa": "Estratos", "categoria": 2,
+                                          "color_relleno": [255, 0, 0]})
+        self.assertEqual(ll["params"], {"capa": "Estratos", "categoria": "2",
+                                        "color_relleno": [255, 0, 0]})
+
+    def test_edit_sin_nada_es_solo_lectura(self):
+        ll = self._llamar("edit_symbol", {"capa": "Estratos"})
+        self.assertEqual(ll["params"], {"capa": "Estratos"})
+
+
 class TestExportMxdLoteValida(unittest.TestCase):
     """Lo que se rechaza ANTES de lanzar un solo python.exe."""
 
