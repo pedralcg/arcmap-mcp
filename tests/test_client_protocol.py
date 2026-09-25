@@ -704,6 +704,46 @@ class TestSimbologiaParametros(unittest.TestCase):
                                         "nombre_simbolo": "Monte público"})
 
 
+class TestTocYServicios(unittest.TestCase):
+    """move_layer y el WMS de add_layer: solo viaja lo indicado. Un `posicion` o un
+    `visible` null que llegara al add-in cambiaría el defecto que decide él."""
+
+    def setUp(self):
+        self.espia = ClienteEspia()
+        self.original = servidor._client
+        servidor._client = self.espia
+        self.addCleanup(setattr, servidor, "_client", self.original)
+
+    def _llamar(self, tool, args):
+        import asyncio
+        asyncio.run(servidor.mcp.call_tool(tool, args))
+        return self.espia.llamadas[-1]
+
+    def test_move_layer_minimo(self):
+        ll = self._llamar("move_layer", {"capa": "Fondos"})
+        self.assertEqual(ll["ctype"], "move_layer")
+        self.assertEqual(ll["params"], {"capa": "Fondos"})
+
+    def test_move_layer_con_referencia(self):
+        ll = self._llamar("move_layer", {"capa": "Fondos", "referencia": "Ortos/PNOA",
+                                         "posicion": "AFTER"})
+        self.assertEqual(ll["params"], {"capa": "Fondos", "referencia": "Ortos/PNOA",
+                                        "posicion": "AFTER"})
+
+    def test_add_layer_sin_nada_nuevo_no_manda_visible(self):
+        ll = self._llamar("add_layer", {"fuente": r"C:\a.shp"})
+        self.assertNotIn("visible", ll["params"])
+        self.assertNotIn("subcapas", ll["params"])
+
+    def test_add_layer_wms_con_subcapas_apagado(self):
+        url = "https://www.ign.es/wms-inspire/mapa-raster"
+        ll = self._llamar("add_layer", {"fuente": url, "visible": False,
+                                        "subcapas": ["Mapas raster del IGN"]})
+        self.assertEqual(ll["params"]["fuente"], url)
+        self.assertIs(ll["params"]["visible"], False)
+        self.assertEqual(ll["params"]["subcapas"], ["Mapas raster del IGN"])
+
+
 class TestGuardarVerificaRutasRelativas(unittest.TestCase):
     """save_mxd / save_mxd_as reabren lo guardado cuando se pide, o solas si el add-in
     predice capas que se van a perder; y lo que cuenta son las rotas NUEVAS, no las que

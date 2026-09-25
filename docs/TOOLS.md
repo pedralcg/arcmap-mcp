@@ -5,7 +5,7 @@
 > lista existen solo para lo **repetitivo y de alto valor** —sobre todo las series de
 > planos (Data Driven Pages)—, no para replicar toda la API.
 
-**65 herramientas** sobre ArcMap 10.5. Unas **39 están cubiertas por la regresión en sesión
+**66 herramientas** sobre ArcMap 10.5. Unas **39 están cubiertas por la regresión en sesión
 viva** (`tests/regresion_sesion_viva.py`, 147 comprobaciones); el resto se ha ejercitado a
 mano en trabajo real, pero **no automáticamente**. El README, en «Herramientas MCP», explica
 por qué la distinción importa.
@@ -188,11 +188,25 @@ respetan definition query y selección, igual que la tabla de atributos).
 | `list_fields` | Campos de capa/tabla (nombre, tipo) |
 | `get_layer_info` | Detalle de una capa: campos, tipo geom, extent, CRS, count |
 | `get_layer_features` | Lee FILAS de atributos (respeta def. query/selección). `limite` entre 1 y 5000; admite campos de una tabla unida |
-| `add_layer` | Añade capa desde shp/fgdb/ráster/`.lyr` al df. `en_leyenda=False`: no entra en la leyenda del plano (las leyendas de ArcMap añaden solas cada capa nueva) |
+| `add_layer` | Añade capa desde shp/fgdb/ráster/`.lyr` o **URL WMS** al df. `en_leyenda=False`: no entra en la leyenda del plano (las leyendas de ArcMap añaden solas cada capa nueva). `visible=False`: entra apagada. En un WMS, `subcapas` elige qué encender (sin ella, todas) |
 | `add_group` | Crea una capa de **grupo** vacía (en la raíz o dentro de otro grupo), encendida o apagada y, si se quiere, fuera de la leyenda |
 | `remove_layer` | Quita capa por nombre |
+| `move_layer` | Recoloca una capa o grupo **sin quitarla**: `BEFORE`/`AFTER` de una `referencia` (cambiando de grupo si hace falta) o `TOP`/`BOTTOM` de un `grupo` (`"/"` = raíz). Devuelve el orden del grupo leído de vuelta |
 | `apply_symbology_from_layer` | Aplica un `.lyr` (estilos canónicos) a una capa |
 | `set_scale` | Fija la escala del df activo |
+
+**Servicios WMS.** `add_layer` con una URL conecta el servicio (`WMSConnectionName`) y
+enciende las subcapas: un WMS recién conectado en ArcMap 10.5 las trae **todas apagadas**, y
+encender solo el nodo padre no pinta nada. Se encienden las pedidas en `subcapas` (por nombre
+o ruta `Grupo/Subcapa`) con los grupos que las contienen, o todas. Una subcapa que no existe
+es error antes de tocar la TOC. Con un WMS encendido, cada zoom o captura lo redibuja por la
+red en el hilo único de ArcMap: al montar un documento, añádelo con `visible=False` y
+enciéndelo al final.
+
+**Reordenar sin perder nada.** `move_layer` mueve el mismo objeto de capa
+(`IMapLayers.MoveLayerEx`): simbología, etiquetas y entradas de leyenda se quedan. Antes, la
+única vía para meter un grupo entre otros dos era quitar las capas de debajo y volver a
+añadirlas, que pierde la simbología que no venga de un `.lyr`.
 
 ---
 

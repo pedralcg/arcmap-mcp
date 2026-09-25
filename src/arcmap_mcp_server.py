@@ -851,12 +851,23 @@ def get_layer_info(capa: str) -> dict:
 
 @mcp.tool()
 def add_layer(fuente: str, posicion: str = "TOP", grupo: str = None,
-              nombre: str = None, en_leyenda: bool = True) -> dict:
+              nombre: str = None, en_leyenda: bool = True, visible: bool = None,
+              subcapas: list = None) -> dict:
     """
     Añade una capa al data frame activo desde una ruta a shapefile, feature class de
-    file geodatabase, ráster **o `.lyr`**. `posicion`: TOP / BOTTOM / AUTO_ARRANGE.
-    `grupo` opcional = nombre de una capa de grupo YA EXISTENTE donde insertarla
-    (para crearlo, `add_group`).
+    file geodatabase, ráster, **`.lyr`** o **URL de un servicio WMS**. `posicion`:
+    TOP / BOTTOM / AUTO_ARRANGE. `grupo` opcional = nombre de una capa de grupo YA
+    EXISTENTE donde insertarla (para crearlo, `add_group`). Para recolocarla después,
+    `move_layer`. `visible=False` la añade apagada.
+
+    **WMS**: `fuente` = URL del servicio (`https://www.ign.es/wms-inspire/mapa-raster`).
+    Un WMS recién conectado trae TODAS sus subcapas apagadas, y encender solo el nodo
+    padre no pinta nada: aquí se encienden las de `subcapas` (nombre o ruta
+    `Grupo/Subcapa`, con los grupos que las contienen) o todas si no se dice. Una
+    subcapa que no existe es error y no se añade nada. La respuesta trae `servicio`
+    con el árbol de subcapas leído de vuelta. **Ojo**: con un WMS encendido, cada
+    zoom o captura lo redibuja por la red en el hilo de ArcMap; para montar un
+    documento, añádelo con `visible=False` y enciéndelo al final.
 
     `nombre`: cómo se llamará la capa en la TOC. Sin esto entra con el nombre del
     fichero (`Vis_plataforma_oeste.tif`), que es el que acaba saliendo en la
@@ -878,6 +889,10 @@ def add_layer(fuente: str, posicion: str = "TOP", grupo: str = None,
         params["nombre"] = nombre
     if not en_leyenda:
         params["en_leyenda"] = False
+    if visible is not None:
+        params["visible"] = visible
+    if subcapas is not None:
+        params["subcapas"] = subcapas
     return _client.send("add_layer", params)
 
 
@@ -905,6 +920,30 @@ def add_group(nombre: str, posicion: str = "TOP", grupo: str = None,
 def remove_layer(capa: str) -> dict:
     """Quita una capa del data frame activo por nombre."""
     return _client.send("remove_layer", {"capa": capa})
+
+
+@mcp.tool()
+def move_layer(capa: str, referencia: str = None, posicion: str = None,
+               grupo: str = None) -> dict:
+    """
+    Recoloca una capa (o un grupo) en la TOC del data frame activo **sin quitarla y
+    volverla a añadir**: conserva simbología, etiquetas, lo tocado a mano y sus
+    entradas de leyenda.
+
+    - `referencia` + `posicion="BEFORE"` (por defecto) o `"AFTER"`: justo encima o
+      debajo de otra capa, en el grupo de esa capa (la mueve de grupo si hace falta).
+    - `posicion="TOP"` o `"BOTTOM"` (por defecto TOP si no hay referencia): arriba o
+      abajo del todo de `grupo`; sin `grupo`, del grupo en que ya está. `grupo="/"`
+      es la raíz de la TOC.
+    - `capa`, `referencia` y `grupo` por nombre o ruta `Grupo/Capa`, como el resto.
+
+    Meter un grupo dentro de sí mismo es error. La respuesta trae `orden`: las capas
+    del grupo de destino leídas de vuelta, de arriba abajo.
+    """
+    params: dict = {"capa": capa}
+    params.update({k: v for k, v in {"referencia": referencia, "posicion": posicion,
+                                     "grupo": grupo}.items() if v is not None})
+    return _client.send("move_layer", params)
 
 
 @mcp.tool()

@@ -689,6 +689,73 @@ if esri:
 else:
     fallos.append(("list_style_symbols", "ESRI.style no aparece entre los cargados: " + str(cargados)[:150]))
 
+sys.stdout.write("--- move_layer (2.15.0) ---" + chr(10))
+# El control es lo que NO debe cambiar al mover: la simbologia leida de vuelta. Quitar
+# y volver a anadir (lo unico que habia) la perdia.
+RASTER_N = "real_NUEVO.tif"
+GRUPO_M = "Mover (regresion)"
+sim_antes = enviar("edit_symbol", {"capa": NOMBRE_VEC})
+t("add_group", {"nombre": GRUPO_M, "en_leyenda": False})
+r = t("move_layer", {"capa": NOMBRE_VEC, "grupo": GRUPO_M}, nota="(a un grupo)")
+if r and r.get("ok"):
+    comprobar_sim("move_layer mete la capa en el grupo", r["result"]["orden"] == [NOMBRE_VEC], r["result"])
+r = t("move_layer", {"capa": RASTER_N, "referencia": NOMBRE_VEC, "posicion": "AFTER"},
+      nota="(AFTER, cambiando de grupo)")
+if r and r.get("ok"):
+    comprobar_sim("AFTER la deja justo debajo de la referencia",
+                  r["result"]["orden"] == [NOMBRE_VEC, RASTER_N], r["result"])
+r = t("move_layer", {"capa": NOMBRE_VEC, "posicion": "BOTTOM"}, nota="(BOTTOM en su grupo)")
+if r and r.get("ok"):
+    comprobar_sim("BOTTOM dentro del mismo grupo",
+                  r["result"]["orden"] == [RASTER_N, NOMBRE_VEC] and r["result"]["indice"] == 1, r["result"])
+r = t("move_layer", {"capa": NOMBRE_VEC, "referencia": RASTER_N}, nota="(BEFORE por defecto)")
+if r and r.get("ok"):
+    comprobar_sim("BEFORE dentro del mismo grupo",
+                  r["result"]["orden"] == [NOMBRE_VEC, RASTER_N] and r["result"]["indice"] == 0, r["result"])
+t("move_layer", {"capa": GRUPO_M, "referencia": NOMBRE_VEC}, espera_ok=False, nota="(grupo dentro de si mismo)")
+t("move_layer", {"capa": NOMBRE_VEC, "posicion": "AFTER"}, espera_ok=False, nota="(AFTER sin referencia)")
+sim_despues = enviar("edit_symbol", {"capa": NOMBRE_VEC})
+if sim_antes.get("ok") and sim_despues.get("ok"):
+    comprobar_sim("mover no toca la simbologia",
+                  sim_antes["result"]["clases"] == sim_despues["result"]["clases"], sim_despues["result"])
+t("move_layer", {"capa": RASTER_N, "grupo": "/", "posicion": "TOP"}, nota="(a la raiz)")
+t("move_layer", {"capa": NOMBRE_VEC, "grupo": "/", "posicion": "TOP"})
+t("remove_layer", {"capa": GRUPO_M})
+
+sys.stdout.write("--- add_layer WMS (2.15.0) ---" + chr(10))
+# Siempre con visible=False: un WMS encendido se redibuja por la red en el hilo de
+# ArcMap y aqui solo se prueba el arbol de subcapas, no el dibujo.
+WMS_URL = "https://www.ign.es/wms-inspire/mapa-raster"
+WMS_N = "IGN (regresion)"
+n_antes = len((enviar("list_layers").get("result") or {}).get("capas") or [])
+r = enviar("add_layer", {"fuente": WMS_URL, "nombre": WMS_N, "visible": False, "en_leyenda": False})
+if r.get("ok"):
+    ok_n += 1
+    serv = r["result"]["servicio"]
+    hojas = [n["ruta"] for n in serv["arbol"] if not n["grupo"]]
+    comprobar_sim("WMS sin subcapas: todas las hojas encendidas y la capa apagada",
+                  sorted(serv["subcapas_encendidas"]) == sorted(hojas) and r["result"]["visible"] is False, serv)
+    t("remove_layer", {"capa": WMS_N})
+    if hojas:
+        una = hojas[-1]
+        r = t("add_layer", {"fuente": WMS_URL, "nombre": WMS_N, "visible": False, "en_leyenda": False,
+                            "subcapas": [una]}, nota="(una subcapa)")
+        if r and r.get("ok"):
+            arbol = r["result"]["servicio"]["arbol"]
+            encendidos = [n["ruta"] for n in arbol if n["visible"]]
+            padres = [n["ruta"] for n in arbol if n["grupo"] and una.startswith(n["ruta"] + "/")]
+            comprobar_sim("solo la pedida y sus grupos quedan encendidos",
+                          sorted(encendidos) == sorted([una] + padres), arbol)
+            t("remove_layer", {"capa": WMS_N})
+    t("add_layer", {"fuente": WMS_URL, "nombre": WMS_N, "visible": False, "subcapas": ["no_existe_esta_subcapa"]},
+      espera_ok=False, nota="(subcapa inexistente)")
+    n_despues = len((enviar("list_layers").get("result") or {}).get("capas") or [])
+    comprobar_sim("una subcapa inexistente no deja nada en la TOC", n_despues == n_antes,
+                  {"antes": n_antes, "despues": n_despues})
+else:
+    sys.stdout.write("  [---] el WMS del IGN no conecta (%s): bloque saltado%s" % (str(r.get("error"))[:90], chr(10)))
+t("add_layer", {"fuente": VEC, "subcapas": ["x"]}, espera_ok=False, nota="(subcapas en un shp)")
+
 sys.stdout.write("--- rutas relativas largas (2.15.0) ---" + chr(10))
 # Con rutas relativas, ArcMap 10.5 pierde al guardar el workspace de una capa si
 # len(carpeta del .mxd) + 1 + len(relativa del workspace) >= 260 (medido 2026-09-25).

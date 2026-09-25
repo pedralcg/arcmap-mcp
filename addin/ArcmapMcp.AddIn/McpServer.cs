@@ -471,6 +471,7 @@ namespace ArcmapMcp.AddIn
                 { "add_layer",                  Handlers.LayerHandlers.AddLayer },
                 { "add_group",                  Handlers.LayerHandlers.AddGroup },
                 { "remove_layer",               Handlers.LayerHandlers.RemoveLayer },
+                { "move_layer",                 Handlers.TocHandlers.MoveLayer },
                 { "apply_symbology_from_layer", Handlers.LayerHandlers.ApplySymbologyFromLayer },
                 { "set_graduated_symbology",    Handlers.LayerHandlers.SetGraduatedSymbology },
                 { "set_raster_symbology",       Handlers.RasterSymbologyHandlers.SetRasterSymbology },

@@ -98,6 +98,11 @@
       <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.DataSourcesGDB\v4.0_10.5.0.0__8fc3cc631e44ad86\ESRI.ArcGIS.DataSourcesGDB.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- add_layer de servicios WMS: WMSConnectionName -->
+    <Reference Include="ESRI.ArcGIS.GISClient">
+      <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.GISClient\v4.0_10.5.0.0__8fc3cc631e44ad86\ESRI.ArcGIS.GISClient.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="ESRI.ArcGIS.DataSourcesRaster">
       <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.DataSourcesRaster\v4.0_10.5.0.0__8fc3cc631e44ad86\ESRI.ArcGIS.DataSourcesRaster.dll</HintPath>
       <Private>false</Private>
