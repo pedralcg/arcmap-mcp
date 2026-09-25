@@ -404,6 +404,7 @@ admite `1024`–`65535`; un valor inválido se ignora con aviso en el log y se v
   | `ARCMAP_SAVE_TIMEOUT` | 630 s | `save_mxd` y `save_mxd_as` |
   | `ARCMAP_EXEC_TIMEOUT_CLIENTE` | 930 s | **Solo `execute_arcpy`** |
   | `ARCMAP_EXEC_SESION_TIMEOUT_CLIENTE` | 1560 s | `execute_arcpy` con `serializar_sesion=True`: el add-in gasta hasta 600 s copiando la sesión **antes** de sus 900 s |
+  | `ARCMAP_ESPERA_DIBUJO` | 120 s | Los tres export cuando llegan con el mapa **aún dibujando** (E_PENDING, típico justo después de cambiar la vista o las etiquetas): el servidor espera fuera de ArcMap y reintenta cada 3 s |
 
   `execute_arcpy` **no** va por `ARCMAP_GP_TIMEOUT`: subir esa variable no alarga nada
   allí, que es el error que más tiempo ha costado.

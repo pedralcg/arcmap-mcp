@@ -553,6 +553,74 @@ class TestArgumentosEstrictos(unittest.TestCase):
         self.assertEqual(sin, [])
 
 
+class ClienteGuion(object):
+    """Cliente de mentira que responde lo que diga su guion, en orden."""
+
+    def __init__(self, respuestas):
+        self.respuestas = list(respuestas)
+        self.llamadas = []
+
+    def send(self, ctype, params=None, timeout=None):
+        self.llamadas.append(ctype)
+        return self.respuestas.pop(0) if len(self.respuestas) > 1 else self.respuestas[0]
+
+
+class TestExportEsperaAlDibujoDesdeFuera(unittest.TestCase):
+    """E_PENDING se espera en el SERVIDOR, no dentro de ArcMap.
+
+    El 2026-09-25 la espera del add-in (DoEvents en el hilo de ArcMap) colgó ArcMap tres
+    veces al exportar justo después de cambiar etiquetas. Ahora el add-in devuelve
+    `dibujando: ...` al momento y aquí se reintenta sin tocar el puente mientras tanto.
+    """
+
+    DIBUJANDO = {"ok": False, "error": "dibujando: ArcMap aún está dibujando el mapa"}
+    BIEN = {"ok": True, "result": {"salida": "x.jpg"}}
+
+    def setUp(self):
+        self.original = servidor._client
+        self.addCleanup(setattr, servidor, "_client", self.original)
+        parche = unittest.mock.patch("time.sleep")
+        self.sleep = parche.start()
+        self.addCleanup(parche.stop)
+
+    def test_reintenta_hasta_que_sale_y_lo_dice(self):
+        servidor._client = ClienteGuion([self.DIBUJANDO, self.DIBUJANDO, self.BIEN])
+        r = servidor.export_jpg(r"C:\x.jpg")
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(servidor._client.llamadas, ["export_jpg"] * 3)
+        self.assertIn("2 reintentos", r["result"]["aviso_dibujo"])
+
+    def test_sin_dibujando_no_hay_reintento_ni_aviso(self):
+        servidor._client = ClienteGuion([dict(self.BIEN, result={"salida": "x.pdf"})])
+        r = servidor.export_pdf(r"C:\x.pdf")
+        self.assertEqual(servidor._client.llamadas, ["export_pdf"])
+        self.assertNotIn("aviso_dibujo", r["result"])
+
+    def test_otro_error_no_se_reintenta(self):
+        """`busy:` tiene su propio tratamiento: reintentarlo aquí apilaría llamadas."""
+        servidor._client = ClienteGuion([{"ok": False, "error": "busy: ArcMap lleva 3 s"}])
+        servidor.export_view_png(r"C:\x.png")
+        self.assertEqual(servidor._client.llamadas, ["export_view_png"])
+        self.sleep.assert_not_called()
+
+    def test_se_rinde_dentro_del_margen_y_nombra_la_variable(self):
+        servidor._client = ClienteGuion([self.DIBUJANDO])
+        reloj = iter(range(0, 10000, 3))
+        with unittest.mock.patch("time.monotonic", side_effect=lambda: next(reloj)):
+            r = servidor.export_jpg(r"C:\x.jpg")
+        self.assertFalse(r["ok"])
+        self.assertIn("ARCMAP_ESPERA_DIBUJO", r["error"])
+        self.assertLessEqual(len(servidor._client.llamadas),
+                             int(servidor.ESPERA_DIBUJO) // servidor._PAUSA_DIBUJO + 1)
+
+    def test_el_prefijo_es_el_mismo_que_el_del_add_in(self):
+        ruta = os.path.join(RAIZ, "addin", "ArcmapMcp.AddIn", "Handlers", "ExportHandlers.cs")
+        with open(ruta, encoding="utf-8") as fh:
+            cs = fh.read()
+        self.assertRegex(cs, r'const string Dibujando = "dibujando: ";')
+        self.assertNotIn("DoEvents()", cs, "la espera volvió al hilo de ArcMap")
+
+
 class TestSetLabelsParametros(unittest.TestCase):
     """`set_labels` solo toca lo que se pasa: un None que llegara al add-in como
     null sería indistinguible de «quítalo». Por `call_tool`, como una llamada real,
@@ -713,7 +781,8 @@ class TestContratoDeTools(unittest.TestCase):
         sueltas = []
         for bloque in bloques:
             cuerpo = bloque.split("@mcp.tool()")[0]
-            if "_client.send" in cuerpo:
+            # _exportar es _client.send con el reintento de E_PENDING (los tres export).
+            if "_client.send" in cuerpo or "return _exportar(" in cuerpo:
                 continue
             nombre = ""
             for linea in cuerpo.strip().splitlines():

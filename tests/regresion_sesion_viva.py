@@ -496,19 +496,34 @@ if texto_campo and inicial.get("ok"):
             else:
                 fallos.append(("set_labels", nombre + ": " + json.dumps(res)[:200]))
             sys.stdout.write("  [%s] %s%s" % ("OK " if bien else "FALLO", nombre, chr(10)))
-    # ESPERA antes de cada export, y no es adorno: un export lanzado justo despues de
-    # cambiar etiquetas encuentra el mapa dibujando (E_PENDING), y la espera del
-    # add-in, que bombea mensajes, NO deja terminar un dibujado con etiquetas: ArcMap
-    # se quedo colgado tres veces el 2026-09-25 (Esc no lo saca). Con 20 s de margen
-    # sale en 0,8 s. Quitar la espera cuando el export sepa esperar (pendiente E_PENDING).
+    # Export INMEDIATO tras cambiar etiquetas, a proposito: es el caso que colgo ArcMap
+    # tres veces el 2026-09-25 (E_PENDING y una espera con DoEvents dentro del add-in
+    # que no dejaba terminar el dibujado). Desde la 2.15.0 el add-in devuelve
+    # "dibujando: " al momento y el que espera es el SERVIDOR (arcmap_mcp_server._exportar).
+    # Este script habla al socket directamente, sin servidor, asi que reintenta el mismo.
     import time  # noqa: E402
+
+    def exportar_esperando(salida, nota):
+        global ok_n
+        reintentos = 0
+        for _ in range(40):
+            r = enviar("export_jpg", {"salida": salida, "dpi": 72})
+            if r.get("ok") or not str(r.get("error", "")).startswith("dibujando: "):
+                break
+            reintentos += 1
+            time.sleep(3)
+        if r.get("ok"):
+            ok_n += 1
+        else:
+            fallos.append(("export_jpg", str(r.get("error"))[:110]))
+        sys.stdout.write("  [%s] %-30s %s, %d reintentos%s"
+                         % ("OK " if r.get("ok") else "FALLO", "export_jpg", nota, reintentos, chr(10)))
+
     on = ETQ_DIR + SEP + "etiquetas_on.jpg"
     off = ETQ_DIR + SEP + "etiquetas_off.jpg"
-    time.sleep(20)
-    t("export_jpg", {"salida": on, "dpi": 72})
+    exportar_esperando(on, "(inmediato tras set_labels)")
     t("set_labels", {"capa": NOMBRE_VEC, "activar": False}, nota="(apagar)")
-    time.sleep(20)
-    t("export_jpg", {"salida": off, "dpi": 72})
+    exportar_esperando(off, "(inmediato tras apagar)")
     try:
         pinta = huella(on) != huella(off)
     except OSError:

@@ -92,6 +92,10 @@ EXEC_TIMEOUT = _Espera("ARCMAP_EXEC_TIMEOUT_CLIENTE", 930)
 # peor caso 1500 s, y con 930 aquí volvía a ganar el corte mudo de socket. Se le da
 # presupuesto propio en vez de subir el de todas las llamadas, que son interactivas.
 EXEC_SESION_TIMEOUT = _Espera("ARCMAP_EXEC_SESION_TIMEOUT_CLIENTE", 1560)  # 600 + 900 + margen
+# Cuánto se deja dibujar a ArcMap cuando un export llega con el mapa aún pintando
+# (E_PENDING). La espera va AQUÍ, fuera de ArcMap, a propósito: ver _exportar.
+ESPERA_DIBUJO = _Espera("ARCMAP_ESPERA_DIBUJO", 120)
+_PAUSA_DIBUJO = 3
 
 
 class ArcMapClient:
@@ -180,6 +184,39 @@ class ArcMapClient:
 
 _client = ArcMapClient()
 mcp = FastMCP("arcmap-mcp")
+
+
+def _exportar(ctype, params):
+    """Envía un export y, si ArcMap responde que el mapa aún está dibujando
+    (`dibujando: `, su E_PENDING), espera AQUÍ y reintenta.
+
+    La espera estaba dentro del add-in, bombeando mensajes con DoEvents en el hilo
+    de ArcMap, y eso metía el dibujado pendiente dentro de la llamada del puente:
+    con etiquetas no terminaba nunca y ArcMap quedó colgado tres veces el
+    2026-09-25 (Esc sin efecto, mapa en blanco). Esperando fuera, ArcMap dibuja en
+    su propio bucle de mensajes: el mismo export salió en 0,8 s tras 20 s de margen.
+    Mientras se espera no se manda NADA al puente, ni un ping.
+    """
+    import time
+    inicio = time.monotonic()
+    reintentos = 0
+    while True:
+        r = _client.send(ctype, params, timeout=GP_TIMEOUT)
+        error = r.get("error") or ""
+        if r.get("ok") or not error.startswith("dibujando: "):
+            break
+        if time.monotonic() - inicio + _PAUSA_DIBUJO > ESPERA_DIBUJO:
+            r = dict(r, error=error + " (se esperó %d s en %d reintentos; sube %s si el mapa"
+                                      " es muy pesado)" % (ESPERA_DIBUJO, reintentos,
+                                                           ESPERA_DIBUJO.variable))
+            break
+        time.sleep(_PAUSA_DIBUJO)
+        reintentos += 1
+    if reintentos and r.get("ok") and isinstance(r.get("result"), dict):
+        r["result"]["aviso_dibujo"] = ("ArcMap estaba dibujando el mapa: el export salió tras "
+                                       "%d reintentos (%.0f s de espera)."
+                                       % (reintentos, time.monotonic() - inicio))
+    return r
 
 
 # --------------------------------------------------------------------------- #
@@ -398,9 +435,8 @@ def export_pdf(salida: str, dpi: int = 300, sobrescribir: bool = True) -> dict:
     Un layout denso a dpi alto se va a minutos: el add-in lo trata como comando
     largo y la espera de aquí la gobierna ARCMAP_GP_TIMEOUT, no el timeout corto.
     """
-    return _client.send("export_pdf", {"salida": salida, "dpi": dpi,
-                                       "sobrescribir": sobrescribir},
-                        timeout=GP_TIMEOUT)
+    return _exportar("export_pdf", {"salida": salida, "dpi": dpi,
+                                    "sobrescribir": sobrescribir})
 
 
 @mcp.tool()
@@ -419,9 +455,8 @@ def export_jpg(salida: str, dpi: int = 230, sobrescribir: bool = True) -> dict:
     `sobrescrito` en la respuesta. Vale `.jpg` o `.jpeg`. La espera la gobierna
     ARCMAP_GP_TIMEOUT.
     """
-    return _client.send("export_jpg", {"salida": salida, "dpi": dpi,
-                                       "sobrescribir": sobrescribir},
-                        timeout=GP_TIMEOUT)
+    return _exportar("export_jpg", {"salida": salida, "dpi": dpi,
+                                    "sobrescribir": sobrescribir})
 
 
 @mcp.tool()
@@ -727,10 +762,10 @@ def export_view_png(salida: str, dpi: int = 150, ancho: int = None,
     El add-in lo trata como comando largo (un layout a dpi alto no se renderiza en
     60 s): la espera la gobierna ARCMAP_GP_TIMEOUT.
     """
-    return _client.send("export_view_png", {
+    return _exportar("export_view_png", {
         "salida": salida, "dpi": dpi, "ancho": ancho, "alto": alto, "modo": modo,
         "sobrescribir": sobrescribir,
-    }, timeout=GP_TIMEOUT)
+    })
 
 
 @mcp.tool()
