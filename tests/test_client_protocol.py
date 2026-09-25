@@ -691,9 +691,9 @@ class TestSimbologiaParametros(unittest.TestCase):
         self.assertEqual(ll["params"], {"limite": 200})
 
     def test_list_style_con_filtros(self):
-        ll = self._llamar("list_style_symbols", {"estilo": r"C:\temp\iden.style",
+        ll = self._llamar("list_style_symbols", {"estilo": r"C:\temp\empresa.style",
                                                  "clase": "relleno", "patron": "monte*"})
-        self.assertEqual(ll["params"], {"estilo": r"C:\temp\iden.style", "clase": "relleno",
+        self.assertEqual(ll["params"], {"estilo": r"C:\temp\empresa.style", "clase": "relleno",
                                         "patron": "monte*", "limite": 200})
 
     def test_apply_style_solo_lo_indicado(self):

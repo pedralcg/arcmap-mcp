@@ -9,7 +9,7 @@ namespace ArcmapMcp.AddIn.Handlers
     /// <summary>
     /// move_layer — recolocar una capa en la TOC sin quitarla y volverla a añadir.
     ///
-    /// El hueco (2026-09-25, MXD de Majal Blanco): add_layer solo sabe TOP / BOTTOM,
+    /// El hueco (2026-09-25, montando un MXD real): add_layer solo sabe TOP / BOTTOM,
     /// así que meter un grupo entre otros dos obligaba a quitar las capas de debajo y
     /// volver a añadirlas en orden, lo que pierde la simbología que no venga de un
     /// .lyr y todo lo tocado a mano. IMapLayers.MoveLayerEx mueve el MISMO objeto de

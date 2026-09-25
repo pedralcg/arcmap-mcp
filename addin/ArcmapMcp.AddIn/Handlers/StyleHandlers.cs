@@ -15,7 +15,7 @@ namespace ArcmapMcp.AddIn.Handlers
     /// <summary>
     /// Símbolos de los estilos .style del usuario (IStyleGallery).
     ///
-    /// El hueco (2026-09-25): los estilos propios —Pedro10.0.style, iden.style— solo
+    /// El hueco (2026-09-25): los estilos propios del usuario (su carpeta de perfil de ArcMap) solo
     /// se podían usar a mano desde el selector de símbolos; ninguna tool los leía.
     ///
     /// - list_style_symbols: sin estilo, los estilos cargados en ArcMap; con estilo,

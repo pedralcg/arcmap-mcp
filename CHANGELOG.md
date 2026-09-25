@@ -5,7 +5,7 @@ Formato inspirado en [Keep a Changelog](https://keepachangelog.com/es/); version
 
 ## [2.15.0] - 2026-09-25
 
-La tanda de mejoras que pedían las series de planos de ID2018 y el MXD de Majal Blanco:
+La tanda de mejoras que pedían las series de planos de ID2018 y el montaje de un MXD real:
 auditar lo que **sale en el plano**, etiquetas y símbolos sin rehacer la simbología, los
 estilos `.style` del usuario, reordenar la TOC, servicios WMS, y avisar de las rutas
 relativas que ArcMap **pierde al guardar** sin decir nada. Siete herramientas nuevas (66).

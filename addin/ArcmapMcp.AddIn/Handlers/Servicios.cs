@@ -10,7 +10,7 @@ namespace ArcmapMcp.AddIn.Handlers
     /// <summary>
     /// Capas de servicio (WMS) para add_layer.
     ///
-    /// Receta probada en standalone el 2026-09-25 (Catastro e IGN para Majal Blanco):
+    /// Receta probada en standalone el 2026-09-25 (Catastro e IGN para un MXD real):
     /// PropertySet con URL → WMSConnectionName → WMSMapLayer.Connect.
     ///
     /// La trampa: el WMSMapLayer recién conectado trae TODAS las subcapas apagadas,

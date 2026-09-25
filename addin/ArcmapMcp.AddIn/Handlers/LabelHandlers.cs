@@ -14,7 +14,7 @@ namespace ArcmapMcp.AddIn.Handlers
     /// obvia en ArcObjects —vaciar las clases y crear unas LabelEngineLayerProperties
     /// nuevas— tiene un fallo silencioso: en un mapa con MAPLEX la capa se queda sin
     /// etiquetas y sin error (bloque 03 de ID2018, 2026-09-23). Con el motor
-    /// estándar la misma vía sí pinta (Majal Blanco, 2026-09-25). Así que aquí:
+    /// estándar la misma vía sí pinta (MXD real, 2026-09-25). Así que aquí:
     ///
     /// 1. Se MODIFICAN las clases que ya tiene la capa, sin crear ni borrar ninguna.
     ///    Sirve con los dos motores.
