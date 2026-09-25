@@ -422,6 +422,34 @@ t("execute_code", {"code": "import sys\nsys.exit(3)", "usar_documento": False},
 # abierto. Mezclarlo invitaria a lanzar todo esto contra un proyecto real. Viven en
 # tests/regresion_ddp.py, que es de solo lectura sobre el documento.
 
+sys.stdout.write("--- leyenda y grupos (2.14.0) ---" + chr(10))
+# Solo con una leyenda de AutoAdd en el layout tiene sentido: el control es la capa
+# vectorial del principio, que entro con los valores por defecto. Si esa NO esta en
+# la leyenda, "no entra con en_leyenda=False" no probaria nada.
+leyendas = (enviar("list_layout_elements", {"tipo": "LEGEND_ELEMENT"}).get("result") or {}).get("num", 0)
+control = enviar("set_legend_item", {"capa": NOMBRE_VEC}) if leyendas else {"ok": False}
+if control.get("ok"):
+    t("add_group", {"nombre": "regresion_grupo", "visible": False, "en_leyenda": False})
+    t("add_layer", {"fuente": VEC, "grupo": "regresion_grupo", "nombre": "regresion_sin_leyenda",
+                    "en_leyenda": False}, nota="(en_leyenda=False)")
+    t("set_legend_item", {"capa": "regresion_sin_leyenda"}, espera_ok=False,
+      nota="(no ha entrado en la leyenda)")
+    estado = control["result"]
+    r = t("set_legend_item", {"capa": NOMBRE_VEC,
+                              "mostrar_nombre": not estado["ahora"]["mostrar_nombre"]})
+    fuentes_iguales = bool(r and r.get("ok") and r["result"]["fuentes"] == estado["fuentes"])
+    if fuentes_iguales:
+        ok_n += 1
+    else:
+        fallos.append(("set_legend_item", "las fuentes han cambiado"))
+    sys.stdout.write("  [%s] set_legend_item no toca las fuentes%s" % ("OK " if fuentes_iguales else "FALLO", chr(10)))
+    t("set_legend_item", {"capa": NOMBRE_VEC, "mostrar_nombre": estado["ahora"]["mostrar_nombre"]},
+      nota="(revertir)")
+    t("remove_layer", {"capa": "regresion_grupo/regresion_sin_leyenda"})
+    t("remove_layer", {"capa": "regresion_grupo"})
+else:
+    sys.stdout.write("  [---] sin leyenda con AutoAdd en este layout: bloque saltado" + chr(10))
+
 sys.stdout.write("--- limpieza ---" + chr(10))
 t("remove_layer", {"capa": "real_NUEVO.tif"})
 t("remove_layer", {"capa": NOMBRE_VEC})

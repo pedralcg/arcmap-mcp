@@ -15,7 +15,7 @@
          2026-08-27 se subió solo Config.xml y `ping` siguió diciendo 2.8.3 con la
          DLL nueva ya cargada, o sea el "binario desfasado" al revés: la versión
          mentía sobre código que sí estaba actualizado. Tocar siempre las dos. -->
-    <Version>2.13.0</Version>
+    <Version>2.14.0</Version>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <!-- Newtonsoft.Json.dll debe caer en bin\ para empaquetarlo en Install\ -->
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
@@ -36,6 +36,15 @@
   <ItemGroup>
     <Reference Include="WindowsBase" />
     <Reference Include="System.Windows.Forms" />
+    <!-- stdole.IFontDisp: la fuente de los símbolos de texto (set_legend_item la lee
+         para demostrar que no la ha tocado). Sin embeber, como la referencian los
+         propios ensamblados de ArcObjects (embebida da CS1762): está en la GAC de
+         cualquier equipo con ArcGIS, así que no se copia al paquete. -->
+    <Reference Include="stdole">
+      <HintPath>C:\Program Files (x86)\Microsoft.NET\Primary Interop Assemblies\stdole.dll</HintPath>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
   <ItemGroup>

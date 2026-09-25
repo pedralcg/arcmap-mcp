@@ -588,6 +588,35 @@ def list_layout_elements(tipo: str = None, patron: str = None) -> dict:
 
 
 @mcp.tool()
+def set_legend_item(capa: str, mostrar_nombre: bool = None,
+                    mostrar_encabezado: bool = None, mostrar_etiquetas: bool = None,
+                    leyenda: str = None, indice: int = None) -> dict:
+    """
+    Cambia QUÉ muestra la entrada de una capa en la leyenda del layout: el nombre de
+    la capa, el encabezado y las etiquetas de sus clases. **No cambia CÓMO se ve**:
+    las fuentes y tamaños se quedan como estaban, y la respuesta los devuelve leídos
+    (`fuentes`) para comprobarlo. Solo se toca lo que se pase; None = no cambiar.
+    Sin ningún interruptor, devuelve el estado actual sin tocar nada.
+
+    `capa` es el nombre con que la capa aparece en la leyenda. Si está en varias
+    leyendas (o dos veces en una), no se elige por ti: el error las lista; se
+    desempata con `leyenda` (nombre del elemento, ver `list_layout_elements`) o con
+    `indice` (el número de esa lista).
+
+    Es la alternativa a aplicar un estilo de leyenda de ESRI.style (lo que haría
+    arcpy con `updateItem`), que cambia también las fuentes del elemento.
+    """
+    params: dict = {"capa": capa, "leyenda": leyenda}
+    for clave, valor in (("mostrar_nombre", mostrar_nombre),
+                         ("mostrar_encabezado", mostrar_encabezado),
+                         ("mostrar_etiquetas", mostrar_etiquetas),
+                         ("indice", indice)):
+        if valor is not None:
+            params[clave] = valor
+    return _client.send("set_legend_item", params)
+
+
+@mcp.tool()
 def set_text_element(texto: str, nombre: str = None, buscar: str = None,
                      grupo: str = None, indice: int = None) -> dict:
     """
@@ -751,26 +780,54 @@ def get_layer_info(capa: str) -> dict:
 
 @mcp.tool()
 def add_layer(fuente: str, posicion: str = "TOP", grupo: str = None,
-              nombre: str = None) -> dict:
+              nombre: str = None, en_leyenda: bool = True) -> dict:
     """
     Añade una capa al data frame activo desde una ruta a shapefile, feature class de
     file geodatabase, ráster **o `.lyr`**. `posicion`: TOP / BOTTOM / AUTO_ARRANGE.
-    `grupo` opcional = nombre de una capa de grupo YA EXISTENTE donde insertarla.
+    `grupo` opcional = nombre de una capa de grupo YA EXISTENTE donde insertarla
+    (para crearlo, `add_group`).
 
     `nombre`: cómo se llamará la capa en la TOC. Sin esto entra con el nombre del
     fichero (`Vis_plataforma_oeste.tif`), que es el que acaba saliendo en la
     leyenda del plano.
 
+    **Por defecto la capa entra también en la LEYENDA del plano**: las leyendas de
+    ArcMap tienen «añadir capas nuevas» activado, y en un plano que ya va justo una
+    capa más la desborda. Con `en_leyenda=False` se apaga eso solo mientras entra
+    esta capa y se deja como estaba; las leyendas del documento no cambian.
+
     **Un `.lyr` entra con todo lo que lleve dentro**: nombre, simbología,
     transparencia y, si es un `.lyr` de GRUPO, el árbol entero con sus
-    visibilidades. Es la única vía para reproducir de una vez la estructura de
-    grupos de un proyecto de QGIS, porque no hay tool que cree grupos. Lo que no
-    trae un `.lyr` de datos sueltos no se inventa: el etiquetado sigue sin viajar.
+    visibilidades. Es la vía para reproducir de una vez la estructura de grupos de
+    un proyecto de QGIS. Lo que no trae un `.lyr` de datos sueltos no se inventa:
+    el etiquetado sigue sin viajar.
     """
     params: dict = {"fuente": fuente, "posicion": posicion, "grupo": grupo}
     if nombre is not None:
         params["nombre"] = nombre
+    if not en_leyenda:
+        params["en_leyenda"] = False
     return _client.send("add_layer", params)
+
+
+@mcp.tool()
+def add_group(nombre: str, posicion: str = "TOP", grupo: str = None,
+              visible: bool = True, en_leyenda: bool = True) -> dict:
+    """
+    Crea una capa de GRUPO vacía en el data frame activo, para luego meter capas
+    con `add_layer(..., grupo=nombre)`. `posicion`: TOP / BOTTOM. `grupo`: grupo YA
+    EXISTENTE dentro del cual crearlo (None = en la raíz de la TOC). `visible`:
+    encendido o apagado (un grupo apagado sirve de «pendiente de integrar»).
+
+    `en_leyenda=False` evita que el grupo entre en la leyenda del plano, igual que
+    en `add_layer`. Si ya hay una capa con ese nombre, el grupo se crea igual y la
+    respuesta trae un `aviso`: a partir de ahí hay que nombrarlo por su ruta.
+    """
+    params: dict = {"nombre": nombre, "posicion": posicion, "grupo": grupo,
+                    "visible": visible}
+    if not en_leyenda:
+        params["en_leyenda"] = False
+    return _client.send("add_group", params)
 
 
 @mcp.tool()
