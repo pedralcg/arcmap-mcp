@@ -450,6 +450,76 @@ if control.get("ok"):
 else:
     sys.stdout.write("  [---] sin leyenda con AutoAdd en este layout: bloque saltado" + chr(10))
 
+sys.stdout.write("--- etiquetas (2.15.0) ---" + chr(10))
+# El fallo que hay que cazar es SILENCIOSO: con Maplex, sustituir las clases de
+# etiquetas deja la capa sin etiquetas y con ok=true. Por eso el control no es la
+# respuesta sino la IMAGEN: la vista con etiquetas tiene que diferir de la vista sin
+# ellas. Si set_labels dijera ok y no pintara, los dos PNG saldrian iguales.
+import hashlib  # noqa: E402
+
+ETQ_DIR = "C:" + SEP + "temp" + SEP + "arcmap-mcp-regresion"
+
+
+def huella(ruta):
+    with open(ruta, "rb") as fh:
+        return hashlib.sha1(fh.read()).hexdigest()
+
+
+campos = ((enviar("list_fields", {"capa": NOMBRE_VEC}).get("result") or {}).get("campos") or [])
+texto_campo = next((c["nombre"] for c in campos if c.get("tipo") == "String"), None)
+inicial = enviar("set_labels", {"capa": NOMBRE_VEC})
+if texto_campo and inicial.get("ok"):
+    ini = inicial["result"]
+    sys.stdout.write("  motor del mapa: %s | clases: %d | campo: %s%s"
+                     % (ini["motor"], len(ini["clases"]), texto_campo, chr(10)))
+    t("zoom_to_layer", {"capa": NOMBRE_VEC})
+    r = t("set_labels", {"capa": NOMBRE_VEC, "expresion": "[" + texto_campo + "]", "tamano": 11,
+                         "color": "#1E5C2E", "halo": 1.5, "color_halo": [255, 255, 255]})
+    if r and r.get("ok"):
+        res = r["result"]
+        leido = res["clases"][0]
+        coincide = (leido["tamano"] == 11 and leido["halo"] == 1.5
+                    and leido["color"] == "#1E5C2E" and leido["color_halo"] == "#FFFFFF"
+                    and leido["expresion"] == "[" + texto_campo + "]" and res["etiquetas_activas"])
+        # Modificar, no sustituir: mismo numero de clases y ninguna creada.
+        intactas = (len(res["clases"]) == len(ini["clases"]) and not res["clase_creada"])
+        for nombre, bien in (("set_labels lee de vuelta lo pedido", coincide),
+                             ("set_labels modifica, no sustituye", intactas)):
+            if bien:
+                ok_n += 1
+            else:
+                fallos.append(("set_labels", nombre + ": " + json.dumps(res)[:200]))
+            sys.stdout.write("  [%s] %s%s" % ("OK " if bien else "FALLO", nombre, chr(10)))
+    on = ETQ_DIR + SEP + "etiquetas_on.png"
+    off = ETQ_DIR + SEP + "etiquetas_off.png"
+    t("export_view_png", {"salida": on, "dpi": 96})
+    t("set_labels", {"capa": NOMBRE_VEC, "activar": False}, nota="(apagar)")
+    t("export_view_png", {"salida": off, "dpi": 96})
+    try:
+        pinta = huella(on) != huella(off)
+    except OSError:
+        pinta = False
+    if pinta:
+        ok_n += 1
+    else:
+        fallos.append(("set_labels", "la vista con etiquetas es identica a la vista sin ellas"))
+    sys.stdout.write("  [%s] las etiquetas se dibujan (PNG on != off, motor %s)%s"
+                     % ("OK " if pinta else "FALLO", ini["motor"], chr(10)))
+    r = t("set_labels", {"capa": NOMBRE_VEC, "halo": 0}, nota="(halo 0 lo quita)")
+    if r and r.get("ok") and r["result"]["clases"][0]["halo"] != 0:
+        fallos.append(("set_labels", "halo=0 no quito el halo"))
+    t("set_labels", {"capa": NOMBRE_VEC, "clase": "no_existe_esta_clase", "tamano": 9},
+      espera_ok=False, nota="(clase inexistente)")
+    t("set_labels", {"capa": NOMBRE_VEC, "color_halo": "#FFFFFF"}, espera_ok=False,
+      nota="(color_halo sin halo)")
+    t("set_labels", {"capa": NOMBRE_VEC, "tamano": 0}, espera_ok=False, nota="(tamano fuera de rango)")
+    t("set_labels", {"capa": NOMBRE_VEC, "activar": ini["etiquetas_activas"]}, nota="(revertir)")
+else:
+    sys.stdout.write("  [---] sin campo de texto en %s o set_labels no responde: bloque saltado%s"
+                     % (NOMBRE_VEC, chr(10)))
+    if not inicial.get("ok"):
+        fallos.append(("set_labels", str(inicial.get("error"))[:110]))
+
 sys.stdout.write("--- limpieza ---" + chr(10))
 t("remove_layer", {"capa": "real_NUEVO.tif"})
 t("remove_layer", {"capa": NOMBRE_VEC})

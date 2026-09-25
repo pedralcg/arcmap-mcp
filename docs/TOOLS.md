@@ -5,7 +5,7 @@
 > lista existen solo para lo **repetitivo y de alto valor** —sobre todo las series de
 > planos (Data Driven Pages)—, no para replicar toda la API.
 
-**60 herramientas** sobre ArcMap 10.5. Unas **36 están cubiertas por la regresión en sesión
+**61 herramientas** sobre ArcMap 10.5. Unas **36 están cubiertas por la regresión en sesión
 viva** (`tests/regresion_sesion_viva.py`, 114 comprobaciones); el resto se ha ejercitado a
 mano en trabajo real, pero **no automáticamente**. El README, en «Herramientas MCP», explica
 por qué la distinción importa.
@@ -209,6 +209,16 @@ respuesta lo avisa y te manda aquí.
 | `set_unique_values_symbology` | Categorías por valores únicos de un campo (capas de ENTIDADES) |
 | `set_raster_symbology` | RÁSTER: `modo="clasificado"` (2-32 clases), `"estirado"` (rampa continua) o `"unico"` (un color por valor de píxel) |
 | `apply_symbology_from_layer` | Aplica un `.lyr` plantilla ya preparado |
+| `set_labels` | Etiquetas de una capa de ENTIDADES: expresión, tamaño, color y halo; enciende o apaga. Devuelve cómo quedó cada clase **leída de la capa** y el motor del mapa (Maplex o estándar) |
+
+**`set_labels` modifica las clases de etiquetas que ya tiene la capa; no las sustituye.**
+La vía obvia en ArcObjects, vaciar las clases y crear unas nuevas, tiene un fallo silencioso: en un
+mapa con **Maplex** la capa se queda sin etiquetas y sin error. Con el motor estándar esa vía sí
+pinta, pero modificar las existentes funciona con los dos y además conserva la fuente, la
+colocación y los filtros de cada clase. Solo si la capa no tiene ninguna clase se crea una (hace
+falta `expresion`), con las propiedades de colocación del motor del mapa. La regresión en vivo
+comprueba que las etiquetas **se dibujan** comparando la vista con ellas y sin ellas, porque la
+respuesta de la herramienta sola no delataría el fallo.
 
 Cada una acepta la capa que le toca y **redirige a la correcta si te equivocas**: pedir
 simbología ráster sobre un vectorial responde nombrando las dos alternativas, y al revés.

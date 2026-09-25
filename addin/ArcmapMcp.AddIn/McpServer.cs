@@ -446,6 +446,7 @@ namespace ArcmapMcp.AddIn
                 { "get_canvas_screenshot", Handlers.ScreenshotHandler.Run },
                 { "list_layout_elements",  Handlers.LayoutHandlers.ListLayoutElements },
                 { "set_legend_item",       Handlers.LayoutHandlers.SetLegendItem },
+                { "set_labels",            Handlers.LabelHandlers.SetLabels },
                 { "export_pdf",            Handlers.ExportHandlers.ExportPdf },
                 { "export_jpg",            Handlers.ExportHandlers.ExportJpg },
                 { "export_view_png",       Handlers.ExportHandlers.ExportViewPng },

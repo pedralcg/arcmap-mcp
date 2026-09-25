@@ -14,7 +14,7 @@ Cliente IA (Claude Code / Desktop / Gemini / Antigravity / OpenCode)
         │  protocolo MCP (stdio)
         ▼
 arcmap_mcp_server.py        ← servidor MCP externo (Python 3 + FastMCP): los schemas
-        │                      de las 60 herramientas y el contrato con el cliente
+        │                      de las 61 herramientas y el contrato con el cliente
         │  socket TCP local  127.0.0.1:27179
         ▼
 Add-in .NET (C#)            ← DENTRO de ArcMap: TcpListener + ArcObjects nativo
@@ -79,7 +79,7 @@ arcmap-mcp/
 
 ## Herramientas MCP
 
-**60 herramientas** sobre ArcMap 10.5 (ver `docs/TOOLS.md` para el catálogo completo con
+**61 herramientas** sobre ArcMap 10.5 (ver `docs/TOOLS.md` para el catálogo completo con
 firmas, ejemplos y los matices de ejecución de cada grupo).
 
 Qué significa «probado», que conviene decirlo con precisión:
@@ -441,7 +441,7 @@ admite `1024`–`65535`; un valor inválido se ignora con aviso en el log y se v
 
 ## Estado
 - [x] Add-in .NET nativo (ArcObjects vía CLR, sin runtime Python embebido)
-- [x] 60 herramientas, incluido el análisis ambiental (índices espectrales, hidrología,
+- [x] 61 herramientas, incluido el análisis ambiental (índices espectrales, hidrología,
       curvas, perfiles 3D y ruta de mínimo coste) y series de planos reales de decenas
       de páginas. Cobertura automática: 114 comprobaciones en sesión viva sobre ~36 de
       ellas, más 56 tests sin ArcMap (ver «Herramientas MCP»)

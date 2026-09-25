@@ -616,6 +616,42 @@ def set_legend_item(capa: str, mostrar_nombre: bool = None,
 
 
 @mcp.tool()
+def set_labels(capa: str, expresion: str = None, tamano: float = None,
+               color: str | list = None, halo: float = None,
+               color_halo: str | list = None, activar: bool = None,
+               clase: str = None) -> dict:
+    """
+    Etiquetas de una capa de entidades: expresión, tamaño, color y halo.
+
+    Solo se toca lo que se pase; None = no cambiar. Sin ningún parámetro, devuelve
+    el estado actual sin tocar nada. Si cambias algo y no dices `activar`, las
+    etiquetas se encienden; `activar=False` las apaga.
+
+    - `expresion`: expresión simple de ArcMap, con los campos entre corchetes:
+      `"[NOMBRE]"`, `'[COD] & " " & [NOMBRE]'`.
+    - `tamano`: en puntos. `color` y `color_halo`: `[R, G, B]` o `"#RRGGBB"`.
+    - `halo`: grosor en puntos; `0` lo quita. El color del halo solo cambia si
+      pasas `color_halo` (blanco si la capa no tenía ninguno).
+    - `clase`: aplica solo a esa clase de etiquetas. Sin ella, a todas.
+
+    **Modifica las clases que ya tiene la capa; no las borra ni las crea.** Es lo que
+    funciona con los dos motores de etiquetado: en un mapa con **Maplex**, sustituir
+    las clases por unas nuevas deja la capa sin etiquetas y sin ningún error. Solo si
+    la capa no tiene ninguna clase se crea una (hace falta `expresion`), preparada para
+    el motor del mapa. La respuesta dice el `motor`, si se creó la clase
+    (`clase_creada`) y cómo quedó cada clase **leída de vuelta de la capa**, junto con
+    `antes`.
+    """
+    params: dict = {"capa": capa}
+    for clave, valor in (("expresion", expresion), ("tamano", tamano), ("color", color),
+                         ("halo", halo), ("color_halo", color_halo),
+                         ("activar", activar), ("clase", clase)):
+        if valor is not None:
+            params[clave] = valor
+    return _client.send("set_labels", params)
+
+
+@mcp.tool()
 def set_text_element(texto: str, nombre: str = None, buscar: str = None,
                      grupo: str = None, indice: int = None) -> dict:
     """

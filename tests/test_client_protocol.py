@@ -553,6 +553,35 @@ class TestArgumentosEstrictos(unittest.TestCase):
         self.assertEqual(sin, [])
 
 
+class TestSetLabelsParametros(unittest.TestCase):
+    """`set_labels` solo toca lo que se pasa: un None que llegara al add-in como
+    null sería indistinguible de «quítalo». Por `call_tool`, como una llamada real,
+    para que el schema acepte el color en sus dos formas."""
+
+    def setUp(self):
+        self.espia = ClienteEspia()
+        self.original = servidor._client
+        servidor._client = self.espia
+        self.addCleanup(setattr, servidor, "_client", self.original)
+
+    def _llamar(self, args):
+        import asyncio
+        asyncio.run(servidor.mcp.call_tool("set_labels", args))
+        return self.espia.llamadas[-1]
+
+    def test_solo_viaja_lo_indicado(self):
+        ll = self._llamar({"capa": "Cotos", "halo": 1})
+        self.assertEqual(ll["ctype"], "set_labels")
+        self.assertEqual(ll["params"], {"capa": "Cotos", "halo": 1})
+
+    def test_color_como_lista_y_como_hex(self):
+        ll = self._llamar({"capa": "Cotos", "color": [0, 107, 46], "color_halo": "#FFFFFF",
+                           "halo": 0.8, "activar": False})
+        self.assertEqual(ll["params"]["color"], [0, 107, 46])
+        self.assertEqual(ll["params"]["color_halo"], "#FFFFFF")
+        self.assertIs(ll["params"]["activar"], False)
+
+
 class TestExportMxdLoteValida(unittest.TestCase):
     """Lo que se rechaza ANTES de lanzar un solo python.exe."""
 
