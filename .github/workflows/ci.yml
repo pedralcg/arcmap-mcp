@@ -1,0 +1,35 @@
+# CI de arcmap-mcp.
+#
+# El add-in (C#) enlaza ArcObjects de ArcGIS Desktop 10.5, que no existe en un
+# runner de GitHub: se compila y se prueba en local (addin/build.ps1 y
+# tests/regresion_*.py contra un ArcMap vivo). Aqui corre lo que es Python:
+# - el servidor MCP (py3) y su protocolo con el puente;
+# - el runner arcpy y los scripts standalone (py2.7), con un arcpy de mentira
+#   (tests/casos_runner_py27.py), que es como los prueba ya la suite local.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  tests:
+    name: tests (py3 + py2.7)
+    # ubuntu-22.04 es la ultima imagen con el paquete python2 en apt.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Instalar Python 2.7
+        run: sudo apt-get update && sudo apt-get install -y python2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Dependencias del servidor MCP
+        run: python -m pip install -r requirements.txt
+      - name: Compilar el codigo py2.7
+        run: python2 -m py_compile addin/ArcmapMcp.AddIn/Python/runner.py src/auditor_mxd.py src/exportar_mxd.py tests/casos_runner_py27.py
+      - name: Tests
+        env:
+          ARCMAP_PYTHON27: /usr/bin/python2
+        run: python -m unittest discover -s tests -v
