@@ -47,7 +47,26 @@ ok_n = 0
 fallos = []
 
 
+REINTENTOS_DIBUJO = []  # (comando, reintentos) de los export que llegaron con el mapa dibujando
+
+
 def enviar(tipo, params=None, timeout=180):
+    """Un comando al puente. Los export que vuelven con "dibujando: " (E_PENDING) se
+    reintentan cada 3 s, igual que hace el servidor MCP (_exportar): este script habla
+    al socket sin pasar por el, y sin esto contaria como fallo lo que el servidor
+    resuelve solo. Se anota cuantas veces pasa: es el E_PENDING intermitente."""
+    import time
+    for reintento in range(40):
+        r = _enviar_una(tipo, params, timeout)
+        if r.get("ok") or not str(r.get("error", "")).startswith("dibujando: "):
+            if reintento:
+                REINTENTOS_DIBUJO.append((tipo, reintento))
+            return r
+        time.sleep(3)
+    return r
+
+
+def _enviar_una(tipo, params, timeout):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(timeout)
     s.connect((HOST, PORT))
@@ -499,31 +518,13 @@ if texto_campo and inicial.get("ok"):
     # Export INMEDIATO tras cambiar etiquetas, a proposito: es el caso que colgo ArcMap
     # tres veces el 2026-09-25 (E_PENDING y una espera con DoEvents dentro del add-in
     # que no dejaba terminar el dibujado). Desde la 2.15.0 el add-in devuelve
-    # "dibujando: " al momento y el que espera es el SERVIDOR (arcmap_mcp_server._exportar).
-    # Este script habla al socket directamente, sin servidor, asi que reintenta el mismo.
-    import time  # noqa: E402
-
-    def exportar_esperando(salida, nota):
-        global ok_n
-        reintentos = 0
-        for _ in range(40):
-            r = enviar("export_jpg", {"salida": salida, "dpi": 72})
-            if r.get("ok") or not str(r.get("error", "")).startswith("dibujando: "):
-                break
-            reintentos += 1
-            time.sleep(3)
-        if r.get("ok"):
-            ok_n += 1
-        else:
-            fallos.append(("export_jpg", str(r.get("error"))[:110]))
-        sys.stdout.write("  [%s] %-30s %s, %d reintentos%s"
-                         % ("OK " if r.get("ok") else "FALLO", "export_jpg", nota, reintentos, chr(10)))
-
+    # "dibujando: " al momento y el que espera es el SERVIDOR (arcmap_mcp_server._exportar);
+    # aqui lo hace enviar(), igual.
     on = ETQ_DIR + SEP + "etiquetas_on.jpg"
     off = ETQ_DIR + SEP + "etiquetas_off.jpg"
-    exportar_esperando(on, "(inmediato tras set_labels)")
+    t("export_jpg", {"salida": on, "dpi": 72}, nota="(inmediato tras set_labels)")
     t("set_labels", {"capa": NOMBRE_VEC, "activar": False}, nota="(apagar)")
-    exportar_esperando(off, "(inmediato tras apagar)")
+    t("export_jpg", {"salida": off, "dpi": 72}, nota="(inmediato tras apagar)")
     try:
         pinta = huella(on) != huella(off)
     except OSError:
@@ -563,6 +564,8 @@ for sobra in ("mv_a", "mv_b", "mv_merge", "merge_ext", "compuesto.tif",
         pass
 
 sys.stdout.write(chr(10) + "RESULTADO: %d correctos, %d fallos" % (ok_n, len(fallos)) + chr(10))
+sys.stdout.write("E_PENDING ('dibujando: ') resuelto con reintento: %s%s"
+                 % (REINTENTOS_DIBUJO or "ninguno", chr(10)))
 for nombre, det in fallos:
     sys.stdout.write("   FALLO %-28s %s" % (nombre, det) + chr(10))
 sys.exit(1 if fallos else 0)
