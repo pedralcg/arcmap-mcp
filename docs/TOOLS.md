@@ -5,7 +5,7 @@
 > lista existen solo para lo **repetitivo y de alto valor** —sobre todo las series de
 > planos (Data Driven Pages)—, no para replicar toda la API.
 
-**63 herramientas** sobre ArcMap 10.5. Unas **39 están cubiertas por la regresión en sesión
+**65 herramientas** sobre ArcMap 10.5. Unas **39 están cubiertas por la regresión en sesión
 viva** (`tests/regresion_sesion_viva.py`, 147 comprobaciones); el resto se ha ejercitado a
 mano en trabajo real, pero **no automáticamente**. El README, en «Herramientas MCP», explica
 por qué la distinción importa.
@@ -211,6 +211,8 @@ respuesta lo avisa y te manda aquí.
 | `apply_symbology_from_layer` | Aplica un `.lyr` plantilla ya preparado |
 | `set_single_symbology` | **Un solo símbolo** (sin clasificar) con los colores pedidos: relleno, borde y grosor, hueco, tamaño en puntos, transparencia. Sin colores sale gris neutro, siempre el mismo |
 | `edit_symbol` | Cambia **solo lo pedido** de la simbología que ya tiene la capa (símbolo único, valores únicos o rangos), sin rehacerla; `categoria` elige la clase. Sin nada que cambiar, la lee |
+| `list_style_symbols` | Sin `estilo`, los estilos `.style` **cargados** en ArcMap; con él (nombre o ruta), sus símbolos de relleno, línea o marcador con nombre y categoría, filtrables por `patron` |
+| `apply_style_symbol` | Pone a una capa, como símbolo único, un símbolo de un `.style` por su nombre. La clase sale de la geometría de la capa |
 | `set_labels` | Etiquetas de una capa de ENTIDADES: expresión, tamaño, color y halo; enciende o apaga. Devuelve cómo quedó cada clase **leída de la capa** y el motor del mapa (Maplex o estándar) |
 
 **Un color, sin rehacer la leyenda.** Antes de `set_single_symbology` no había forma de dejar
@@ -221,6 +223,14 @@ cambia solo lo pedido, así que el tipo de símbolo, los patrones y las demás c
 tocan. Sin `categoria`, en una capa clasificada cambia lo común a todas (borde, grosor, tamaño,
 transparencia) y **se niega a cambiar el relleno de todas**, que borraría la clasificación. Lo
 que no aplica a la geometría (relleno en líneas, `tamano` en polígonos) es error, no se ignora.
+
+**Los estilos del usuario, sin tocar su galería.** `list_style_symbols` y `apply_style_symbol`
+leen los `.style` con la galería de estilos de ArcMap. Un `.style` que no estaba cargado se
+añade **solo mientras dura la llamada** y se quita al terminar, también si falla: las
+«Referencias de estilo» del usuario no se quedan cambiadas por una consulta. Los estilos de la
+instalación (`ESRI.style`) figuran en la galería con ruta relativa; la respuesta los devuelve
+siempre con la ruta completa. Si hay dos símbolos con el mismo nombre en categorías distintas,
+`apply_style_symbol` falla listándolas y pide `categoria_estilo`.
 
 **`set_labels` modifica las clases de etiquetas que ya tiene la capa; no las sustituye.**
 La vía obvia en ArcObjects, vaciar las clases y crear unas nuevas, tiene un fallo silencioso: en un

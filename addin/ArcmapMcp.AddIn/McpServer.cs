@@ -477,6 +477,8 @@ namespace ArcmapMcp.AddIn
                 { "set_unique_values_symbology", Handlers.UniqueValuesHandlers.SetUniqueValuesSymbology },
                 { "set_single_symbology",       Handlers.SymbolHandlers.SetSingleSymbology },
                 { "edit_symbol",                Handlers.SymbolHandlers.EditSymbol },
+                { "list_style_symbols",         Handlers.StyleHandlers.ListStyleSymbols },
+                { "apply_style_symbol",         Handlers.StyleHandlers.ApplyStyleSymbol },
                 { "get_bookmarks",              Handlers.BookmarkHandlers.GetBookmarks },
                 { "add_bookmark",               Handlers.BookmarkHandlers.AddBookmark },
                 { "remove_bookmark",            Handlers.BookmarkHandlers.RemoveBookmark },

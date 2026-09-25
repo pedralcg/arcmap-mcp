@@ -683,6 +683,26 @@ class TestSimbologiaParametros(unittest.TestCase):
         ll = self._llamar("edit_symbol", {"capa": "Estratos"})
         self.assertEqual(ll["params"], {"capa": "Estratos"})
 
+    def test_list_style_sin_estilo_pide_los_cargados(self):
+        # Sin `estilo` el add-in devuelve los estilos cargados: no debe viajar un
+        # estilo null que lo confunda con «estilo vacío».
+        ll = self._llamar("list_style_symbols", {})
+        self.assertEqual(ll["ctype"], "list_style_symbols")
+        self.assertEqual(ll["params"], {"limite": 200})
+
+    def test_list_style_con_filtros(self):
+        ll = self._llamar("list_style_symbols", {"estilo": r"C:\temp\iden.style",
+                                                 "clase": "relleno", "patron": "monte*"})
+        self.assertEqual(ll["params"], {"estilo": r"C:\temp\iden.style", "clase": "relleno",
+                                        "patron": "monte*", "limite": 200})
+
+    def test_apply_style_solo_lo_indicado(self):
+        ll = self._llamar("apply_style_symbol", {"capa": "ENP", "estilo": "Usuario",
+                                                 "nombre_simbolo": "Monte público"})
+        self.assertEqual(ll["ctype"], "apply_style_symbol")
+        self.assertEqual(ll["params"], {"capa": "ENP", "estilo": "Usuario",
+                                        "nombre_simbolo": "Monte público"})
+
 
 class TestExportMxdLoteValida(unittest.TestCase):
     """Lo que se rechaza ANTES de lanzar un solo python.exe."""

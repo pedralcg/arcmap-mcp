@@ -1169,6 +1169,58 @@ def edit_symbol(capa: str, categoria: str | int = None, color_relleno: list | st
 
 
 @mcp.tool()
+def list_style_symbols(estilo: str = None, clase: str = None, patron: str = None,
+                       limite: int = 200) -> dict:
+    """
+    Símbolos de un estilo `.style` (los del selector de símbolos de ArcMap).
+
+    - Sin `estilo`: lista los estilos CARGADOS en ArcMap (nombre y ruta) y las clases
+      de símbolo de la galería. Es el primer paso.
+    - `estilo`: el nombre de uno cargado (`Usuario`, `ESRI`) o la ruta ABSOLUTA a un
+      `.style`. Si no estaba cargado se añade solo durante la llamada y se quita
+      después: la galería del usuario no se queda cambiada.
+    - `clase`: `relleno`, `linea` o `marcador` (o el nombre de una clase de la
+      galería, p. ej. `Fill Symbols`). Sin ella, las tres.
+    - `patron`: filtra por nombre o categoría. Sin comodines es «contiene»; con `*` o
+      `?`, comodín sobre el texto entero. Sin distinguir mayúsculas.
+    - `limite` (1-2000): cuántos se devuelven; `total` y `truncado` dicen si hay más.
+
+    Cada símbolo trae `nombre`, `categoria`, `clase` y `tipo_simbolo`. El `nombre` (y,
+    si se repite, la `categoria`) es lo que pide `apply_style_symbol`.
+    """
+    params: dict = {"limite": limite}
+    params.update({k: v for k, v in {"estilo": estilo, "clase": clase,
+                                     "patron": patron}.items() if v is not None})
+    return _client.send("list_style_symbols", params)
+
+
+@mcp.tool()
+def apply_style_symbol(capa: str, estilo: str, nombre_simbolo: str, clase: str = None,
+                       categoria_estilo: str = None, etiqueta: str = None) -> dict:
+    """
+    Pone a una capa de ENTIDADES, como símbolo único, un símbolo de un estilo `.style`
+    (por ejemplo, el relleno de «Monte público» del estilo de la empresa). Sustituye la
+    simbología que tenga, como `set_single_symbology`; la transparencia de la capa no
+    cambia.
+
+    - `estilo`: nombre de un estilo cargado o ruta ABSOLUTA a un `.style` (se carga
+      solo durante la llamada). `list_style_symbols` da los nombres.
+    - `nombre_simbolo`: el nombre exacto (sin distinguir mayúsculas). Si hay varios con
+      el mismo nombre en categorías distintas, la llamada falla listándolas y hay que
+      pasar `categoria_estilo`.
+    - `clase`: por defecto la que toca a la geometría de la capa (relleno para
+      polígonos, línea, marcador para puntos). Un símbolo de otra geometría es error.
+    - `etiqueta`: el texto de la entrada en la TOC.
+
+    Para retocar después un color del símbolo aplicado, `edit_symbol`. La respuesta
+    trae el símbolo leído de vuelta de la capa y `simbolo_de_estilo` (de dónde salió).
+    """
+    return _client.send("apply_style_symbol", _params_simbolo(
+        capa, estilo=estilo, nombre_simbolo=nombre_simbolo, clase=clase,
+        categoria_estilo=categoria_estilo, etiqueta=etiqueta))
+
+
+@mcp.tool()
 def get_bookmarks() -> dict:
     """Lista los marcadores espaciales del data frame activo, con su extensión."""
     return _client.send("get_bookmarks")

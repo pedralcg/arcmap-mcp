@@ -632,6 +632,63 @@ if leido.get("ok") and len(leido["result"]["clases"]) >= 2:
 else:
     fallos.append(("edit_symbol", "no se pudo leer los valores unicos: " + str(leido)[:150]))
 
+sys.stdout.write("--- estilos .style (2.15.0) ---" + chr(10))
+# Se usa ESRI.style, que viene con ArcMap y siempre esta cargado, y una COPIA suya en
+# el temporal para el camino "estilo que no estaba cargado". El control es la galeria:
+# tras usar la copia, la lista de estilos cargados tiene que ser la de antes. Una tool
+# que se olvidara de quitarla pasaria "lee los simbolos" y fallaria aqui.
+import shutil
+import tempfile
+
+r = t("list_style_symbols", {}, nota="(estilos cargados)")
+cargados = r["result"]["estilos_cargados"] if r and r.get("ok") else []
+esri = [e for e in cargados if e["nombre"].lower() == "esri"]
+if esri:
+    r = t("list_style_symbols", {"estilo": "ESRI", "clase": "relleno", "limite": 5},
+          nota="(ESRI, rellenos)")
+    simbolos = r["result"]["simbolos"] if r and r.get("ok") else []
+    comprobar_sim("list_style_symbols trae rellenos de ESRI con nombre y tipo",
+                  len(simbolos) == 5 and r["result"]["truncado"] is True
+                  and all(s["tipo_simbolo"] == "relleno" and s["nombre"] for s in simbolos),
+                  simbolos)
+    if simbolos:
+        elegido = simbolos[0]
+        r = t("apply_style_symbol", {"capa": NOMBRE_VEC, "estilo": "ESRI",
+                                     "nombre_simbolo": elegido["nombre"],
+                                     "categoria_estilo": elegido["categoria"], "etiqueta": "Del estilo"},
+              nota="(" + elegido["nombre"] + ")")
+        if r and r.get("ok"):
+            res = r["result"]
+            comprobar_sim("apply_style_symbol deja un simbolo unico con el del estilo",
+                          res["renderer"] == "simple" and len(res["clases"]) == 1
+                          and res["clases"][0]["etiqueta"] == "Del estilo"
+                          and res["simbolo_de_estilo"]["nombre"] == elegido["nombre"], res)
+        t("apply_style_symbol", {"capa": NOMBRE_VEC, "estilo": "ESRI", "nombre_simbolo": "no_existe_este"},
+          espera_ok=False, nota="(simbolo inexistente)")
+    lineas = enviar("list_style_symbols", {"estilo": "ESRI", "clase": "linea", "limite": 1})
+    if lineas.get("ok") and lineas["result"]["simbolos"]:
+        t("apply_style_symbol", {"capa": NOMBRE_VEC, "estilo": "ESRI", "clase": "linea",
+                                 "nombre_simbolo": lineas["result"]["simbolos"][0]["nombre"],
+                                 "categoria_estilo": lineas["result"]["simbolos"][0]["categoria"]},
+          espera_ok=False, nota="(linea sobre poligonos)")
+    t("list_style_symbols", {"estilo": "no_existe_este_estilo"}, espera_ok=False, nota="(estilo no cargado)")
+
+    tmp = tempfile.mkdtemp(prefix="arcmap_mcp_estilo_")
+    copia = os.path.join(tmp, "copia_regresion.style")
+    shutil.copy(esri[0]["ruta"], copia)
+    r = t("list_style_symbols", {"estilo": copia, "clase": "relleno", "limite": 1}, nota="(copia sin cargar)")
+    if r and r.get("ok"):
+        comprobar_sim("la copia se lee y consta como no cargada",
+                      r["result"]["estaba_cargado"] is False and r["result"]["devueltos"] == 1, r["result"])
+    despues = enviar("list_style_symbols", {})
+    rutas_antes = sorted(e["ruta"].lower() for e in cargados)
+    rutas_despues = sorted(e["ruta"].lower() for e in despues.get("result", {}).get("estilos_cargados", []))
+    comprobar_sim("la galeria queda como estaba tras usar la copia", rutas_antes == rutas_despues,
+                  {"antes": rutas_antes, "despues": rutas_despues})
+    shutil.rmtree(tmp, ignore_errors=True)
+else:
+    fallos.append(("list_style_symbols", "ESRI.style no aparece entre los cargados: " + str(cargados)[:150]))
+
 sys.stdout.write("--- limpieza ---" + chr(10))
 t("remove_layer", {"capa": "real_NUEVO.tif"})
 t("remove_layer", {"capa": NOMBRE_VEC})

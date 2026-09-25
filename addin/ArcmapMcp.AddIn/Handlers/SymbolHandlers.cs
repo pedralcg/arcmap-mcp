@@ -165,7 +165,7 @@ namespace ArcmapMcp.AddIn.Handlers
             return c;
         }
 
-        private static IGeoFeatureLayer CapaDeEntidades(JObject parameters, out IMxDocument doc, out IMap map)
+        internal static IGeoFeatureLayer CapaDeEntidades(JObject parameters, out IMxDocument doc, out IMap map)
         {
             string capa = (string)parameters["capa"];
             if (string.IsNullOrEmpty(capa))
@@ -180,7 +180,7 @@ namespace ArcmapMcp.AddIn.Handlers
             return gfl;
         }
 
-        private static esriGeometryType Geometria(IGeoFeatureLayer gfl)
+        internal static esriGeometryType Geometria(IGeoFeatureLayer gfl)
         {
             if (gfl.FeatureClass == null)
                 throw new ArgumentException("La capa no tiene fuente de datos accesible (¿rota?): no se sabe su geometría.");
@@ -345,7 +345,7 @@ namespace ArcmapMcp.AddIn.Handlers
             return fr == null ? "ninguno" : fr.GetType().Name;
         }
 
-        private static JObject Estado(IGeoFeatureLayer gfl, JObject antes)
+        internal static JObject Estado(IGeoFeatureLayer gfl, JObject antes)
         {
             IFeatureRenderer fr = gfl.Renderer;
             var clases = new JArray();
