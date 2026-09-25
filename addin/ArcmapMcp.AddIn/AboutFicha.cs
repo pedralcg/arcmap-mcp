@@ -11,7 +11,7 @@ namespace ArcmapMcp.AddIn
     /// </summary>
     internal static class AboutFicha
     {
-        private const string Autor = "Pedro Alcoba Gomez";
+        private const string Autor = "Pedro Alcoba Gómez";
         private const string Tagline = "Del dato ambiental al producto digital";
         private const string Web = "https://pedralcg.dev";
         private const string Email = "pedro@pedralcg.dev";
