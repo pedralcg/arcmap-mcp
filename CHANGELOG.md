@@ -15,8 +15,8 @@ misma sesión de ArcMap, sobre un documento con Maplex; **84 tests** sin ArcMap.
 nuevo lleva control, lo que tiene que fallar sin el arreglo: la simbología que no debe
 cambiar al mover una capa o al tocar un borde, la galería de estilos que tiene que quedar
 como estaba, y la copia del .mxd reabierta, que tiene que romper **exactamente** las capas
-que se predijeron. No se ha pasado `regresion_ddp.py` (exige un mxd de producción con Data
-Driven Pages; los handlers de DDP no cambian).
+que se predijeron. `regresion_ddp.py`, sobre un mxd con Data Driven Pages de 26 páginas:
+**14/14**, con el PDF con datos dentro y sin snapshot residual.
 
 ### Añadido
 - **`set_labels`**: expresión, tamaño, color y halo de las etiquetas de una capa, y
@@ -65,8 +65,9 @@ Driven Pages; los handlers de DDP no cambian).
 
 ### Conocido, sin arreglar
 - Caída de ArcMap 10.5 en `MaplexAnnotation.dll` (puntero nulo al redibujar el layout), 2 de
-  4 pasadas el día 1 de la tanda y ninguna en las 4 siguientes. Los volcados apuntan a Maplex,
-  no al add-in; falta saber si pasa igual con la 2.14.0.
+  4 pasadas el día 1 de la tanda y ninguna en las 4 siguientes. **No es de esta versión**: con
+  la 2.14.0 publicada y su propia regresión cae igual (1 de 4 pasadas, misma dirección en
+  `MaplexAnnotation.dll`). Pasa en ráfagas de cambios de la TOC con Maplex redibujando.
 
 ## [2.14.0] - 2026-09-25
 
