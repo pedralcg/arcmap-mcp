@@ -1155,6 +1155,75 @@ class TestVersionMxd(unittest.TestCase):
         self.assertTrue(error)
 
 
+class TestMarcosOle(unittest.TestCase):
+    """Un .mxd con marcos OLE deja colgado al arcpy de fuera mientras ArcMap está abierto
+    (medido 2026-09-26). Se detectan sin abrirlo por el CLSID de la clase en el layout."""
+
+    def _streams(self, **streams):
+        p = unittest.mock.patch.object(servidor, "_mxd_streams",
+                                       return_value=({k.replace("_", " "): v for k, v in streams.items()}, None))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_cuenta_en_el_pagelayout(self):
+        h = servidor._CLSID_MARCO_OLE
+        self._streams(PageLayout=b"xx" + h + b"yy" + h)
+        self.assertEqual(servidor._mxd_marcos_ole("x.mxd"), (2, None))
+
+    def test_si_hay_mx_document_manda_ese(self):
+        """Lo que guarda ArcObjects desde fuera va a `Mx Document` y deja el `PageLayout`
+        antiguo: sin esta regla, la copia ya limpia seguía contando dos."""
+        h = servidor._CLSID_MARCO_OLE
+        self._streams(PageLayout=h + h, Mx_Document=b"limpio")
+        self.assertEqual(servidor._mxd_marcos_ole("x.mxd"), (0, None))
+
+    def test_la_verificacion_del_guardado_no_se_lanza(self):
+        r = {"ok": True, "result": {"ruta": "C:\\x.mxd", "marcos_ole": [{"donde": "layout"}]}}
+        with unittest.mock.patch.object(servidor, "_verificar_guardado") as verificar:
+            servidor._tras_guardar(r, "ruta", True)
+        verificar.assert_not_called()
+        self.assertFalse(r["result"]["verificacion"]["reabierto"])
+        self.assertIn("marco(s) OLE", r["result"]["verificacion"]["motivo"])
+
+    def test_el_clsid_es_el_del_add_in(self):
+        ruta = os.path.join(RAIZ, "addin", "ArcmapMcp.AddIn", "Handlers", "MarcosOle.cs")
+        with open(ruta, encoding="utf-8") as fh:
+            cs = fh.read()
+        self.assertIn('internal const string Prefijo = "marcos_ole: ";', cs)
+        import uuid
+        self.assertEqual(servidor._CLSID_MARCO_OLE,
+                         uuid.UUID("f6705e85-523b-11d1-86e7-0000f8751720").bytes_le)
+
+    def test_las_copias_fuera_de_arcmap_miran_antes_los_marcos(self):
+        ruta = os.path.join(RAIZ, "addin", "ArcmapMcp.AddIn", "Handlers", "PythonHandlers.cs")
+        with open(ruta, encoding="utf-8") as fh:
+            cs = fh.read()
+        con_copia = cs[cs.index("private static JObject RunJobConSnapshot("):]
+        self.assertLess(con_copia.index("MarcosOle.ComprobarAntesDeCopia("),
+                        con_copia.index("Snapshot(serializarSesion)"))
+
+
+class TestNoEjecutarDentroDeUnDibujado(unittest.TestCase):
+    """ArcMap bombea mensajes mientras dibuja y los comandos entraban en mitad de un
+    dibujado: 72 veces en una pasada de la regresión (2026-09-26). Hipótesis de la caída
+    en MaplexAnnotation.dll. El dispatcher aplaza el comando si hay un dibujado en curso."""
+
+    def setUp(self):
+        ruta = os.path.join(RAIZ, "addin", "ArcmapMcp.AddIn", "StaDispatcher.cs")
+        with open(ruta, encoding="utf-8") as fh:
+            self.cs = fh.read()
+
+    def test_si_esta_dibujando_no_ejecuta_el_handler(self):
+        invoke = self.cs[self.cs.index("public static JObject Invoke("):self.cs.index("private static JObject Ejecutar(")]
+        self.assertIn("VigiaDibujo.Asegurar();", invoke)
+        self.assertLess(invoke.index("if (VigiaDibujo.Dibujando && !forzar)"),
+                        invoke.index("return Ejecutar(handler"))
+
+    def test_la_espera_tiene_tope(self):
+        """Un DisplayFinished que no llega no puede dejar el puente parado."""
+        self.assertIn("AplazamientoMaximo = TimeSpan.FromSeconds(20)", self.cs)
+
+
 class TestArcMapLocal(unittest.TestCase):
     """Issue #1: ArcMap instalado fuera de Program Files (`D:\\软件安装\\Desktop10.8\\`).
 

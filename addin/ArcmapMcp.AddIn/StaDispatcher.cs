@@ -40,24 +40,73 @@ namespace ArcmapMcp.AddIn
             if (_ui == null)
                 return Protocol.Error("Dispatcher STA no capturado (¿la extensión no llegó a cargar?)");
 
-            DispatcherOperation<JObject> op = _ui.InvokeAsync(delegate
+            // NO ejecutar dentro de un dibujado. ArcMap bombea mensajes mientras dibuja (para
+            // atender ESC) y el Dispatcher de WPF se despacha con un mensaje, así que un comando
+            // podía entrar en mitad de un dibujado: medido el 2026-09-26, 72 veces en una sola
+            // pasada de la regresión (14 remove_layer, 8 add_layer...). Hipótesis de la caída en
+            // MaplexAnnotation.dll: Maplex retiene la capa que el comando acaba de quitar. Si al
+            // entrar hay un dibujado en curso, el comando no corre: devuelve null, se suelta el
+            // hilo para que el dibujado acabe y se vuelve a intentar desde aquí.
+            var reloj = System.Diagnostics.Stopwatch.StartNew();
+            int aplazamientos = 0;
+            while (true)
             {
-                // Ninguna excepción escapa al message pump de ArcMap — eso
-                // sería un crash de la aplicación entera.
-                try
+                bool forzar = reloj.Elapsed > AplazamientoMaximo;
+                DispatcherOperation<JObject> intento = _ui.InvokeAsync(delegate
                 {
-                    return handler();
-                }
-                catch (Exception ex)
+                    try
+                    {
+                        VigiaDibujo.Asegurar();
+                    }
+                    catch { /* sin vigía, se ejecuta como siempre */ }
+                    if (VigiaDibujo.Dibujando && !forzar)
+                        return null;
+                    return Ejecutar(handler, etiqueta, forzar && VigiaDibujo.Dibujando, reloj.Elapsed);
+                });
+                TimeSpan resta = timeout - reloj.Elapsed;
+                if (resta < TimeSpan.Zero) resta = TimeSpan.Zero;
+                if (!intento.Task.Wait(resta))
+                    return Vencido(intento, etiqueta, timeout);
+                if (intento.Task.Result != null)
                 {
-                    Log.Error("Handler lanzó excepción en el hilo STA", ex);
-                    // Sobre de error del protocolo: error = mensaje + traceback.
-                    return Protocol.Error(ex.Message, ex);
+                    if (aplazamientos > 0)
+                        Log.Info("'" + (etiqueta ?? "comando sin nombre") + "' esperó " + aplazamientos
+                                 + " vez/veces a que ArcMap terminara de dibujar ("
+                                 + reloj.Elapsed.TotalSeconds.ToString("0.0") + " s)");
+                    return intento.Task.Result;
                 }
-            });
+                aplazamientos++;
+                System.Threading.Thread.Sleep(50);
+            }
+        }
 
+        /// <summary>Tope de la espera a que ArcMap termine de dibujar. Pasado, el comando se
+        /// ejecuta igual (y se anota): un WMS lento o un DisplayFinished que no llega no deben
+        /// dejar el puente parado.</summary>
+        private static readonly TimeSpan AplazamientoMaximo = TimeSpan.FromSeconds(20);
+
+        private static JObject Ejecutar(Func<JObject> handler, string etiqueta, bool conDibujado, TimeSpan esperado)
+        {
+            // Ninguna excepción escapa al message pump de ArcMap — eso
+            // sería un crash de la aplicación entera.
+            try
+            {
+                if (conDibujado)
+                    Log.Info("'" + (etiqueta ?? "comando sin nombre") + "' se ejecuta DURANTE un dibujado:"
+                             + " se esperó " + esperado.TotalSeconds.ToString("0") + " s y no terminaba.");
+                return handler();
+            }
+            catch (Exception ex)
+            {
+                Log.Error("Handler lanzó excepción en el hilo STA", ex);
+                // Sobre de error del protocolo: error = mensaje + traceback.
+                return Protocol.Error(ex.Message, ex);
+            }
+        }
+
+        private static JObject Vencido(DispatcherOperation<JObject> op, string etiqueta, TimeSpan timeout)
+        {
             Task<JObject> task = op.Task;
-            if (!task.Wait(timeout))
             {
                 // Abort() solo puede con lo que TODAVÍA no ha empezado. Los dos casos son
                 // distintos de verdad y hasta ahora se contaban igual: una operación
@@ -81,7 +130,6 @@ namespace ArcmapMcp.AddIn
                     + "aceptar peticiones, pero lo que mandes se encolará detrás de ella. Llama a ping "
                     + "para ver si ha terminado ya.");
             }
-            return task.Result;
         }
 
         // ------------------------------------------------------------------ //
