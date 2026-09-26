@@ -424,6 +424,98 @@ class TestAuditFolderValida(unittest.TestCase):
         self.assertEqual(r["mxd_encontrados"], 0)  # la raíz del repo no tiene .mxd
 
 
+class TestAuditFolderLoQueSaleEnElPlano(unittest.TestCase):
+    """El resumen tiene que dar el número que importa para el plano, no solo el total.
+
+    En ID2018 (bloque 02) había 2.335 capas rotas y solo 87 se dibujaban: con el total
+    a secas, la auditoría señalaba 27 veces más problemas de los que había. Aquí el
+    auditor Python 2.7 se sustituye por su salida, para probar solo el agregado.
+    """
+
+    def _auditar(self, salidas):
+        import subprocess
+        import tempfile
+        carpeta = tempfile.mkdtemp(prefix="audit_plano_")
+        self.addCleanup(lambda: __import__("shutil").rmtree(carpeta, ignore_errors=True))
+        for nombre in salidas:
+            with open(os.path.join(carpeta, nombre), "wb") as fh:
+                fh.write(b"no es un mxd")
+
+        self.abiertos = []
+
+        def falso_run(args, **kw):
+            nombre = os.path.basename(args[-1])
+            self.abiertos.append(nombre)
+            if salidas[nombre] == "TIMEOUT":
+                raise subprocess.TimeoutExpired(args, kw.get("timeout"))
+            datos = dict(salidas[nombre], ok=True)
+            return subprocess.CompletedProcess(args, 0, json.dumps(datos).encode(), b"")
+
+        with unittest.mock.patch.object(servidor, "_python27_arcgis",
+                                        return_value=sys.executable), \
+                unittest.mock.patch("subprocess.run", side_effect=falso_run):
+            return servidor.audit_folder(carpeta, timeout_por_documento=5)
+
+    def test_suma_por_separado_lo_que_se_ve(self):
+        r = self._auditar({
+            "a.mxd": {"num_capas": 40, "num_rotas": 30, "num_rotas_en_plano": 2,
+                      "num_con_query": 5, "num_con_query_en_plano": 1,
+                      "num_en_plano_desconocido": 0, "marcos": [], "capas": []},
+            "b.mxd": {"num_capas": 10, "num_rotas": 4, "num_rotas_en_plano": 0,
+                      "num_con_query": 3, "num_con_query_en_plano": 3,
+                      "num_en_plano_desconocido": 1, "marcos": [], "capas": []},
+        })
+        self.assertTrue(r["ok"], r)
+        res = r["resumen"]
+        self.assertEqual((res["num_rotas"], res["num_rotas_en_plano"]), (34, 2))
+        self.assertEqual((res["num_con_query"], res["num_con_query_en_plano"]), (8, 4))
+        self.assertEqual(res["num_en_plano_desconocido"], 1)
+        fila = r["documentos"][0]
+        self.assertEqual(fila["num_rotas_en_plano"], 2)
+        self.assertIn("marcos", fila)
+
+    def test_sin_pasada_de_capas_no_inventa_ceros(self):
+        """Con `con_capas=False` no se abrió nada: un `num_rotas_en_plano: 0` en el
+        resumen se leería como «ninguna rota», que no se sabe."""
+        r = servidor.audit_folder(RAIZ, con_capas=False)
+        self.assertNotIn("num_rotas_en_plano", r["resumen"])
+
+
+class TestAuditFolderCorteTrasTimeouts(unittest.TestCase):
+    """Sin negativa por ArcMap abierto (descartada como causa el 2026-09-25), la
+    protección es el corte: si todo agota el timeout, una carpeta de 200 planos no
+    puede costar 200 timeouts. Pero un documento lento entre sanos no debe cortar."""
+
+    SANO = {"num_capas": 1, "num_rotas": 0, "num_rotas_en_plano": 0, "num_con_query": 0,
+            "num_con_query_en_plano": 0, "num_en_plano_desconocido": 0,
+            "marcos": [], "capas": []}
+
+    _auditar = TestAuditFolderLoQueSaleEnElPlano._auditar
+
+    def test_dos_timeouts_seguidos_cortan_el_resto(self):
+        r = self._auditar({"a.mxd": "TIMEOUT", "b.mxd": "TIMEOUT",
+                           "c.mxd": self.SANO, "d.mxd": self.SANO})
+        self.assertEqual(self.abiertos, ["a.mxd", "b.mxd"])
+        self.assertEqual(r["resumen"]["timeout"], 2)
+        self.assertEqual(r["resumen"]["sin_abrir"], 2)
+        self.assertTrue(r["documentos"][3]["sin_abrir"])
+        self.assertIn("CORTADA", r["aviso_capas"])
+
+    def test_timeout_aislado_no_corta(self):
+        r = self._auditar({"a.mxd": "TIMEOUT", "b.mxd": self.SANO,
+                           "c.mxd": "TIMEOUT", "d.mxd": self.SANO})
+        self.assertEqual(len(self.abiertos), 4)
+        self.assertEqual(r["resumen"]["sin_abrir"], 0)
+        self.assertEqual(r["resumen"]["con_capas"], 2)
+        self.assertNotIn("aviso_capas", r)
+
+    def test_arcmap_abierto_ya_no_impide_la_pasada_de_capas(self):
+        """Control del cambio: la 2.14.0 miraba tasklist y omitía la pasada 2."""
+        self.assertFalse(hasattr(servidor, "_arcmap_esta_abierto"))
+        r = self._auditar({"a.mxd": self.SANO})
+        self.assertEqual(r["resumen"]["con_capas"], 1)
+
+
 class TestArgumentosEstrictos(unittest.TestCase):
     """Un argumento que la tool no declara es ERROR, no se ignora.
 
@@ -459,6 +551,273 @@ class TestArgumentosEstrictos(unittest.TestCase):
         self.assertGreater(len(tools), 50)
         sin = [t.name for t in tools if t.inputSchema.get("additionalProperties") is not False]
         self.assertEqual(sin, [])
+
+
+class ClienteGuion(object):
+    """Cliente de mentira que responde lo que diga su guion, en orden."""
+
+    def __init__(self, respuestas):
+        self.respuestas = list(respuestas)
+        self.llamadas = []
+
+    def send(self, ctype, params=None, timeout=None):
+        self.llamadas.append(ctype)
+        return self.respuestas.pop(0) if len(self.respuestas) > 1 else self.respuestas[0]
+
+
+class TestExportEsperaAlDibujoDesdeFuera(unittest.TestCase):
+    """E_PENDING se espera en el SERVIDOR, no dentro de ArcMap.
+
+    El 2026-09-25 la espera del add-in (DoEvents en el hilo de ArcMap) colgó ArcMap tres
+    veces al exportar justo después de cambiar etiquetas. Ahora el add-in devuelve
+    `dibujando: ...` al momento y aquí se reintenta sin tocar el puente mientras tanto.
+    """
+
+    DIBUJANDO = {"ok": False, "error": "dibujando: ArcMap aún está dibujando el mapa"}
+    BIEN = {"ok": True, "result": {"salida": "x.jpg"}}
+
+    def setUp(self):
+        self.original = servidor._client
+        self.addCleanup(setattr, servidor, "_client", self.original)
+        parche = unittest.mock.patch("time.sleep")
+        self.sleep = parche.start()
+        self.addCleanup(parche.stop)
+
+    def test_reintenta_hasta_que_sale_y_lo_dice(self):
+        servidor._client = ClienteGuion([self.DIBUJANDO, self.DIBUJANDO, self.BIEN])
+        r = servidor.export_jpg(r"C:\x.jpg")
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(servidor._client.llamadas, ["export_jpg"] * 3)
+        self.assertIn("2 reintentos", r["result"]["aviso_dibujo"])
+
+    def test_sin_dibujando_no_hay_reintento_ni_aviso(self):
+        servidor._client = ClienteGuion([dict(self.BIEN, result={"salida": "x.pdf"})])
+        r = servidor.export_pdf(r"C:\x.pdf")
+        self.assertEqual(servidor._client.llamadas, ["export_pdf"])
+        self.assertNotIn("aviso_dibujo", r["result"])
+
+    def test_otro_error_no_se_reintenta(self):
+        """`busy:` tiene su propio tratamiento: reintentarlo aquí apilaría llamadas."""
+        servidor._client = ClienteGuion([{"ok": False, "error": "busy: ArcMap lleva 3 s"}])
+        servidor.export_view_png(r"C:\x.png")
+        self.assertEqual(servidor._client.llamadas, ["export_view_png"])
+        self.sleep.assert_not_called()
+
+    def test_se_rinde_dentro_del_margen_y_nombra_la_variable(self):
+        servidor._client = ClienteGuion([self.DIBUJANDO])
+        reloj = iter(range(0, 10000, 3))
+        with unittest.mock.patch("time.monotonic", side_effect=lambda: next(reloj)):
+            r = servidor.export_jpg(r"C:\x.jpg")
+        self.assertFalse(r["ok"])
+        self.assertIn("ARCMAP_ESPERA_DIBUJO", r["error"])
+        self.assertLessEqual(len(servidor._client.llamadas),
+                             int(servidor.ESPERA_DIBUJO) // servidor._PAUSA_DIBUJO + 1)
+
+    def test_el_prefijo_es_el_mismo_que_el_del_add_in(self):
+        ruta = os.path.join(RAIZ, "addin", "ArcmapMcp.AddIn", "Handlers", "ExportHandlers.cs")
+        with open(ruta, encoding="utf-8") as fh:
+            cs = fh.read()
+        self.assertRegex(cs, r'const string Dibujando = "dibujando: ";')
+        self.assertNotIn("DoEvents()", cs, "la espera volvió al hilo de ArcMap")
+
+
+class TestSetLabelsParametros(unittest.TestCase):
+    """`set_labels` solo toca lo que se pasa: un None que llegara al add-in como
+    null sería indistinguible de «quítalo». Por `call_tool`, como una llamada real,
+    para que el schema acepte el color en sus dos formas."""
+
+    def setUp(self):
+        self.espia = ClienteEspia()
+        self.original = servidor._client
+        servidor._client = self.espia
+        self.addCleanup(setattr, servidor, "_client", self.original)
+
+    def _llamar(self, args):
+        import asyncio
+        asyncio.run(servidor.mcp.call_tool("set_labels", args))
+        return self.espia.llamadas[-1]
+
+    def test_solo_viaja_lo_indicado(self):
+        ll = self._llamar({"capa": "Cotos", "halo": 1})
+        self.assertEqual(ll["ctype"], "set_labels")
+        self.assertEqual(ll["params"], {"capa": "Cotos", "halo": 1})
+
+    def test_color_como_lista_y_como_hex(self):
+        ll = self._llamar({"capa": "Cotos", "color": [0, 107, 46], "color_halo": "#FFFFFF",
+                           "halo": 0.8, "activar": False})
+        self.assertEqual(ll["params"]["color"], [0, 107, 46])
+        self.assertEqual(ll["params"]["color_halo"], "#FFFFFF")
+        self.assertIs(ll["params"]["activar"], False)
+
+
+class TestSimbologiaParametros(unittest.TestCase):
+    """set_single_symbology y edit_symbol: solo viaja lo indicado, y `categoria`
+    numérica (la clase 2 de unos rangos) llega como texto, que es como la compara el
+    add-in contra valores y etiquetas."""
+
+    def setUp(self):
+        self.espia = ClienteEspia()
+        self.original = servidor._client
+        servidor._client = self.espia
+        self.addCleanup(setattr, servidor, "_client", self.original)
+
+    def _llamar(self, tool, args):
+        import asyncio
+        asyncio.run(servidor.mcp.call_tool(tool, args))
+        return self.espia.llamadas[-1]
+
+    def test_single_solo_lo_indicado(self):
+        ll = self._llamar("set_single_symbology", {"capa": "ENP", "color_relleno": "#A8D5A2",
+                                                   "sin_relleno": False})
+        self.assertEqual(ll["ctype"], "set_single_symbology")
+        self.assertEqual(ll["params"], {"capa": "ENP", "color_relleno": "#A8D5A2",
+                                        "sin_relleno": False})
+
+    def test_edit_categoria_numerica_viaja_como_texto(self):
+        ll = self._llamar("edit_symbol", {"capa": "Estratos", "categoria": 2,
+                                          "color_relleno": [255, 0, 0]})
+        self.assertEqual(ll["params"], {"capa": "Estratos", "categoria": "2",
+                                        "color_relleno": [255, 0, 0]})
+
+    def test_edit_sin_nada_es_solo_lectura(self):
+        ll = self._llamar("edit_symbol", {"capa": "Estratos"})
+        self.assertEqual(ll["params"], {"capa": "Estratos"})
+
+    def test_list_style_sin_estilo_pide_los_cargados(self):
+        # Sin `estilo` el add-in devuelve los estilos cargados: no debe viajar un
+        # estilo null que lo confunda con «estilo vacío».
+        ll = self._llamar("list_style_symbols", {})
+        self.assertEqual(ll["ctype"], "list_style_symbols")
+        self.assertEqual(ll["params"], {"limite": 200})
+
+    def test_list_style_con_filtros(self):
+        ll = self._llamar("list_style_symbols", {"estilo": r"C:\temp\empresa.style",
+                                                 "clase": "relleno", "patron": "monte*"})
+        self.assertEqual(ll["params"], {"estilo": r"C:\temp\empresa.style", "clase": "relleno",
+                                        "patron": "monte*", "limite": 200})
+
+    def test_apply_style_solo_lo_indicado(self):
+        ll = self._llamar("apply_style_symbol", {"capa": "ENP", "estilo": "Usuario",
+                                                 "nombre_simbolo": "Monte público"})
+        self.assertEqual(ll["ctype"], "apply_style_symbol")
+        self.assertEqual(ll["params"], {"capa": "ENP", "estilo": "Usuario",
+                                        "nombre_simbolo": "Monte público"})
+
+    def test_apply_style_solo_por_id(self):
+        # El nombre no es único (ESRI.style trae dos «Verde» en la misma categoría).
+        ll = self._llamar("apply_style_symbol", {"capa": "ENP", "estilo": "ESRI", "id_simbolo": 12})
+        self.assertEqual(ll["params"], {"capa": "ENP", "estilo": "ESRI", "id_simbolo": 12})
+
+
+class TestTocYServicios(unittest.TestCase):
+    """move_layer y el WMS de add_layer: solo viaja lo indicado. Un `posicion` o un
+    `visible` null que llegara al add-in cambiaría el defecto que decide él."""
+
+    def setUp(self):
+        self.espia = ClienteEspia()
+        self.original = servidor._client
+        servidor._client = self.espia
+        self.addCleanup(setattr, servidor, "_client", self.original)
+
+    def _llamar(self, tool, args):
+        import asyncio
+        asyncio.run(servidor.mcp.call_tool(tool, args))
+        return self.espia.llamadas[-1]
+
+    def test_move_layer_minimo(self):
+        ll = self._llamar("move_layer", {"capa": "Fondos"})
+        self.assertEqual(ll["ctype"], "move_layer")
+        self.assertEqual(ll["params"], {"capa": "Fondos"})
+
+    def test_move_layer_con_referencia(self):
+        ll = self._llamar("move_layer", {"capa": "Fondos", "referencia": "Ortos/PNOA",
+                                         "posicion": "AFTER"})
+        self.assertEqual(ll["params"], {"capa": "Fondos", "referencia": "Ortos/PNOA",
+                                        "posicion": "AFTER"})
+
+    def test_add_layer_sin_nada_nuevo_no_manda_visible(self):
+        ll = self._llamar("add_layer", {"fuente": r"C:\a.shp"})
+        self.assertNotIn("visible", ll["params"])
+        self.assertNotIn("subcapas", ll["params"])
+
+    def test_add_layer_wms_con_subcapas_apagado(self):
+        url = "https://www.ign.es/wms-inspire/mapa-raster"
+        ll = self._llamar("add_layer", {"fuente": url, "visible": False,
+                                        "subcapas": ["Mapas raster del IGN"]})
+        self.assertEqual(ll["params"]["fuente"], url)
+        self.assertIs(ll["params"]["visible"], False)
+        self.assertEqual(ll["params"]["subcapas"], ["Mapas raster del IGN"])
+
+
+class TestGuardarVerificaRutasRelativas(unittest.TestCase):
+    """save_mxd / save_mxd_as reabren lo guardado cuando se pide, o solas si el add-in
+    predice capas que se van a perder; y lo que cuenta son las rotas NUEVAS, no las que
+    ya estaban rotas en memoria."""
+
+    def setUp(self):
+        self.original = servidor._client
+        self.addCleanup(setattr, servidor, "_client", self.original)
+
+    def _cliente(self, resultado):
+        class Cliente(object):
+            llamadas = []
+
+            def send(self, ctype, params=None, timeout=None):
+                self.llamadas.append({"ctype": ctype, "params": params or {}})
+                return {"ok": True, "result": dict(resultado)}
+        servidor._client = Cliente()
+        return servidor._client
+
+    def test_sin_riesgo_no_reabre_ni_devuelve_la_lista_interna(self):
+        self._cliente({"guardado": True, "ruta": r"C:\a.mxd", "rotas_en_memoria": []})
+        with unittest.mock.patch.object(servidor, "_verificar_guardado") as ver:
+            r = servidor.save_mxd()
+        ver.assert_not_called()
+        self.assertNotIn("rotas_en_memoria", r["result"])
+        self.assertNotIn("verificacion", r["result"])
+
+    def test_con_riesgo_reabre_solo(self):
+        cli = self._cliente({"guardado": True, "ruta": r"C:\a.mxd",
+                             "capas_perderan_ruta": [{"ruta": "G/Capa"}],
+                             "rotas_en_memoria": [{"data_frame": "Capas", "ruta": "X"}]})
+        with unittest.mock.patch.object(servidor, "_verificar_guardado",
+                                        return_value={"reabierto": True}) as ver:
+            r = servidor.save_mxd()
+        ver.assert_called_once_with(r"C:\a.mxd", [{"data_frame": "Capas", "ruta": "X"}])
+        self.assertEqual(r["result"]["verificacion"], {"reabierto": True})
+        self.assertEqual(cli.llamadas[-1]["params"], {})
+
+    def test_verificar_false_lo_impide_aunque_haya_riesgo(self):
+        self._cliente({"guardado": True, "ruta": r"C:\a.mxd",
+                       "capas_perderan_ruta": [{"ruta": "G/Capa"}]})
+        with unittest.mock.patch.object(servidor, "_verificar_guardado") as ver:
+            servidor.save_mxd(verificar=False)
+        ver.assert_not_called()
+
+    def test_save_as_verifica_la_copia(self):
+        cli = self._cliente({"guardado": True, "salida": r"C:\copia.mxd"})
+        with unittest.mock.patch.object(servidor, "_verificar_guardado",
+                                        return_value={"reabierto": True}) as ver:
+            servidor.save_mxd_as(r"C:\copia.mxd", verificar=True)
+        ver.assert_called_once_with(r"C:\copia.mxd", [])
+        self.assertIs(cli.llamadas[-1]["params"]["verificar"], True)
+
+    def test_solo_cuentan_las_rotas_nuevas(self):
+        # El auditor da la ruta de grupo con "\" y el add-in con "/": son la misma capa.
+        auditado = {"ok": True, "num_rotas": 3, "capas": [
+            {"data_frame": "Capas", "nombre_largo": "Grupo\\Ya rota", "rota": True, "grupo": False},
+            {"data_frame": "Capas", "nombre_largo": "Grupo\\Nueva", "rota": True, "grupo": False,
+             "fuente": "\\p.shp"},
+            {"data_frame": "Capas", "nombre_largo": "Grupo", "rota": True, "grupo": True},
+            {"data_frame": "Capas", "nombre_largo": "Grupo\\Sana", "rota": False, "grupo": False},
+        ]}
+        proc = unittest.mock.Mock(stdout=json.dumps(auditado).encode("utf-8"))
+        with unittest.mock.patch.object(servidor, "_python27_arcgis", return_value=sys.executable), \
+                unittest.mock.patch("subprocess.run", return_value=proc):
+            v = servidor._verificar_guardado(r"C:\a.mxd", [{"data_frame": "Capas", "ruta": "Grupo/Ya rota"}])
+        self.assertTrue(v["reabierto"])
+        self.assertEqual([c["ruta"] for c in v["rotas_nuevas"]], ["Grupo\\Nueva"])
+        self.assertFalse(v["guardado_sin_perdidas"])
 
 
 class TestExportMxdLoteValida(unittest.TestCase):
@@ -592,7 +951,8 @@ class TestContratoDeTools(unittest.TestCase):
         sueltas = []
         for bloque in bloques:
             cuerpo = bloque.split("@mcp.tool()")[0]
-            if "_client.send" in cuerpo:
+            # _exportar es _client.send con el reintento de E_PENDING (los tres export).
+            if "_client.send" in cuerpo or "return _exportar(" in cuerpo:
                 continue
             nombre = ""
             for linea in cuerpo.strip().splitlines():

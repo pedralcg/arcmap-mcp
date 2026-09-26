@@ -14,7 +14,7 @@ Cliente IA (Claude Code / Desktop / Gemini / Antigravity / OpenCode)
         │  protocolo MCP (stdio)
         ▼
 arcmap_mcp_server.py        ← servidor MCP externo (Python 3 + FastMCP): los schemas
-        │                      de las 60 herramientas y el contrato con el cliente
+        │                      de las 66 herramientas y el contrato con el cliente
         │  socket TCP local  127.0.0.1:27179
         ▼
 Add-in .NET (C#)            ← DENTRO de ArcMap: TcpListener + ArcObjects nativo
@@ -79,13 +79,13 @@ arcmap-mcp/
 
 ## Herramientas MCP
 
-**60 herramientas** sobre ArcMap 10.5 (ver `docs/TOOLS.md` para el catálogo completo con
+**66 herramientas** sobre ArcMap 10.5 (ver `docs/TOOLS.md` para el catálogo completo con
 firmas, ejemplos y los matices de ejecución de cada grupo).
 
 Qué significa «probado», que conviene decirlo con precisión:
 
-- `tests/regresion_sesion_viva.py` hace **114 comprobaciones contra una sesión de ArcMap
-  real** y cubre unas **36 de las 60** tools, con sus casos de error. 🔴 **Modifica el
+- `tests/regresion_sesion_viva.py` hace **194 comprobaciones contra una sesión de ArcMap
+  real** y cubre unas **42 de las 66** tools, con sus casos de error. 🔴 **Modifica el
   documento abierto** (añade capas, cambia simbología, lanza geoprocesos): se lanza contra
   un mxd de pruebas, nunca contra un proyecto.
 - `tests/regresion_ddp.py` cubre las tres tools del atlas (Data Driven Pages) con **14
@@ -404,6 +404,7 @@ admite `1024`–`65535`; un valor inválido se ignora con aviso en el log y se v
   | `ARCMAP_SAVE_TIMEOUT` | 630 s | `save_mxd` y `save_mxd_as` |
   | `ARCMAP_EXEC_TIMEOUT_CLIENTE` | 930 s | **Solo `execute_arcpy`** |
   | `ARCMAP_EXEC_SESION_TIMEOUT_CLIENTE` | 1560 s | `execute_arcpy` con `serializar_sesion=True`: el add-in gasta hasta 600 s copiando la sesión **antes** de sus 900 s |
+  | `ARCMAP_ESPERA_DIBUJO` | 120 s | Los tres export cuando llegan con el mapa **aún dibujando** (E_PENDING, típico justo después de cambiar la vista o las etiquetas): el servidor espera fuera de ArcMap y reintenta cada 3 s |
 
   `execute_arcpy` **no** va por `ARCMAP_GP_TIMEOUT`: subir esa variable no alarga nada
   allí, que es el error que más tiempo ha costado.
@@ -441,10 +442,10 @@ admite `1024`–`65535`; un valor inválido se ignora con aviso en el log y se v
 
 ## Estado
 - [x] Add-in .NET nativo (ArcObjects vía CLR, sin runtime Python embebido)
-- [x] 60 herramientas, incluido el análisis ambiental (índices espectrales, hidrología,
+- [x] 66 herramientas, incluido el análisis ambiental (índices espectrales, hidrología,
       curvas, perfiles 3D y ruta de mínimo coste) y series de planos reales de decenas
-      de páginas. Cobertura automática: 114 comprobaciones en sesión viva sobre ~36 de
-      ellas, más 56 tests sin ArcMap (ver «Herramientas MCP»)
+      de páginas. Cobertura automática: 194 comprobaciones en sesión viva sobre ~42 de
+      ellas, más 84 tests sin ArcMap (ver «Herramientas MCP»)
 - [x] Geoprocesos arcpy fuera de proceso: la GUI de ArcMap no se congela
 - [x] Cancelación de render/exports con ESC (`ITrackCancel`)
 - [x] Registrable en 5 clientes (Claude Code/Desktop, Gemini CLI, Antigravity, OpenCode)

@@ -47,7 +47,26 @@ ok_n = 0
 fallos = []
 
 
+REINTENTOS_DIBUJO = []  # (comando, reintentos) de los export que llegaron con el mapa dibujando
+
+
 def enviar(tipo, params=None, timeout=180):
+    """Un comando al puente. Los export que vuelven con "dibujando: " (E_PENDING) se
+    reintentan cada 3 s, igual que hace el servidor MCP (_exportar): este script habla
+    al socket sin pasar por el, y sin esto contaria como fallo lo que el servidor
+    resuelve solo. Se anota cuantas veces pasa: es el E_PENDING intermitente."""
+    import time
+    for reintento in range(40):
+        r = _enviar_una(tipo, params, timeout)
+        if r.get("ok") or not str(r.get("error", "")).startswith("dibujando: "):
+            if reintento:
+                REINTENTOS_DIBUJO.append((tipo, reintento))
+            return r
+        time.sleep(3)
+    return r
+
+
+def _enviar_una(tipo, params, timeout):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(timeout)
     s.connect((HOST, PORT))
@@ -450,6 +469,395 @@ if control.get("ok"):
 else:
     sys.stdout.write("  [---] sin leyenda con AutoAdd en este layout: bloque saltado" + chr(10))
 
+sys.stdout.write("--- etiquetas (2.15.0) ---" + chr(10))
+# El fallo que hay que cazar es SILENCIOSO: con Maplex, sustituir las clases de
+# etiquetas deja la capa sin etiquetas y con ok=true. Por eso el control no es la
+# respuesta sino la IMAGEN: la vista con etiquetas tiene que diferir de la vista sin
+# ellas. Si set_labels dijera ok y no pintara, los dos PNG saldrian iguales.
+import hashlib  # noqa: E402
+
+ETQ_DIR = "C:" + SEP + "temp" + SEP + "arcmap-mcp-regresion"
+
+
+def huella(ruta):
+    with open(ruta, "rb") as fh:
+        return hashlib.sha1(fh.read()).hexdigest()
+
+
+campos = ((enviar("list_fields", {"capa": NOMBRE_VEC}).get("result") or {}).get("campos") or [])
+texto_campo = next((c["nombre"] for c in campos if c.get("tipo") == "String"), None)
+inicial = enviar("set_labels", {"capa": NOMBRE_VEC})
+if texto_campo and inicial.get("ok"):
+    ini = inicial["result"]
+    sys.stdout.write("  motor del mapa: %s | clases: %d | campo: %s%s"
+                     % (ini["motor"], len(ini["clases"]), texto_campo, chr(10)))
+    # UNA entidad a escala de plano, no la capa entera: zoom_to_layer la encuadra a
+    # escala regional, y en un plano real (WMS, curvas de nivel etiquetadas, Maplex)
+    # el export que viene despues se quedo 20 min dibujando sin dejarse cancelar
+    # (2026-09-25). set_extent con una seleccion encuadra la seleccion.
+    t("select_by_attribute", {"capa": NOMBRE_VEC, "where": "FID = 0"})
+    t("set_extent", {"capa": NOMBRE_VEC}, nota="(una entidad)")
+    t("clear_selection", {"capa": NOMBRE_VEC})
+    r = t("set_labels", {"capa": NOMBRE_VEC, "expresion": "[" + texto_campo + "]", "tamano": 11,
+                         "color": "#1E5C2E", "halo": 1.5, "color_halo": [255, 255, 255]})
+    if r and r.get("ok"):
+        res = r["result"]
+        leido = res["clases"][0]
+        coincide = (leido["tamano"] == 11 and leido["halo"] == 1.5
+                    and leido["color"] == "#1E5C2E" and leido["color_halo"] == "#FFFFFF"
+                    and leido["expresion"] == "[" + texto_campo + "]" and res["etiquetas_activas"])
+        # Modificar, no sustituir: mismo numero de clases y ninguna creada.
+        intactas = (len(res["clases"]) == len(ini["clases"]) and not res["clase_creada"])
+        for nombre, bien in (("set_labels lee de vuelta lo pedido", coincide),
+                             ("set_labels modifica, no sustituye", intactas)):
+            if bien:
+                ok_n += 1
+            else:
+                fallos.append(("set_labels", nombre + ": " + json.dumps(res)[:200]))
+            sys.stdout.write("  [%s] %s%s" % ("OK " if bien else "FALLO", nombre, chr(10)))
+    # Export INMEDIATO tras cambiar etiquetas, a proposito: es el caso que colgo ArcMap
+    # tres veces el 2026-09-25 (E_PENDING y una espera con DoEvents dentro del add-in
+    # que no dejaba terminar el dibujado). Desde la 2.15.0 el add-in devuelve
+    # "dibujando: " al momento y el que espera es el SERVIDOR (arcmap_mcp_server._exportar);
+    # aqui lo hace enviar(), igual.
+    on = ETQ_DIR + SEP + "etiquetas_on.jpg"
+    off = ETQ_DIR + SEP + "etiquetas_off.jpg"
+    t("export_jpg", {"salida": on, "dpi": 72}, nota="(inmediato tras set_labels)")
+    t("set_labels", {"capa": NOMBRE_VEC, "activar": False}, nota="(apagar)")
+    t("export_jpg", {"salida": off, "dpi": 72}, nota="(inmediato tras apagar)")
+    try:
+        pinta = huella(on) != huella(off)
+    except OSError:
+        pinta = False
+    if pinta:
+        ok_n += 1
+    else:
+        fallos.append(("set_labels", "la vista con etiquetas es identica a la vista sin ellas"))
+    sys.stdout.write("  [%s] las etiquetas se dibujan (JPG on != off, motor %s)%s"
+                     % ("OK " if pinta else "FALLO", ini["motor"], chr(10)))
+    r = t("set_labels", {"capa": NOMBRE_VEC, "halo": 0}, nota="(halo 0 lo quita)")
+    if r and r.get("ok") and r["result"]["clases"][0]["halo"] != 0:
+        fallos.append(("set_labels", "halo=0 no quito el halo"))
+    t("set_labels", {"capa": NOMBRE_VEC, "clase": "no_existe_esta_clase", "tamano": 9},
+      espera_ok=False, nota="(clase inexistente)")
+    t("set_labels", {"capa": NOMBRE_VEC, "color_halo": "#FFFFFF"}, espera_ok=False,
+      nota="(color_halo sin halo)")
+    t("set_labels", {"capa": NOMBRE_VEC, "tamano": 0}, espera_ok=False, nota="(tamano fuera de rango)")
+    t("set_labels", {"capa": NOMBRE_VEC, "activar": ini["etiquetas_activas"]}, nota="(revertir)")
+else:
+    sys.stdout.write("  [---] sin campo de texto en %s o set_labels no responde: bloque saltado%s"
+                     % (NOMBRE_VEC, chr(10)))
+    if not inicial.get("ok"):
+        fallos.append(("set_labels", str(inicial.get("error"))[:110]))
+
+sys.stdout.write("--- simbolo unico y edit_symbol (2.15.0) ---" + chr(10))
+# El control de edit_symbol es lo que NO debe cambiar: al tocar el borde, el relleno
+# sigue igual; al tocar una categoria, la de al lado sigue igual. Una tool que
+# rehiciera la simbologia pasaria "lee de vuelta lo pedido" y fallaria aqui.
+
+
+def comprobar_sim(nombre, bien, det=""):
+    global ok_n
+    if bien:
+        ok_n += 1
+    else:
+        fallos.append((nombre, str(det)[:200]))
+    sys.stdout.write("  [%s] %s%s" % ("OK " if bien else "FALLO", nombre, chr(10)))
+
+
+r = t("set_single_symbology", {"capa": NOMBRE_VEC, "color_relleno": "#A8D5A2",
+                               "color_borde": [46, 125, 50], "grosor_borde": 1.2,
+                               "transparencia": 30, "etiqueta": "ENP"})
+if r and r.get("ok"):
+    res = r["result"]
+    k = res["clases"][0]
+    comprobar_sim("set_single_symbology deja UNA clase con lo pedido",
+                  res["renderer"] == "simple" and len(res["clases"]) == 1
+                  and k["color_relleno"] == "#A8D5A2" and k["color_borde"] == "#2E7D32"
+                  and k["grosor_borde"] == 1.2 and res["transparencia"] == 30
+                  and k["etiqueta"] == "ENP", res)
+    r2 = t("edit_symbol", {"capa": NOMBRE_VEC, "color_borde": "#000000"}, nota="(solo el borde)")
+    if r2 and r2.get("ok"):
+        k2 = r2["result"]["clases"][0]
+        comprobar_sim("edit_symbol no toca el relleno al cambiar el borde",
+                      k2["color_borde"] == "#000000" and k2["color_relleno"] == "#A8D5A2"
+                      and k2["grosor_borde"] == 1.2, k2)
+t("set_single_symbology", {"capa": NOMBRE_VEC, "tamano": 5}, espera_ok=False,
+  nota="(tamano en poligonos: error)")
+t("set_single_symbology", {"capa": NOMBRE_VEC, "sin_relleno": True, "color_relleno": "#FFFFFF"},
+  espera_ok=False, nota="(sin_relleno y color a la vez)")
+r = t("set_single_symbology", {"capa": NOMBRE_VEC, "sin_relleno": True}, nota="(hueco)")
+if r and r.get("ok"):
+    comprobar_sim("sin_relleno deja el poligono hueco", r["result"]["clases"][0]["sin_relleno"] is True,
+                  r["result"])
+
+t("set_graduated_symbology", {"capa": NOMBRE_VEC, "campo": "Superficie"})
+leido = enviar("edit_symbol", {"capa": NOMBRE_VEC})
+if leido.get("ok") and len(leido["result"]["clases"]) >= 2:
+    antes = leido["result"]["clases"]
+    r = t("edit_symbol", {"capa": NOMBRE_VEC, "categoria": "1", "color_relleno": "#FF0000"},
+          nota="(rangos, clase 1)")
+    if r and r.get("ok"):
+        ahora = r["result"]["clases"]
+        comprobar_sim("edit_symbol cambia la clase 1 y deja la 2",
+                      ahora[0]["color_relleno"] == "#FF0000"
+                      and ahora[1]["color_relleno"] == antes[1]["color_relleno"]
+                      and r["result"]["renderer"] == "rangos"
+                      and len(ahora) == len(antes), {"antes": antes[:2], "ahora": ahora[:2]})
+    t("edit_symbol", {"capa": NOMBRE_VEC, "color_relleno": "#00FF00"}, espera_ok=False,
+      nota="(relleno a todas: borraria la clasificacion)")
+    r = t("edit_symbol", {"capa": NOMBRE_VEC, "grosor_borde": 0.2}, nota="(borde en todas)")
+    if r and r.get("ok"):
+        comprobar_sim("el borde cambia en todas y los rellenos se quedan",
+                      all(c["grosor_borde"] == 0.2 for c in r["result"]["clases"])
+                      and r["result"]["clases"][1]["color_relleno"] == antes[1]["color_relleno"],
+                      r["result"]["clases"][:2])
+    t("edit_symbol", {"capa": NOMBRE_VEC, "categoria": "no_existe", "color_relleno": "#FF0000"},
+      espera_ok=False, nota="(categoria inexistente)")
+else:
+    fallos.append(("edit_symbol", "no se pudo leer la graduada: " + str(leido)[:150]))
+
+t("set_unique_values_symbology", {"capa": NOMBRE_VEC, "campo": "Municipio"})
+leido = enviar("edit_symbol", {"capa": NOMBRE_VEC})
+if leido.get("ok") and len(leido["result"]["clases"]) >= 2:
+    c0, c1 = leido["result"]["clases"][0], leido["result"]["clases"][1]
+    r = t("edit_symbol", {"capa": NOMBRE_VEC, "categoria": c0["categoria"], "color_relleno": "#123456"},
+          nota="(valores unicos, por valor)")
+    if r and r.get("ok"):
+        ahora = r["result"]["clases"]
+        comprobar_sim("edit_symbol cambia un valor unico y deja el siguiente",
+                      ahora[0]["color_relleno"] == "#123456"
+                      and ahora[1]["color_relleno"] == c1["color_relleno"]
+                      and r["result"]["categorias_cambiadas"] == [c0["etiqueta"]], ahora[:2])
+else:
+    fallos.append(("edit_symbol", "no se pudo leer los valores unicos: " + str(leido)[:150]))
+
+sys.stdout.write("--- estilos .style (2.15.0) ---" + chr(10))
+# Se usa ESRI.style, que viene con ArcMap y siempre esta cargado, y una COPIA suya en
+# el temporal para el camino "estilo que no estaba cargado". El control es la galeria:
+# tras usar la copia, la lista de estilos cargados tiene que ser la de antes. Una tool
+# que se olvidara de quitarla pasaria "lee los simbolos" y fallaria aqui.
+import shutil
+import tempfile
+
+r = t("list_style_symbols", {}, nota="(estilos cargados)")
+cargados = r["result"]["estilos_cargados"] if r and r.get("ok") else []
+esri = [e for e in cargados if e["nombre"].lower() == "esri"]
+if esri:
+    r = t("list_style_symbols", {"estilo": "ESRI", "clase": "relleno", "limite": 5},
+          nota="(ESRI, rellenos)")
+    simbolos = r["result"]["simbolos"] if r and r.get("ok") else []
+    comprobar_sim("list_style_symbols trae rellenos de ESRI con nombre y tipo",
+                  len(simbolos) == 5 and r["result"]["truncado"] is True
+                  and all(s["tipo_simbolo"] == "relleno" and s["nombre"] for s in simbolos),
+                  simbolos)
+    if simbolos:
+        elegido = simbolos[0]
+        # Por id: el nombre no es unico ni con su categoria (ESRI.style trae dos "Verde"
+        # en "Predeterminado"; asi fallo la primera pasada del 2026-09-25).
+        r = t("apply_style_symbol", {"capa": NOMBRE_VEC, "estilo": "ESRI",
+                                     "id_simbolo": elegido["id"], "etiqueta": "Del estilo"},
+              nota="(" + elegido["nombre"] + ", id " + str(elegido["id"]) + ")")
+        if r and r.get("ok"):
+            res = r["result"]
+            comprobar_sim("apply_style_symbol deja un simbolo unico con el del estilo",
+                          res["renderer"] == "simple" and len(res["clases"]) == 1
+                          and res["clases"][0]["etiqueta"] == "Del estilo"
+                          and res["simbolo_de_estilo"]["id"] == elegido["id"], res)
+        todos = enviar("list_style_symbols", {"estilo": "ESRI", "clase": "relleno", "limite": 2000})
+        nombres = [s["nombre"] for s in (todos.get("result") or {}).get("simbolos", [])]
+        repetidos = sorted({n for n in nombres if n and nombres.count(n) > 1})
+        if repetidos:
+            r = t("apply_style_symbol", {"capa": NOMBRE_VEC, "estilo": "ESRI", "nombre_simbolo": repetidos[0]},
+                  espera_ok=False, nota="(" + repetidos[0] + " repetido: pide id)")
+            comprobar_sim("un nombre repetido falla listando los id",
+                          bool(r) and "id_simbolo" in str(r.get("error", "")), r)
+        t("apply_style_symbol", {"capa": NOMBRE_VEC, "estilo": "ESRI", "nombre_simbolo": "no_existe_este"},
+          espera_ok=False, nota="(simbolo inexistente)")
+    lineas = enviar("list_style_symbols", {"estilo": "ESRI", "clase": "linea", "limite": 1})
+    if lineas.get("ok") and lineas["result"]["simbolos"]:
+        t("apply_style_symbol", {"capa": NOMBRE_VEC, "estilo": "ESRI", "clase": "linea",
+                                 "nombre_simbolo": lineas["result"]["simbolos"][0]["nombre"],
+                                 "categoria_estilo": lineas["result"]["simbolos"][0]["categoria"]},
+          espera_ok=False, nota="(linea sobre poligonos)")
+    t("list_style_symbols", {"estilo": "no_existe_este_estilo"}, espera_ok=False, nota="(estilo no cargado)")
+
+    tmp = tempfile.mkdtemp(prefix="arcmap_mcp_estilo_")
+    copia = os.path.join(tmp, "copia_regresion.style")
+    shutil.copy(esri[0]["ruta"], copia)
+    r = t("list_style_symbols", {"estilo": copia, "clase": "relleno", "limite": 1}, nota="(copia sin cargar)")
+    if r and r.get("ok"):
+        comprobar_sim("la copia se lee y consta como no cargada",
+                      r["result"]["estaba_cargado"] is False and r["result"]["devueltos"] == 1, r["result"])
+    despues = enviar("list_style_symbols", {})
+    rutas_antes = sorted(e["ruta"].lower() for e in cargados)
+    rutas_despues = sorted(e["ruta"].lower() for e in despues.get("result", {}).get("estilos_cargados", []))
+    comprobar_sim("la galeria queda como estaba tras usar la copia", rutas_antes == rutas_despues,
+                  {"antes": rutas_antes, "despues": rutas_despues})
+    shutil.rmtree(tmp, ignore_errors=True)
+else:
+    fallos.append(("list_style_symbols", "ESRI.style no aparece entre los cargados: " + str(cargados)[:150]))
+
+sys.stdout.write("--- move_layer (2.15.0) ---" + chr(10))
+# El control es lo que NO debe cambiar al mover: la simbologia leida de vuelta. Quitar
+# y volver a anadir (lo unico que habia) la perdia.
+RASTER_N = "real_NUEVO.tif"
+GRUPO_M = "Mover (regresion)"
+sim_antes = enviar("edit_symbol", {"capa": NOMBRE_VEC})
+t("add_group", {"nombre": GRUPO_M, "en_leyenda": False})
+r = t("move_layer", {"capa": NOMBRE_VEC, "grupo": GRUPO_M}, nota="(a un grupo)")
+if r and r.get("ok"):
+    comprobar_sim("move_layer mete la capa en el grupo", r["result"]["orden"] == [NOMBRE_VEC], r["result"])
+r = t("move_layer", {"capa": RASTER_N, "referencia": NOMBRE_VEC, "posicion": "AFTER"},
+      nota="(AFTER, cambiando de grupo)")
+if r and r.get("ok"):
+    comprobar_sim("AFTER la deja justo debajo de la referencia",
+                  r["result"]["orden"] == [NOMBRE_VEC, RASTER_N], r["result"])
+r = t("move_layer", {"capa": NOMBRE_VEC, "posicion": "BOTTOM"}, nota="(BOTTOM en su grupo)")
+if r and r.get("ok"):
+    comprobar_sim("BOTTOM dentro del mismo grupo",
+                  r["result"]["orden"] == [RASTER_N, NOMBRE_VEC] and r["result"]["indice"] == 1, r["result"])
+r = t("move_layer", {"capa": NOMBRE_VEC, "referencia": RASTER_N}, nota="(BEFORE por defecto)")
+if r and r.get("ok"):
+    comprobar_sim("BEFORE dentro del mismo grupo",
+                  r["result"]["orden"] == [NOMBRE_VEC, RASTER_N] and r["result"]["indice"] == 0, r["result"])
+t("move_layer", {"capa": GRUPO_M, "referencia": NOMBRE_VEC}, espera_ok=False, nota="(grupo dentro de si mismo)")
+t("move_layer", {"capa": NOMBRE_VEC, "posicion": "AFTER"}, espera_ok=False, nota="(AFTER sin referencia)")
+sim_despues = enviar("edit_symbol", {"capa": NOMBRE_VEC})
+if sim_antes.get("ok") and sim_despues.get("ok"):
+    comprobar_sim("mover no toca la simbologia",
+                  sim_antes["result"]["clases"] == sim_despues["result"]["clases"], sim_despues["result"])
+t("move_layer", {"capa": RASTER_N, "grupo": "/", "posicion": "TOP"}, nota="(a la raiz)")
+t("move_layer", {"capa": NOMBRE_VEC, "grupo": "/", "posicion": "TOP"})
+t("remove_layer", {"capa": GRUPO_M})
+
+sys.stdout.write("--- add_layer WMS (2.15.0) ---" + chr(10))
+# Siempre con visible=False: un WMS encendido se redibuja por la red en el hilo de
+# ArcMap y aqui solo se prueba el arbol de subcapas, no el dibujo.
+WMS_URL = "https://www.ign.es/wms-inspire/mapa-raster"
+WMS_N = "IGN (regresion)"
+n_antes = len((enviar("list_layers").get("result") or {}).get("capas") or [])
+r = enviar("add_layer", {"fuente": WMS_URL, "nombre": WMS_N, "visible": False, "en_leyenda": False})
+if r.get("ok"):
+    ok_n += 1
+    serv = r["result"]["servicio"]
+    hojas = [n["ruta"] for n in serv["arbol"] if not n["grupo"]]
+    comprobar_sim("WMS sin subcapas: todas las hojas encendidas y la capa apagada",
+                  sorted(serv["subcapas_encendidas"]) == sorted(hojas) and r["result"]["visible"] is False, serv)
+    t("remove_layer", {"capa": WMS_N})
+    if hojas:
+        una = hojas[-1]
+        r = t("add_layer", {"fuente": WMS_URL, "nombre": WMS_N, "visible": False, "en_leyenda": False,
+                            "subcapas": [una]}, nota="(una subcapa)")
+        if r and r.get("ok"):
+            arbol = r["result"]["servicio"]["arbol"]
+            encendidos = [n["ruta"] for n in arbol if n["visible"]]
+            padres = [n["ruta"] for n in arbol if n["grupo"] and una.startswith(n["ruta"] + "/")]
+            comprobar_sim("solo la pedida y sus grupos quedan encendidos",
+                          sorted(encendidos) == sorted([una] + padres), arbol)
+            t("remove_layer", {"capa": WMS_N})
+    t("add_layer", {"fuente": WMS_URL, "nombre": WMS_N, "visible": False, "subcapas": ["no_existe_esta_subcapa"]},
+      espera_ok=False, nota="(subcapa inexistente)")
+    n_despues = len((enviar("list_layers").get("result") or {}).get("capas") or [])
+    comprobar_sim("una subcapa inexistente no deja nada en la TOC", n_despues == n_antes,
+                  {"antes": n_antes, "despues": n_despues})
+else:
+    sys.stdout.write("  [---] el WMS del IGN no conecta (%s): bloque saltado%s" % (str(r.get("error"))[:90], chr(10)))
+t("add_layer", {"fuente": VEC, "subcapas": ["x"]}, espera_ok=False, nota="(subcapas en un shp)")
+
+sys.stdout.write("--- rutas relativas largas (2.15.0) ---" + chr(10))
+# Con rutas relativas, ArcMap 10.5 pierde al guardar el workspace de una capa si
+# len(carpeta del .mxd) + 1 + len(relativa del workspace) >= 260 (medido 2026-09-25).
+# Una copia del shp a la distancia justa (262) contra otra cercana. El control fuerte
+# es la COPIA REABIERTA: lo que el add-in predice tiene que ser exactamente lo que
+# sale roto al reabrir, ni mas ni menos.
+import glob
+import re
+import subprocess
+
+info = enviar("get_arcmap_info")
+doc_mxd = (info.get("result") or {}).get("mxd") if info.get("ok") else None
+PY27 = (glob.glob("C:" + SEP + "Python27" + SEP + "ArcGIS*" + SEP + "python.exe") or [None])[0]
+AUDITOR = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "src", "auditor_mxd.py")
+
+
+def concatenada(carpeta, ws):
+    return len(carpeta) + 1 + len(os.path.relpath(ws, carpeta))
+
+
+def copiar_como_r(destino):
+    if not os.path.isdir(destino):
+        os.makedirs(destino)
+    base = os.path.splitext(VEC)[0]
+    for f in glob.glob(base + ".*"):
+        # Fuera los .lock: ArcMap los tiene abiertos mientras la capa esta en el mapa.
+        if f.lower().endswith(".lock"):
+            continue
+        shutil.copy(f, os.path.join(destino, "r" + f[len(base):]))
+    return os.path.join(destino, "r.shp")
+
+
+RAIZ_RUTAS = "C:" + SEP + "temp" + SEP + "arcmap-mcp-regresion" + SEP + "rutas_relativas"
+if doc_mxd and doc_mxd.lower().endswith(".mxd") and PY27:
+    carpeta_doc = os.path.dirname(doc_mxd)
+    shutil.rmtree(RAIZ_RUTAS, ignore_errors=True)
+    cerca = RAIZ_RUTAS + SEP + "cerca"
+    lejos = RAIZ_RUTAS + SEP + "lejos"
+    # Se alarga "lejos" a tramos de <=100 hasta que la suma llegue a 262.
+    while concatenada(carpeta_doc, lejos) < 262:
+        falta = 262 - concatenada(carpeta_doc, lejos)
+        lejos = lejos + "x" if falta == 1 else lejos + SEP + "x" * min(100, falta - 1)
+    if concatenada(carpeta_doc, lejos) != 262 or len(lejos) > 245:
+        sys.stdout.write("  [---] no se pudo fabricar la ruta a 262 (%d, %d car.): bloque saltado%s"
+                         % (concatenada(carpeta_doc, lejos), len(lejos), chr(10)))
+    else:
+        shp_cerca = copiar_como_r(cerca)
+        copiar_como_r(lejos)
+        CAPA_R = "Ruta larga (regresion)"
+        t("add_layer", {"fuente": shp_cerca, "nombre": CAPA_R, "en_leyenda": False})
+        r = t("repair_data_source", {"capa": CAPA_R, "ruta_antigua": cerca, "ruta_nueva": lejos},
+              nota="(a 262: avisa)")
+        if r and r.get("ok"):
+            riesgo = r["result"].get("riesgo_ruta_relativa") or {}
+            comprobar_sim("repair_data_source avisa de que se perdera al guardar",
+                          r["result"]["aplicado"] and bool(r["result"].get("aviso_ruta_relativa"))
+                          and riesgo.get("longitud") == 262, r["result"])
+        r = t("repair_data_source", {"capa": CAPA_R, "ruta_antigua": lejos, "ruta_nueva": cerca},
+              nota="(cerca: sin aviso)")
+        if r and r.get("ok"):
+            comprobar_sim("repair_data_source no avisa con una ruta que cabe",
+                          r["result"]["aplicado"] and "aviso_ruta_relativa" not in r["result"], r["result"])
+        t("repair_data_source", {"capa": CAPA_R, "ruta_antigua": cerca, "ruta_nueva": lejos})
+
+        copia_mxd = os.path.join(carpeta_doc, "regresion_rutas_copia.mxd")
+        r = t("save_mxd_as", {"salida": copia_mxd, "sobrescribir": True}, nota="(copia junto al original)")
+        if r and r.get("ok"):
+            res = r["result"]
+            predichas = {(c["data_frame"].lower(), c["ruta"].lower()) for c in res.get("capas_perderan_ruta", [])}
+            # El add-in numera los nombres repetidos ("Capa#2"); arcpy no.
+            memoria = {(c["data_frame"].lower(), re.sub(r"#[0-9]+(?=/|$)", "", c["ruta"]).lower())
+                       for c in res.get("rotas_en_memoria", [])}
+            comprobar_sim("save_mxd_as predice la capa lejana",
+                          any(ruta == CAPA_R.lower() for _, ruta in predichas), res.get("capas_perderan_ruta"))
+            proc = subprocess.run([PY27, AUDITOR, copia_mxd], capture_output=True, timeout=240)
+            auditado = json.loads(proc.stdout.decode("utf-8", "replace") or "{}")
+            if auditado.get("ok"):
+                en_disco = {(c["data_frame"].lower(), c["nombre_largo"].replace(SEP, "/").lower())
+                            for c in auditado["capas"] if c.get("rota") and not c.get("grupo")}
+                nuevas = en_disco - memoria
+                comprobar_sim("al reabrir la copia se rompe exactamente lo predicho",
+                              nuevas == predichas, {"predichas": sorted(predichas), "nuevas": sorted(nuevas)})
+            else:
+                fallos.append(("save_mxd_as", "el auditor no abrio la copia: " + str(auditado)[:150]))
+            try:
+                os.remove(copia_mxd)
+            except OSError:
+                pass
+        t("remove_layer", {"capa": CAPA_R})
+        shutil.rmtree(RAIZ_RUTAS, ignore_errors=True)
+else:
+    sys.stdout.write("  [---] documento sin ruta .mxd o sin Python 2.7 de ArcGIS: bloque saltado" + chr(10))
+
 sys.stdout.write("--- limpieza ---" + chr(10))
 t("remove_layer", {"capa": "real_NUEVO.tif"})
 t("remove_layer", {"capa": NOMBRE_VEC})
@@ -464,6 +872,8 @@ for sobra in ("mv_a", "mv_b", "mv_merge", "merge_ext", "compuesto.tif",
         pass
 
 sys.stdout.write(chr(10) + "RESULTADO: %d correctos, %d fallos" % (ok_n, len(fallos)) + chr(10))
+sys.stdout.write("E_PENDING ('dibujando: ') resuelto con reintento: %s%s"
+                 % (REINTENTOS_DIBUJO or "ninguno", chr(10)))
 for nombre, det in fallos:
     sys.stdout.write("   FALLO %-28s %s" % (nombre, det) + chr(10))
 sys.exit(1 if fallos else 0)

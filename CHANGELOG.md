@@ -3,6 +3,71 @@
 Formato inspirado en [Keep a Changelog](https://keepachangelog.com/es/); versionado
 [SemVer](https://semver.org/lang/es/).
 
+## [2.15.0] - 2026-09-25
+
+La tanda de mejoras que pedían las series de planos de ID2018 y el montaje de un MXD real:
+auditar lo que **sale en el plano**, etiquetas y símbolos sin rehacer la simbología, los
+estilos `.style` del usuario, reordenar la TOC, servicios WMS, y avisar de las rutas
+relativas que ArcMap **pierde al guardar** sin decir nada. Siete herramientas nuevas (66).
+
+Verificado en sesión viva: **194/194** en la regresión general, dos pasadas seguidas en la
+misma sesión de ArcMap, sobre un documento con Maplex; **84 tests** sin ArcMap. Cada bloque
+nuevo lleva control, lo que tiene que fallar sin el arreglo: la simbología que no debe
+cambiar al mover una capa o al tocar un borde, la galería de estilos que tiene que quedar
+como estaba, y la copia del .mxd reabierta, que tiene que romper **exactamente** las capas
+que se predijeron. No se ha pasado `regresion_ddp.py` (exige un mxd de producción con Data
+Driven Pages; los handlers de DDP no cambian).
+
+### Añadido
+- **`set_labels`**: expresión, tamaño, color y halo de las etiquetas de una capa, y
+  encenderlas o apagarlas. Modifica las clases que ya tiene la capa: con Maplex, sustituirlas
+  por clases nuevas deja la capa sin etiquetas y sin error. Si no tiene ninguna, crea una con
+  propiedades Maplex cuando el motor lo es. Devuelve el estado leído de la capa.
+- **`set_single_symbology`**: un solo símbolo con los colores pedidos (relleno, borde, grosor,
+  hueco, tamaño, transparencia). Forzar un color con la graduada llenaba la TOC con una entrada
+  por entidad, y recargar la capa la traía con un color aleatorio.
+- **`edit_symbol`**: cambia solo lo pedido de la simbología existente (única, valores únicos o
+  rangos), sobre una copia del símbolo. Se niega a cambiar el relleno de todas las categorías
+  a la vez, porque borraría la clasificación.
+- **`list_style_symbols`** y **`apply_style_symbol`**: los símbolos de los `.style` (cargados
+  o por ruta) y aplicar uno como símbolo único. Un `.style` que no estaba cargado se añade a
+  la galería solo durante la llamada. El nombre no es único ni dentro de su categoría
+  (`ESRI.style` trae dos «Verde» en «Predeterminado»): cada símbolo lleva su `id` y
+  `id_simbolo` desempata.
+- **`move_layer`**: recoloca una capa o grupo (antes o después de otra, o arriba o abajo de un
+  grupo) moviendo el mismo objeto, así que conserva simbología, etiquetas y leyenda. Hasta
+  ahora solo se podía quitar y volver a añadir.
+- **`add_layer` con URL WMS**: conecta el servicio y enciende las `subcapas` pedidas (o todas)
+  con sus grupos. Un WMS recién conectado las trae todas apagadas, y encender el padre no pinta
+  nada. `visible=False` añade cualquier capa apagada.
+
+### Cambiado
+- **`audit_folder` separa lo que sale en el plano**: por capa, `visible_efectivo` (ella y sus
+  grupos) y `en_plano`; por marco, `en_pagina`; en el resumen, `num_rotas_en_plano`. En siete
+  planos reales, 335 capas rotas y solo 30 en el plano.
+- **`audit_folder` funciona con ArcMap abierto.** La negativa venía de una medición de agosto
+  que no se ha reproducido: con ArcMap abierto, y hasta congelado, el auditor abre en ~8,5 s.
+  Ahora se corta tras dos timeouts seguidos.
+- **Rutas relativas que se pierden al guardar.** Medido guardando y reabriendo: con *Store
+  relative pathnames*, ArcMap 10.5 no escribe el workspace de una capa si la carpeta del .mxd
+  más la ruta relativa del workspace llega a **260 caracteres**, y al reabrir queda
+  `\fichero.shp`. No depende de la longitud del dato. `repair_data_source` avisa;
+  `save_mxd` y `save_mxd_as` predicen las capas afectadas y, con `verificar` (o solos si la
+  predicción encuentra algo), reabren lo guardado y listan las rotas nuevas.
+- «Gómez» con tilde en la ficha «Acerca de» y en `Config.xml`.
+
+### Corregido
+- **Exportar justo después de cambiar etiquetas colgaba ArcMap** (ADR-007). Con E_PENDING, el
+  add-in esperaba con `Application.DoEvents()` dentro del handler, que metía el redibujado en
+  la llamada y con etiquetas no terminaba. Ahora devuelve al momento `dibujando: ` y el
+  servidor reintenta fuera de ArcMap hasta `ARCMAP_ESPERA_DIBUJO` (120 s). `sonda_puente.py`
+  y la regresión reintentan igual.
+
+### Conocido, sin arreglar
+- Caída de ArcMap 10.5 en `MaplexAnnotation.dll` (puntero nulo al redibujar el layout), 2 de
+  4 pasadas el día 1 de la tanda y ninguna en las 4 siguientes. Los volcados apuntan a Maplex,
+  no al add-in; falta saber si pasa igual con la 2.14.0.
+
 ## [2.14.0] - 2026-09-25
 
 Tres huecos que aparecieron editando series de planos de verdad: meter capas **sin que se

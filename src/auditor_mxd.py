@@ -90,14 +90,79 @@ def texto(valor):
             return u"<ilegible>"
 
 
-def auditar(ruta):
-    salida = {"ruta": ruta, "ok": False}
-    import arcpy  # dentro, para que el fallo de import tambien salga en JSON
+def _numero(valor):
+    try:
+        return float(valor)
+    except Exception:
+        return None
 
-    mxd = arcpy.mapping.MapDocument(ruta)
-    capas = []
-    for lyr in arcpy.mapping.ListLayers(mxd):
-        info = {"nombre": texto(getattr(lyr, "name", None))}
+
+def marco_en_pagina(df, ancho_pagina, alto_pagina):
+    """Posicion del marco y si cae en la hoja: "dentro", "parcial" o "fuera".
+
+    Un "Nuevo marco de datos" arrastrado fuera de la hoja sigue en el documento
+    con sus capas y sus filtros, pero no sale en el plano. En el bloque 03 de
+    ID2018 hubo 77 asi, y un auditor que no lo mire los reporta como errores.
+    `en_pagina` es None si falta algun dato para decidirlo: no se adivina.
+    """
+    info = {"x": _numero(getattr(df, "elementPositionX", None)),
+            "y": _numero(getattr(df, "elementPositionY", None)),
+            "ancho": _numero(getattr(df, "elementWidth", None)),
+            "alto": _numero(getattr(df, "elementHeight", None))}
+    x, y, w, h = info["x"], info["y"], info["ancho"], info["alto"]
+    if None in (x, y, w, h, ancho_pagina, alto_pagina):
+        info["en_pagina"] = None
+    elif x >= 0 and y >= 0 and x + w <= ancho_pagina and y + h <= alto_pagina:
+        info["en_pagina"] = "dentro"
+    elif x < ancho_pagina and y < alto_pagina and x + w > 0 and y + h > 0:
+        info["en_pagina"] = "parcial"
+    else:
+        info["en_pagina"] = "fuera"
+    return info
+
+
+def _y(a, b):
+    """AND con tres valores: None si no se puede decidir, sin inclinarse a un lado."""
+    if a is False or b is False:
+        return False
+    if a is None or b is None:
+        return None
+    return True
+
+
+def capas_del_marco(capas_arcpy, marco, se_ve_marco):
+    """Las capas de UN marco, con su visibilidad propia, efectiva y en el plano.
+
+    - `visible`: la casilla de la capa.
+    - `visible_efectivo`: ella Y todos sus grupos encendidos.
+    - `en_plano`: ademas, su marco cae (al menos en parte) en la hoja.
+    None en cualquiera de las tres = no se pudo leer; ni se da por visible ni
+    por apagada.
+
+    `ListLayers(mxd, "", df)` las da en el orden del TOC, en profundidad: cada
+    grupo va seguido de su contenido. Se lleva una pila de grupos abiertos y el
+    padre de una capa es el ultimo grupo cuyo longName es prefijo del suyo. Por
+    orden y no por nombre: dos grupos que se llamen igual en ramas distintas no
+    se confunden.
+    """
+    salida = []
+    pila = []  # [(longName del grupo, visible_efectivo del grupo)]
+    for lyr in capas_arcpy:
+        info = {"nombre": texto(getattr(lyr, "name", None)), "data_frame": marco}
+        try:
+            info["nombre_largo"] = texto(lyr.longName)
+        except Exception:
+            info["nombre_largo"] = info["nombre"]
+        largo = info["nombre_largo"] or u""
+        while pila and not largo.startswith(pila[-1][0] + u"\\"):
+            pila.pop()
+        visible_padres = pila[-1][1] if pila else True
+        try:
+            info["visible"] = bool(lyr.visible)
+        except Exception:
+            info["visible"] = None
+        info["visible_efectivo"] = _y(info["visible"], visible_padres)
+        info["en_plano"] = _y(info["visible_efectivo"], se_ve_marco)
         try:
             info["rota"] = bool(lyr.isBroken)
         except Exception:
@@ -116,16 +181,61 @@ def auditar(ruta):
             info["definition_query"] = texto(dq) if dq else None
         except Exception:
             info["definition_query"] = None
-        capas.append(info)
+        if info["grupo"]:
+            pila.append((largo, info["visible_efectivo"]))
+        salida.append(info)
+    return salida
+
+
+def resumir(capas):
+    """Dos numeros de cada cosa, y el que importa para el plano es el `_en_plano`:
+    en el bloque 02 de ID2018 habia 2.335 capas rotas y solo 87 se dibujaban.
+    Los grupos no cuentan (ni se rompen ni llevan filtro)."""
+    datos = [c for c in capas if not c.get("grupo")]
+    return {
+        "num_capas": len(capas),
+        "num_rotas": len([c for c in datos if c.get("rota")]),
+        "num_rotas_en_plano": len([c for c in datos if c.get("rota") and c.get("en_plano")]),
+        "num_con_query": len([c for c in datos if c.get("definition_query")]),
+        "num_con_query_en_plano": len(
+            [c for c in datos if c.get("definition_query") and c.get("en_plano")]),
+        # Lo que no se pudo decidir se cuenta aparte en vez de caer en un lado.
+        "num_en_plano_desconocido": len([c for c in datos if c.get("en_plano") is None]),
+    }
+
+
+def auditar(ruta):
+    salida = {"ruta": ruta, "ok": False}
+    import arcpy  # dentro, para que el fallo de import tambien salga en JSON
+
+    mxd = arcpy.mapping.MapDocument(ruta)
+    try:
+        ancho_pagina = _numero(mxd.pageSize.width)
+        alto_pagina = _numero(mxd.pageSize.height)
+    except Exception:
+        ancho_pagina = alto_pagina = None
+
+    capas = []
+    marcos = []
+    # Capa a capa POR MARCO: `ListLayers(mxd)` a secas las mezcla todas y no dice
+    # de que marco es cada una. Los marcos se identifican por nombre: comparar con
+    # `is` falla siempre en arcpy (cada llamada devuelve un objeto nuevo).
+    for df in arcpy.mapping.ListDataFrames(mxd):
+        info_df = {"nombre": texto(df.name)}
+        info_df.update(marco_en_pagina(df, ancho_pagina, alto_pagina))
+        en_pagina = info_df["en_pagina"]
+        se_ve_marco = None if en_pagina is None else en_pagina != "fuera"
+        capas_df = capas_del_marco(arcpy.mapping.ListLayers(mxd, "", df),
+                                   info_df["nombre"], se_ve_marco)
+        info_df["num_capas"] = len(capas_df)
+        marcos.append(info_df)
+        capas.extend(capas_df)
 
     salida["capas"] = capas
-    salida["num_capas"] = len(capas)
-    salida["num_rotas"] = len([c for c in capas if c.get("rota")])
-    salida["num_con_query"] = len([c for c in capas if c.get("definition_query")])
-    try:
-        salida["data_frames"] = [texto(df.name) for df in arcpy.mapping.ListDataFrames(mxd)]
-    except Exception:
-        salida["data_frames"] = None
+    salida["marcos"] = marcos
+    salida["data_frames"] = [m["nombre"] for m in marcos]
+    salida["pagina"] = {"ancho": ancho_pagina, "alto": alto_pagina}
+    salida.update(resumir(capas))
     salida["ok"] = True
     del mxd
     return salida

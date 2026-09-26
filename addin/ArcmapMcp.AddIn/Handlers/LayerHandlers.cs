@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using ESRI.ArcGIS.ArcMapUI;
@@ -31,10 +32,17 @@ namespace ArcmapMcp.AddIn.Handlers
             string grupo = (string)parameters["grupo"];
             string nombre = (string)parameters["nombre"];
             bool enLeyenda = Parametros.LeerBool(parameters["en_leyenda"], "en_leyenda", true);
+            bool? visible = Parametros.Dado(parameters["visible"])
+                ? Parametros.LeerBool(parameters["visible"], "visible", true) : (bool?)null;
+            bool esServicio = Servicios.EsUrl(fuente.Trim());
+            List<string> subcapas = LeerSubcapas(parameters["subcapas"]);
+            if (subcapas != null && !esServicio)
+                throw new ArgumentException("'subcapas' es para servicios WMS (fuente = URL http/https).");
 
             IMxDocument doc;
             IMap map = MapHandlers.FocusMap(out doc);
-            ILayer nueva = CrearCapa(fuente);
+            JObject servicio = null;
+            ILayer nueva = esServicio ? Servicios.CrearWms(fuente.Trim(), subcapas, out servicio) : CrearCapa(fuente);
 
             // El nombre de la TOC es el que sale en la leyenda del plano, así que
             // llega hasta aquí: sin esto la capa se queda con el nombre del
@@ -42,20 +50,45 @@ namespace ArcmapMcp.AddIn.Handlers
             // renombrarla a mano o rodear el puente por MakeRasterLayer.
             if (!string.IsNullOrEmpty(nombre))
                 nueva.Name = nombre;
+            // Antes de insertar: un WMS que entra apagado no llega a pedir teselas.
+            if (visible != null)
+                nueva.Visible = visible.Value;
 
             int leyendasAparte = Insertar(map, doc, nueva, grupo, posicion, enLeyenda);
             ICompositeLayer comp = nueva as ICompositeLayer;
-            return Protocol.Result(new JObject
+            var r = new JObject
             {
                 ["capa"] = nueva.Name,
                 ["fuente"] = fuente,
                 ["posicion"] = posicion,
                 ["grupo"] = grupo,
-                ["es_grupo"] = comp != null,
-                ["capas_dentro"] = comp != null ? (JToken)comp.Count : null,
+                ["visible"] = nueva.Visible,
+                ["es_grupo"] = comp != null && !esServicio,
+                ["capas_dentro"] = comp != null && !esServicio ? (JToken)comp.Count : null,
                 ["en_leyenda"] = enLeyenda,
                 ["leyendas_sin_tocar"] = enLeyenda ? null : (JToken)leyendasAparte
-            });
+            };
+            if (servicio != null)
+                r["servicio"] = servicio;
+            return Protocol.Result(r);
+        }
+
+        private static List<string> LeerSubcapas(JToken t)
+        {
+            if (!Parametros.Dado(t))
+                return null;
+            JArray a = t as JArray;
+            if (a == null || a.Count == 0)
+                throw new ArgumentException("'subcapas' debe ser una lista de nombres (o rutas 'Grupo/Subcapa') del"
+                    + " servicio. Para encenderlas todas, no la pases.");
+            var l = new List<string>();
+            foreach (JToken x in a)
+            {
+                if (x.Type != JTokenType.String || string.IsNullOrEmpty(((string)x).Trim()))
+                    throw new ArgumentException("'subcapas' solo admite textos. Recibido: " + x.ToString());
+                l.Add(((string)x).Trim());
+            }
+            return l;
         }
 
         /// <summary>
@@ -585,7 +618,7 @@ namespace ArcmapMcp.AddIn.Handlers
             return null;
         }
 
-        private static IGroupLayer BuscarGrupoPadre(IMap map, ILayer objetivo)
+        internal static IGroupLayer BuscarGrupoPadre(IMap map, ILayer objetivo)
         {
             for (int i = 0; i < map.LayerCount; i++)
             {

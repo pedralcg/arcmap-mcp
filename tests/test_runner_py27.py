@@ -67,7 +67,8 @@ class TestRunnerBajoPython27(unittest.TestCase):
         nombres = " ".join(c["nombre"] for c in self.informe["casos"])
         for marca in ("stdout_mezclado", "sys_exit", "serializar_sanea",
                       "export_ddp_delata", "salida_existente_aborta",
-                      "backlink_es_unico"):
+                      "backlink_es_unico", "auditor_grupo_apagado",
+                      "auditor_marco_fuera"):
             self.assertIn(marca, nombres)
 
 

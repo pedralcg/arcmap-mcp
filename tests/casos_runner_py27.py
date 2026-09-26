@@ -682,6 +682,163 @@ def rotas_nombran_el_documento_si_se_usa_la_copia():
 
 
 # --------------------------------------------------------------------------- #
+# Auditor: lo que sale en el plano frente a lo que solo esta en el documento.
+# En el bloque 02 de ID2018 habia 2.335 capas rotas y solo 87 se dibujaban; en el
+# 03, 77 marcos fuera de la hoja arrastraban filtros de otros montes.
+# --------------------------------------------------------------------------- #
+
+AUDITOR = os.path.join(RAIZ, "src", "auditor_mxd.py")
+_COPIA_AUDITOR = os.path.join(_TMP, "auditor_bajo_prueba.py")
+shutil.copyfile(AUDITOR, _COPIA_AUDITOR)
+auditor = imp.load_source("auditor_bajo_prueba", _COPIA_AUDITOR)
+
+
+class _CapaTOC(object):
+    """Capa de mentira con lo que lee el auditor. `visible=None` = no se deja leer."""
+    def __init__(self, largo, visible=True, grupo=False, rota=False, query=None):
+        self.longName = largo
+        self.name = largo.split(u"\\")[-1]
+        self._visible = visible
+        self.isGroupLayer = grupo
+        self.isBroken = rota
+        self.definitionQuery = query or u""
+        self.dataSource = u"C:\\datos\\%s.shp" % self.name
+
+    @property
+    def visible(self):
+        if self._visible is None:
+            raise RuntimeError("visible no disponible")
+        return self._visible
+
+    def supports(self, que):
+        return not self.isGroupLayer
+
+
+class _Pagina(object):
+    width, height = 42.0, 29.7
+
+
+class _Marco(object):
+    def __init__(self, nombre, x, y, ancho=20.0, alto=20.0):
+        self.name = nombre
+        self.elementPositionX, self.elementPositionY = x, y
+        self.elementWidth, self.elementHeight = ancho, alto
+
+
+class _MxdAuditado(object):
+    pageSize = _Pagina()
+
+
+def _auditar(marcos_y_capas):
+    """Monta un documento de mentira. `ListLayers(mxd, "", df)` casa el marco por
+    nombre y devuelve un marco NUEVO en cada ListDataFrames, como arcpy."""
+    ARCPY.mapping.MapDocument = lambda ruta: _MxdAuditado()
+    ARCPY.mapping.ListDataFrames = lambda mxd: [
+        _Marco(*m) for m, _capas in marcos_y_capas]
+    por_nombre = dict((m[0], capas) for m, capas in marcos_y_capas)
+    ARCPY.mapping.ListLayers = lambda mxd, comodin="", df=None: list(por_nombre[df.name])
+    return auditor.auditar(u"C:\\x\\plano.mxd")
+
+
+def _por_largo(salida):
+    return dict((c["nombre_largo"], c) for c in salida["capas"])
+
+
+@caso
+def auditor_grupo_apagado_apaga_a_sus_nietos():
+    salida = _auditar([(("PLANO", 1, 1), [
+        _CapaTOC(u"Base", visible=False, grupo=True),
+        _CapaTOC(u"Base\\Sub", grupo=True),
+        _CapaTOC(u"Base\\Sub\\Rios", rota=True, query=u"ID = 1"),
+        _CapaTOC(u"Limite", rota=True),
+    ])])
+    capas = _por_largo(salida)
+    rios = capas[u"Base\\Sub\\Rios"]
+    assert rios["visible"] is True and rios["visible_efectivo"] is False, rios
+    assert rios["en_plano"] is False and rios["data_frame"] == u"PLANO", rios
+    assert capas[u"Limite"]["en_plano"] is True, capas
+    assert salida["num_rotas"] == 2 and salida["num_rotas_en_plano"] == 1, salida
+    assert salida["num_con_query"] == 1 and salida["num_con_query_en_plano"] == 0, salida
+
+
+@caso
+def auditor_grupo_cerrado_no_arrastra_al_hermano_siguiente():
+    """Tras salir de un grupo apagado, la capa de al lado vuelve a verse, aunque
+    su nombre empiece igual (`Base2` no es hija de `Base`)."""
+    salida = _auditar([(("PLANO", 1, 1), [
+        _CapaTOC(u"Base", visible=False, grupo=True),
+        _CapaTOC(u"Base\\Rios"),
+        _CapaTOC(u"Base2"),
+    ])])
+    assert _por_largo(salida)[u"Base2"]["visible_efectivo"] is True, salida
+
+
+@caso
+def auditor_grupos_homonimos_en_ramas_distintas():
+    """Por orden del TOC, no por nombre: el `Hidro` apagado de A no apaga el de B."""
+    salida = _auditar([(("PLANO", 1, 1), [
+        _CapaTOC(u"A", grupo=True),
+        _CapaTOC(u"A\\Hidro", visible=False, grupo=True),
+        _CapaTOC(u"A\\Hidro\\Rios"),
+        _CapaTOC(u"B", grupo=True),
+        _CapaTOC(u"B\\Hidro", grupo=True),
+        _CapaTOC(u"B\\Hidro\\Rios"),
+    ])])
+    capas = _por_largo(salida)
+    assert capas[u"A\\Hidro\\Rios"]["visible_efectivo"] is False, capas
+    assert capas[u"B\\Hidro\\Rios"]["visible_efectivo"] is True, capas
+
+
+@caso
+def auditor_marco_fuera_de_la_hoja_no_sale_en_el_plano():
+    salida = _auditar([
+        (("PLANO", 1, 1), [_CapaTOC(u"Montes")]),
+        (("Nuevo marco de datos", 60, 5), [_CapaTOC(u"Otro monte", query=u"MONTE = 7",
+                                                    rota=True)]),
+        (("Situacion", 35, 20), [_CapaTOC(u"Provincia")]),
+    ])
+    marcos = dict((m["nombre"], m) for m in salida["marcos"])
+    assert marcos["PLANO"]["en_pagina"] == "dentro", marcos
+    assert marcos["Nuevo marco de datos"]["en_pagina"] == "fuera", marcos
+    assert marcos["Situacion"]["en_pagina"] == "parcial", marcos
+    capas = _por_largo(salida)
+    otro = capas[u"Otro monte"]
+    assert otro["visible_efectivo"] is True and otro["en_plano"] is False, otro
+    assert capas[u"Provincia"]["en_plano"] is True, capas
+    assert salida["num_con_query"] == 1 and salida["num_con_query_en_plano"] == 0, salida
+    assert salida["num_rotas_en_plano"] == 0, salida
+    assert salida["data_frames"] == ["PLANO", "Nuevo marco de datos", "Situacion"], salida
+
+
+@caso
+def auditor_visibilidad_ilegible_no_se_da_por_apagada():
+    salida = _auditar([(("PLANO", 1, 1), [
+        _CapaTOC(u"G", visible=None, grupo=True),
+        _CapaTOC(u"G\\Rota", rota=True),
+        _CapaTOC(u"Apagada", visible=False, rota=True),
+    ])])
+    capas = _por_largo(salida)
+    assert capas[u"G\\Rota"]["visible_efectivo"] is None, capas
+    assert capas[u"Apagada"]["en_plano"] is False, capas
+    assert salida["num_en_plano_desconocido"] == 1, salida
+    assert salida["num_rotas_en_plano"] == 0 and salida["num_rotas"] == 2, salida
+
+
+@caso
+def auditor_sin_tamano_de_pagina_no_adivina():
+    class _SinPagina(object):
+        @property
+        def pageSize(self):
+            raise RuntimeError("sin layout")
+    _auditar([(("PLANO", 1, 1), [_CapaTOC(u"Montes")])])  # monta marcos y capas
+    ARCPY.mapping.MapDocument = lambda ruta: _SinPagina()
+    salida = auditor.auditar(u"C:\\x\\plano.mxd")
+    assert salida["marcos"][0]["en_pagina"] is None, salida
+    assert salida["capas"][0]["en_plano"] is None, salida
+    assert salida["capas"][0]["visible_efectivo"] is True, salida
+
+
+# --------------------------------------------------------------------------- #
 
 def main():
     fallos = [r for r in RESULTADOS if not r["ok"]]

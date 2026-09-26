@@ -682,12 +682,11 @@ namespace ArcmapMcp.AddIn.Handlers
                             + ". Proceso terminado (sin zombies)."
                             + (fase != null && fase.StartsWith("abriendo documento")
                                 ? " Se quedó ABRIENDO EL DOCUMENTO. Abrir en sí NO es caro (medido 0,7 s"
-                                  + " en un .mxd de 36 capas): lo que bloquea de verdad es la CONTENCIÓN"
-                                  + " DE LICENCIA, o sea otro proceso con la licencia de Desktop tomada."
-                                  + " El mismo documento pasó de 180 s bloqueado con ArcMap abierto y de"
-                                  + " 0,7 s con ArcMap cerrado. Comprueba qué más está usando arcpy antes"
-                                  + " de subir el timeout, que solo alarga la espera. Si tu código no usa"
-                                  + " mxd ni df, pasa usar_documento=false."
+                                  + " en un .mxd de 36 capas), y que ArcMap esté abierto o colgado no lo"
+                                  + " bloquea (medido 2026-09-25). Mira si hay python.exe de ArcGIS"
+                                  + " huérfanos de llamadas anteriores y si responden las unidades de red"
+                                  + " de las capas antes de subir el timeout, que solo alarga la espera."
+                                  + " Si tu código no usa mxd ni df, pasa usar_documento=false."
                                 : op == "execute_code"
                                     ? " Sube ARCMAP_EXEC_TIMEOUT (segundos) si la operación es legítimamente larga."
                                     : " Sube ARCMAP_SUBPROCESS_TIMEOUT (segundos) si la operación es legítimamente larga.")

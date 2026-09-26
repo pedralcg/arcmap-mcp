@@ -80,35 +80,32 @@ namespace ArcmapMcp.AddIn.Handlers
             bool sobrescrito = Parametros.ComprobarSobrescritura(salida, sobrescribir, "sobrescribir");
 
             string tmp = TemporalJuntoA(salida);
-            string aviso = null;
-            int intento = 0;
-            while (true)
+            string aviso;
+            try
             {
-                intento++;
-                try
-                {
-                    aviso = Exportar(export, tmp, dpi, quierenLayout, anchoPx, altoPx);
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    Borrar(tmp);
-                    if (!EsPendiente(ex))
-                        throw;
-                    if (intento >= IntentosPendiente)
-                        throw new InvalidOperationException(
-                            "ArcMap seguía dibujando el mapa tras " + IntentosPendiente + " intentos "
-                            + "(E_PENDING, 0x8000000A): el export no se ha hecho y el fichero de destino "
-                            + "no se ha tocado. Espera a que termine de pintar —capas WMS o rásters "
-                            + "pesados tardan— y repite la llamada.", ex);
-                    Log.Info("Export con E_PENDING (intento " + intento + " de " + IntentosPendiente
-                             + "): se deja dibujar a ArcMap y se reintenta.");
-                    DejarDibujar(EsperaPendiente);
-                }
+                aviso = Exportar(export, tmp, dpi, quierenLayout, anchoPx, altoPx);
             }
-            if (intento > 1)
-                aviso = (aviso == null ? "" : aviso + " ") + "Salió al intento " + intento
-                        + ": ArcMap devolvió E_PENDING (mapa aún dibujando) en los anteriores.";
+            catch (Exception ex)
+            {
+                Borrar(tmp);
+                if (!EsPendiente(ex))
+                    throw;
+                // Se devuelve AL MOMENTO y se deja la espera al servidor MCP, que
+                // reintenta desde fuera. Esperar aquí era el fallo: este código corre en
+                // el hilo de ArcMap, dentro de la llamada del puente, y el DoEvents con
+                // el que se "dejaba dibujar" metía el dibujado pendiente dentro de este
+                // handler. Con etiquetas ese dibujado anidado no terminaba nunca: ArcMap
+                // colgado tres veces el 2026-09-25, con Esc sin efecto y el mapa en
+                // blanco. El mismo export, con ArcMap libre 20 s en su propio bucle de
+                // mensajes, salió en 0,8 s.
+                Log.Info("Export con E_PENDING: el mapa sigue dibujando; se devuelve para que el"
+                         + " servidor reintente desde fuera.");
+                throw new InvalidOperationException(Dibujando
+                    + "ArcMap aún está dibujando el mapa (E_PENDING, 0x8000000A): el export no se ha"
+                    + " hecho y el fichero de destino no se ha tocado. El servidor MCP reintenta solo;"
+                    + " si ves este mensaje es que el mapa no terminó de dibujar en su margen (capas"
+                    + " WMS o rásters pesados): espera y repite.", ex);
+            }
 
             try
             {
@@ -147,12 +144,14 @@ namespace ArcmapMcp.AddIn.Handlers
 
         // E_PENDING (0x8000000A, "el dato necesario ... no está disponible todavía"):
         // el mapa sigue dibujando. Visto el 2026-09-21 en ~4 de ~11 pases de la
-        // regresión, siempre en export_jpg, SIN disparador identificado (tres hipótesis
-        // probadas y refutadas). Este reintento TAPA EL SÍNTOMA, no explica la causa:
-        // que nadie lo lea como entendido. Acotado en intentos, nunca indefinido.
+        // regresión, siempre en export_jpg. El 2026-09-25 apareció el disparador
+        // seguro: exportar justo después de cambiar la vista o las etiquetas (un
+        // Refresh pendiente). Lo que sigue sin explicar es por qué a veces sale sin él.
         private const int EPending = unchecked((int)0x8000000A);
-        private const int IntentosPendiente = 3;
-        private static readonly TimeSpan EsperaPendiente = TimeSpan.FromSeconds(2);
+
+        /// <summary>Prefijo del error de E_PENDING. El servidor MCP lo reconoce (igual
+        /// que "busy: ") y reintenta; si cambia aquí, cambia en arcmap_mcp_server.py.</summary>
+        internal const string Dibujando = "dibujando: ";
 
         private static bool EsPendiente(Exception ex)
         {
@@ -165,19 +164,6 @@ namespace ArcmapMcp.AddIn.Handlers
                     return true;
             }
             return false;
-        }
-
-        /// <summary>Espera BOMBEANDO mensajes. Esto corre en el hilo de ArcMap: un
-        /// Thread.Sleep lo congelaría y el mapa no podría acabar de dibujar, que es
-        /// justo lo que se está esperando.</summary>
-        private static void DejarDibujar(TimeSpan espera)
-        {
-            var reloj = System.Diagnostics.Stopwatch.StartNew();
-            while (reloj.Elapsed < espera)
-            {
-                System.Windows.Forms.Application.DoEvents();
-                System.Threading.Thread.Sleep(50);
-            }
         }
 
         /// <summary>Temporal en la MISMA carpeta que el destino: así el movimiento

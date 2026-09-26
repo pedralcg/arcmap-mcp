@@ -14,6 +14,7 @@ Arranque manual de prueba:
 
 import os
 import json
+import re
 import base64
 import socket
 import struct
@@ -92,6 +93,10 @@ EXEC_TIMEOUT = _Espera("ARCMAP_EXEC_TIMEOUT_CLIENTE", 930)
 # peor caso 1500 s, y con 930 aquí volvía a ganar el corte mudo de socket. Se le da
 # presupuesto propio en vez de subir el de todas las llamadas, que son interactivas.
 EXEC_SESION_TIMEOUT = _Espera("ARCMAP_EXEC_SESION_TIMEOUT_CLIENTE", 1560)  # 600 + 900 + margen
+# Cuánto se deja dibujar a ArcMap cuando un export llega con el mapa aún pintando
+# (E_PENDING). La espera va AQUÍ, fuera de ArcMap, a propósito: ver _exportar.
+ESPERA_DIBUJO = _Espera("ARCMAP_ESPERA_DIBUJO", 120)
+_PAUSA_DIBUJO = 3
 
 
 class ArcMapClient:
@@ -180,6 +185,39 @@ class ArcMapClient:
 
 _client = ArcMapClient()
 mcp = FastMCP("arcmap-mcp")
+
+
+def _exportar(ctype, params):
+    """Envía un export y, si ArcMap responde que el mapa aún está dibujando
+    (`dibujando: `, su E_PENDING), espera AQUÍ y reintenta.
+
+    La espera estaba dentro del add-in, bombeando mensajes con DoEvents en el hilo
+    de ArcMap, y eso metía el dibujado pendiente dentro de la llamada del puente:
+    con etiquetas no terminaba nunca y ArcMap quedó colgado tres veces el
+    2026-09-25 (Esc sin efecto, mapa en blanco). Esperando fuera, ArcMap dibuja en
+    su propio bucle de mensajes: el mismo export salió en 0,8 s tras 20 s de margen.
+    Mientras se espera no se manda NADA al puente, ni un ping.
+    """
+    import time
+    inicio = time.monotonic()
+    reintentos = 0
+    while True:
+        r = _client.send(ctype, params, timeout=GP_TIMEOUT)
+        error = r.get("error") or ""
+        if r.get("ok") or not error.startswith("dibujando: "):
+            break
+        if time.monotonic() - inicio + _PAUSA_DIBUJO > ESPERA_DIBUJO:
+            r = dict(r, error=error + " (se esperó %d s en %d reintentos; sube %s si el mapa"
+                                      " es muy pesado)" % (ESPERA_DIBUJO, reintentos,
+                                                           ESPERA_DIBUJO.variable))
+            break
+        time.sleep(_PAUSA_DIBUJO)
+        reintentos += 1
+    if reintentos and r.get("ok") and isinstance(r.get("result"), dict):
+        r["result"]["aviso_dibujo"] = ("ArcMap estaba dibujando el mapa: el export salió tras "
+                                       "%d reintentos (%.0f s de espera)."
+                                       % (reintentos, time.monotonic() - inicio))
+    return r
 
 
 # --------------------------------------------------------------------------- #
@@ -398,9 +436,8 @@ def export_pdf(salida: str, dpi: int = 300, sobrescribir: bool = True) -> dict:
     Un layout denso a dpi alto se va a minutos: el add-in lo trata como comando
     largo y la espera de aquí la gobierna ARCMAP_GP_TIMEOUT, no el timeout corto.
     """
-    return _client.send("export_pdf", {"salida": salida, "dpi": dpi,
-                                       "sobrescribir": sobrescribir},
-                        timeout=GP_TIMEOUT)
+    return _exportar("export_pdf", {"salida": salida, "dpi": dpi,
+                                    "sobrescribir": sobrescribir})
 
 
 @mcp.tool()
@@ -419,9 +456,8 @@ def export_jpg(salida: str, dpi: int = 230, sobrescribir: bool = True) -> dict:
     `sobrescrito` en la respuesta. Vale `.jpg` o `.jpeg`. La espera la gobierna
     ARCMAP_GP_TIMEOUT.
     """
-    return _client.send("export_jpg", {"salida": salida, "dpi": dpi,
-                                       "sobrescribir": sobrescribir},
-                        timeout=GP_TIMEOUT)
+    return _exportar("export_jpg", {"salida": salida, "dpi": dpi,
+                                    "sobrescribir": sobrescribir})
 
 
 @mcp.tool()
@@ -471,19 +507,18 @@ def execute_arcpy(code: str, usar_documento: bool | None = None,
       - Abrir el documento en sí: **menos de un segundo** (0,7 s medidos sobre un
         .mxd de 36 capas el 2026-08-27). Abrir NO es caro.
 
-    Lo caro es otra cosa, y es lo que llevaba mal documentado desde el principio:
-    **el arcpy standalone se BLOQUEA al abrir un documento mientras otra cosa tiene
-    tomada la licencia de Desktop.** El mismo .mxd que abre en 0,7 s con ArcMap
-    cerrado seguía bloqueado a los 180 s con ArcMap abierto. El `import arcpy`
-    funciona igual en los dos casos, así que el bloqueo no se ve venir. Ahí es donde
-    salen los 324,5 s que este docstring dio durante un tiempo como coste normal de
-    abrir, y los timeouts de 900 s.
+    Lo caro, cuando pasa, es un **bloqueo al abrir** que no se ve venir: el
+    `import arcpy` va normal y la espera aparece en `MapDocument()`. De ahí salieron
+    los 324,5 s que este docstring dio durante un tiempo como coste normal de abrir, y
+    los timeouts de 900 s. El 2026-08-27 el mismo .mxd pasó de 0,7 s a más de 180 s
+    bloqueado, y se atribuyó a que ArcMap tenía la licencia tomada. **Esa causa está
+    descartada**: el 2026-09-25 abrió igual (~8,5 s) con ArcMap cerrado, abierto con
+    ese mismo documento y congelado. La causa real sigue sin identificar.
 
-    Dentro del puente esto normalmente no muerde, porque el runner corre bajo la
-    propia sesión de ArcMap. Si ves esperas largas abriendo documentos, sospecha de
-    **contención de licencia** antes que del tamaño del fichero o de las fuentes de
-    datos. Para inspeccionar sin abrir nada, `describe_mxd` (milisegundos, sin arcpy
-    y sin licencia).
+    Si ves esperas largas abriendo documentos, no subas el timeout a ciegas: mira si
+    hay `python.exe` de ArcGIS huérfanos de llamadas anteriores y si responden las
+    unidades de red de las capas. Para inspeccionar sin abrir nada, `describe_mxd`
+    (milisegundos, sin arcpy y sin licencia).
 
     El resultado se devuelve asignando `RESULT` (en MAYÚSCULAS; `result` en minúscula,
     la convención del MCP de ArcGIS Pro, también se devuelve, con un `aviso_result`).
@@ -617,6 +652,42 @@ def set_legend_item(capa: str, mostrar_nombre: bool = None,
 
 
 @mcp.tool()
+def set_labels(capa: str, expresion: str = None, tamano: float = None,
+               color: str | list = None, halo: float = None,
+               color_halo: str | list = None, activar: bool = None,
+               clase: str = None) -> dict:
+    """
+    Etiquetas de una capa de entidades: expresión, tamaño, color y halo.
+
+    Solo se toca lo que se pase; None = no cambiar. Sin ningún parámetro, devuelve
+    el estado actual sin tocar nada. Si cambias algo y no dices `activar`, las
+    etiquetas se encienden; `activar=False` las apaga.
+
+    - `expresion`: expresión simple de ArcMap, con los campos entre corchetes:
+      `"[NOMBRE]"`, `'[COD] & " " & [NOMBRE]'`.
+    - `tamano`: en puntos. `color` y `color_halo`: `[R, G, B]` o `"#RRGGBB"`.
+    - `halo`: grosor en puntos; `0` lo quita. El color del halo solo cambia si
+      pasas `color_halo` (blanco si la capa no tenía ninguno).
+    - `clase`: aplica solo a esa clase de etiquetas. Sin ella, a todas.
+
+    **Modifica las clases que ya tiene la capa; no las borra ni las crea.** Es lo que
+    funciona con los dos motores de etiquetado: en un mapa con **Maplex**, sustituir
+    las clases por unas nuevas deja la capa sin etiquetas y sin ningún error. Solo si
+    la capa no tiene ninguna clase se crea una (hace falta `expresion`), preparada para
+    el motor del mapa. La respuesta dice el `motor`, si se creó la clase
+    (`clase_creada`) y cómo quedó cada clase **leída de vuelta de la capa**, junto con
+    `antes`.
+    """
+    params: dict = {"capa": capa}
+    for clave, valor in (("expresion", expresion), ("tamano", tamano), ("color", color),
+                         ("halo", halo), ("color_halo", color_halo),
+                         ("activar", activar), ("clase", clase)):
+        if valor is not None:
+            params[clave] = valor
+    return _client.send("set_labels", params)
+
+
+@mcp.tool()
 def set_text_element(texto: str, nombre: str = None, buscar: str = None,
                      grupo: str = None, indice: int = None) -> dict:
     """
@@ -692,10 +763,10 @@ def export_view_png(salida: str, dpi: int = 150, ancho: int = None,
     El add-in lo trata como comando largo (un layout a dpi alto no se renderiza en
     60 s): la espera la gobierna ARCMAP_GP_TIMEOUT.
     """
-    return _client.send("export_view_png", {
+    return _exportar("export_view_png", {
         "salida": salida, "dpi": dpi, "ancho": ancho, "alto": alto, "modo": modo,
         "sobrescribir": sobrescribir,
-    }, timeout=GP_TIMEOUT)
+    })
 
 
 @mcp.tool()
@@ -780,12 +851,23 @@ def get_layer_info(capa: str) -> dict:
 
 @mcp.tool()
 def add_layer(fuente: str, posicion: str = "TOP", grupo: str = None,
-              nombre: str = None, en_leyenda: bool = True) -> dict:
+              nombre: str = None, en_leyenda: bool = True, visible: bool = None,
+              subcapas: list = None) -> dict:
     """
     Añade una capa al data frame activo desde una ruta a shapefile, feature class de
-    file geodatabase, ráster **o `.lyr`**. `posicion`: TOP / BOTTOM / AUTO_ARRANGE.
-    `grupo` opcional = nombre de una capa de grupo YA EXISTENTE donde insertarla
-    (para crearlo, `add_group`).
+    file geodatabase, ráster, **`.lyr`** o **URL de un servicio WMS**. `posicion`:
+    TOP / BOTTOM / AUTO_ARRANGE. `grupo` opcional = nombre de una capa de grupo YA
+    EXISTENTE donde insertarla (para crearlo, `add_group`). Para recolocarla después,
+    `move_layer`. `visible=False` la añade apagada.
+
+    **WMS**: `fuente` = URL del servicio (`https://www.ign.es/wms-inspire/mapa-raster`).
+    Un WMS recién conectado trae TODAS sus subcapas apagadas, y encender solo el nodo
+    padre no pinta nada: aquí se encienden las de `subcapas` (nombre o ruta
+    `Grupo/Subcapa`, con los grupos que las contienen) o todas si no se dice. Una
+    subcapa que no existe es error y no se añade nada. La respuesta trae `servicio`
+    con el árbol de subcapas leído de vuelta. **Ojo**: con un WMS encendido, cada
+    zoom o captura lo redibuja por la red en el hilo de ArcMap; para montar un
+    documento, añádelo con `visible=False` y enciéndelo al final.
 
     `nombre`: cómo se llamará la capa en la TOC. Sin esto entra con el nombre del
     fichero (`Vis_plataforma_oeste.tif`), que es el que acaba saliendo en la
@@ -807,6 +889,10 @@ def add_layer(fuente: str, posicion: str = "TOP", grupo: str = None,
         params["nombre"] = nombre
     if not en_leyenda:
         params["en_leyenda"] = False
+    if visible is not None:
+        params["visible"] = visible
+    if subcapas is not None:
+        params["subcapas"] = subcapas
     return _client.send("add_layer", params)
 
 
@@ -834,6 +920,30 @@ def add_group(nombre: str, posicion: str = "TOP", grupo: str = None,
 def remove_layer(capa: str) -> dict:
     """Quita una capa del data frame activo por nombre."""
     return _client.send("remove_layer", {"capa": capa})
+
+
+@mcp.tool()
+def move_layer(capa: str, referencia: str = None, posicion: str = None,
+               grupo: str = None) -> dict:
+    """
+    Recoloca una capa (o un grupo) en la TOC del data frame activo **sin quitarla y
+    volverla a añadir**: conserva simbología, etiquetas, lo tocado a mano y sus
+    entradas de leyenda.
+
+    - `referencia` + `posicion="BEFORE"` (por defecto) o `"AFTER"`: justo encima o
+      debajo de otra capa, en el grupo de esa capa (la mueve de grupo si hace falta).
+    - `posicion="TOP"` o `"BOTTOM"` (por defecto TOP si no hay referencia): arriba o
+      abajo del todo de `grupo`; sin `grupo`, del grupo en que ya está. `grupo="/"`
+      es la raíz de la TOC.
+    - `capa`, `referencia` y `grupo` por nombre o ruta `Grupo/Capa`, como el resto.
+
+    Meter un grupo dentro de sí mismo es error. La respuesta trae `orden`: las capas
+    del grupo de destino leídas de vuelta, de arriba abajo.
+    """
+    params: dict = {"capa": capa}
+    params.update({k: v for k, v in {"referencia": referencia, "posicion": posicion,
+                                     "grupo": grupo}.items() if v is not None})
+    return _client.send("move_layer", params)
 
 
 @mcp.tool()
@@ -1035,6 +1145,124 @@ def set_unique_values_symbology(capa: str, campo: str, tamano: float = None,
     return _client.send("set_unique_values_symbology", params)
 
 
+def _params_simbolo(capa, **valores):
+    """Solo viaja lo que se pasa: un null que llegara al add-in sería indistinguible
+    de «quítalo»."""
+    params: dict = {"capa": capa}
+    params.update({k: v for k, v in valores.items() if v is not None})
+    return params
+
+
+@mcp.tool()
+def set_single_symbology(capa: str, color_relleno: list | str = None,
+                         color_borde: list | str = None, grosor_borde: float = None,
+                         sin_relleno: bool = None, tamano: float = None,
+                         transparencia: float = None, etiqueta: str = None) -> dict:
+    """
+    Pone a una capa de ENTIDADES **un solo símbolo** (sin clasificar), con los colores
+    que pidas. Sustituye la simbología que tenga.
+
+    Es lo que no se podía hacer: forzar la graduada o los valores únicos a un solo color
+    llena la tabla de contenidos con una entrada por entidad, y recargar la capa la trae
+    con un color aleatorio. Sin colores, sale gris neutro, siempre el mismo.
+
+    - Polígonos: `color_relleno`, `color_borde`, `grosor_borde` (pt); `sin_relleno=True`
+      deja solo el contorno.
+    - Líneas: el color de la línea es `color_borde` y su ancho `grosor_borde`. Pasar
+      `color_relleno` a una línea es error.
+    - Puntos: `color_relleno`, `tamano` (pt) y, opcional, `color_borde`/`grosor_borde`.
+    - `transparencia` 0-100, de la capa. `etiqueta`: el texto de la entrada en la TOC.
+    - Colores: `[R, G, B]` o `"#RRGGBB"`; mal formado es error.
+
+    Para cambiar un color de una simbología que ya está montada (una categoría de unos
+    valores únicos, por ejemplo) sin rehacerla, usa `edit_symbol`.
+    """
+    return _client.send("set_single_symbology", _params_simbolo(
+        capa, color_relleno=color_relleno, color_borde=color_borde, grosor_borde=grosor_borde,
+        sin_relleno=sin_relleno, tamano=tamano, transparencia=transparencia, etiqueta=etiqueta))
+
+
+@mcp.tool()
+def edit_symbol(capa: str, categoria: str | int = None, color_relleno: list | str = None,
+                color_borde: list | str = None, grosor_borde: float = None,
+                sin_relleno: bool = None, tamano: float = None,
+                transparencia: float = None) -> dict:
+    """
+    Cambia SOLO lo que pidas de la simbología que la capa YA tiene, sin rehacerla:
+    símbolo único, valores únicos o rangos. El resto del símbolo (tipo, patrón, lo que no
+    se pida) y las demás categorías se quedan como estaban.
+
+    - `categoria`: en valores únicos, el valor o su etiqueta; en rangos, el número de la
+      clase (1..n) o su etiqueta. Sin ella se aplica a TODAS las categorías, pero solo lo
+      que no borra la clasificación (borde, grosor, tamaño, transparencia): cambiar el
+      relleno de todas a la vez es error.
+    - Los demás parámetros, como en `set_single_symbology`.
+
+    Sin nada que cambiar, devuelve la simbología actual: úsalo así para ver las
+    categorías y sus colores antes de tocar. La respuesta trae cada clase leída de vuelta,
+    `categorias_cambiadas` y el estado `antes`.
+    """
+    return _client.send("edit_symbol", _params_simbolo(
+        capa, categoria=None if categoria is None else str(categoria), color_relleno=color_relleno, color_borde=color_borde,
+        grosor_borde=grosor_borde, sin_relleno=sin_relleno, tamano=tamano,
+        transparencia=transparencia))
+
+
+@mcp.tool()
+def list_style_symbols(estilo: str = None, clase: str = None, patron: str = None,
+                       limite: int = 200) -> dict:
+    """
+    Símbolos de un estilo `.style` (los del selector de símbolos de ArcMap).
+
+    - Sin `estilo`: lista los estilos CARGADOS en ArcMap (nombre y ruta) y las clases
+      de símbolo de la galería. Es el primer paso.
+    - `estilo`: el nombre de uno cargado (`Usuario`, `ESRI`) o la ruta ABSOLUTA a un
+      `.style`. Si no estaba cargado se añade solo durante la llamada y se quita
+      después: la galería del usuario no se queda cambiada.
+    - `clase`: `relleno`, `linea` o `marcador` (o el nombre de una clase de la
+      galería, p. ej. `Fill Symbols`). Sin ella, las tres.
+    - `patron`: filtra por nombre o categoría. Sin comodines es «contiene»; con `*` o
+      `?`, comodín sobre el texto entero. Sin distinguir mayúsculas.
+    - `limite` (1-2000): cuántos se devuelven; `total` y `truncado` dicen si hay más.
+
+    Cada símbolo trae `nombre`, `categoria`, `id`, `clase` y `tipo_simbolo`. El
+    `nombre` es lo que pide `apply_style_symbol`; si se repite, el `id` lo desempata
+    (el nombre no es único ni dentro de su categoría: `ESRI.style` trae dos «Verde»
+    en «Predeterminado»).
+    """
+    params: dict = {"limite": limite}
+    params.update({k: v for k, v in {"estilo": estilo, "clase": clase,
+                                     "patron": patron}.items() if v is not None})
+    return _client.send("list_style_symbols", params)
+
+
+@mcp.tool()
+def apply_style_symbol(capa: str, estilo: str, nombre_simbolo: str = None, clase: str = None,
+                       categoria_estilo: str = None, etiqueta: str = None,
+                       id_simbolo: int = None) -> dict:
+    """
+    Pone a una capa de ENTIDADES, como símbolo único, un símbolo de un estilo `.style`
+    (por ejemplo, el relleno de «Monte público» del estilo de la empresa). Sustituye la
+    simbología que tenga, como `set_single_symbology`; la transparencia de la capa no
+    cambia.
+
+    - `estilo`: nombre de un estilo cargado o ruta ABSOLUTA a un `.style` (se carga
+      solo durante la llamada). `list_style_symbols` da los nombres.
+    - `nombre_simbolo`: el nombre exacto (sin distinguir mayúsculas). Si hay varios con
+      ese nombre, la llamada falla listando su `id` y su categoría: se desempata con
+      `id_simbolo` (o `categoria_estilo`). Con `id_simbolo` solo, no hace falta el nombre.
+    - `clase`: por defecto la que toca a la geometría de la capa (relleno para
+      polígonos, línea, marcador para puntos). Un símbolo de otra geometría es error.
+    - `etiqueta`: el texto de la entrada en la TOC.
+
+    Para retocar después un color del símbolo aplicado, `edit_symbol`. La respuesta
+    trae el símbolo leído de vuelta de la capa y `simbolo_de_estilo` (de dónde salió).
+    """
+    return _client.send("apply_style_symbol", _params_simbolo(
+        capa, estilo=estilo, nombre_simbolo=nombre_simbolo, clase=clase,
+        categoria_estilo=categoria_estilo, etiqueta=etiqueta, id_simbolo=id_simbolo))
+
+
 @mcp.tool()
 def get_bookmarks() -> dict:
     """Lista los marcadores espaciales del data frame activo, con su extensión."""
@@ -1077,20 +1305,84 @@ def set_scale(escala: float) -> dict:
 # --------------------------------------------------------------------------- #
 
 @mcp.tool()
-def save_mxd() -> dict:
+def save_mxd(verificar: bool = None) -> dict:
     """
     Guarda el documento .mxd abierto en su ruta actual. Devuelve la ruta guardada.
     Útil para persistir los cambios que han hecho otras tools (def. query, textos,
     simbología). Para guardar en otra ruta sin tocar el original usa save_mxd_as.
 
+    **Rutas relativas que se pierden al guardar.** Con «Store relative pathnames»,
+    ArcMap 10.5 no escribe la ruta de una capa si la carpeta del .mxd más la ruta
+    relativa de su workspace llega a 260 caracteres: al reabrir queda
+    `\\fichero.shp` y la capa rota, aunque en memoria se vea bien. Antes de guardar,
+    la respuesta predice esas capas en `capas_perderan_ruta` y `aviso_rutas_relativas`.
+
+    `verificar`: tras guardar, **reabre el .mxd** con arcpy en un proceso aparte (sin
+    tocar la sesión) y lista en `verificacion.rotas_nuevas` las capas rotas al
+    reabrir que no lo estaban en memoria. Es la única comprobación que no miente.
+    Sin indicarlo, se verifica **solo si la predicción ha encontrado algo**;
+    `verificar=False` lo impide. Cuesta unos 10 s.
+
     Escribir un documento con decenas de capas y ráster pesado no cabe en el timeout
     corto: la espera la gobierna ARCMAP_SAVE_TIMEOUT.
     """
-    return _client.send("save_mxd", timeout=SAVE_TIMEOUT)
+    r = _client.send("save_mxd", {"verificar": True} if verificar else {}, timeout=SAVE_TIMEOUT)
+    return _tras_guardar(r, "ruta", verificar)
+
+
+def _tras_guardar(r, clave_ruta, verificar):
+    """Reabre lo guardado si se pidió, o si la predicción del add-in encontró capas que
+    se van a perder. `rotas_en_memoria` solo sirve para esa comparación y no se devuelve."""
+    if not r.get("ok"):
+        return r
+    res = r.get("result") or {}
+    memoria = res.pop("rotas_en_memoria", None) or []
+    if verificar or (verificar is None and res.get("capas_perderan_ruta")):
+        res["verificacion"] = _verificar_guardado(res.get(clave_ruta), memoria)
+    return r
+
+
+def _verificar_guardado(ruta, rotas_en_memoria, timeout=180):
+    """Reabre `ruta` con el auditor standalone y devuelve las capas rotas en disco que no
+    lo estaban en memoria. Las rutas de grupo se comparan con `/` (el auditor da
+    `Grupo\\Capa`, el add-in `Grupo/Capa`)."""
+    import subprocess
+
+    py27 = _python27_arcgis()
+    auditor = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auditor_mxd.py")
+    if not ruta or py27 is None or not os.path.isfile(auditor):
+        return {"reabierto": False, "motivo": "falta el Python 2.7 de ArcGIS (ARCMAP_PYTHON27) o el auditor"}
+    try:
+        proc = subprocess.run([py27, auditor, ruta], capture_output=True, timeout=timeout)
+        bruto = proc.stdout.decode("utf-8", "replace").strip()
+        datos = json.loads(bruto) if bruto else {"ok": False, "error": "sin salida"}
+    except subprocess.TimeoutExpired:
+        return {"reabierto": False, "motivo": "el auditor no abrió el .mxd en %s s" % timeout}
+    except (json.JSONDecodeError, OSError) as exc:
+        return {"reabierto": False, "motivo": "no se pudo auditar: %s" % exc}
+    if not datos.get("ok"):
+        return {"reabierto": False, "motivo": datos.get("error") or "desconocido"}
+
+    def clave(df, ruta_capa):
+        # El add-in numera los nombres repetidos ("Capa#2") para desambiguarlos; arcpy no.
+        ruta_capa = re.sub(r"#[0-9]+(?=/|$)", "", (ruta_capa or "").replace("\\", "/"))
+        return ((df or "").lower(), ruta_capa.lower())
+
+    antes = {clave(c.get("data_frame"), c.get("ruta")) for c in rotas_en_memoria}
+    nuevas = []
+    for c in datos.get("capas") or []:
+        if c.get("grupo") or not c.get("rota"):
+            continue
+        if clave(c.get("data_frame"), c.get("nombre_largo")) not in antes:
+            nuevas.append({"data_frame": c.get("data_frame"), "ruta": c.get("nombre_largo"),
+                           "fuente_al_reabrir": c.get("fuente")})
+    return {"reabierto": True, "rotas_al_reabrir": datos.get("num_rotas"),
+            "rotas_en_memoria": len(rotas_en_memoria), "rotas_nuevas": nuevas,
+            "guardado_sin_perdidas": not nuevas}
 
 
 @mcp.tool()
-def save_mxd_as(salida: str, sobrescribir: bool = False) -> dict:
+def save_mxd_as(salida: str, sobrescribir: bool = False, verificar: bool = None) -> dict:
     """
     Guarda una COPIA del .mxd en `salida` (no cambia el documento activo ni su ruta).
     `salida` es la ruta de destino (.mxd), ABSOLUTA y en una carpeta que exista.
@@ -1101,10 +1393,19 @@ def save_mxd_as(salida: str, sobrescribir: bool = False) -> dict:
     llamada falla sin tocarlo y dice cómo forzarlo. Al REGENERAR una serie de .mxd
     (uno por capa, p. ej.) pasa `sobrescribir=True`. La respuesta trae `sobrescrito`.
 
+    **Rutas relativas**: como en `save_mxd`, la respuesta predice las capas que se
+    perderán (`capas_perderan_ruta`), calculadas contra la carpeta de DESTINO: una copia
+    más profunda que el original puede romper capas que en él guardan bien. `verificar`
+    reabre la copia y lista `verificacion.rotas_nuevas`; sin indicarlo, solo si la
+    predicción ha encontrado algo.
+
     Como `save_mxd`, la espera la gobierna ARCMAP_SAVE_TIMEOUT.
     """
-    return _client.send("save_mxd_as", {"salida": salida, "sobrescribir": sobrescribir},
-                        timeout=SAVE_TIMEOUT)
+    params = {"salida": salida, "sobrescribir": sobrescribir}
+    if verificar:
+        params["verificar"] = True
+    return _tras_guardar(_client.send("save_mxd_as", params, timeout=SAVE_TIMEOUT),
+                         "salida", verificar)
 
 
 @mcp.tool()
@@ -1131,6 +1432,11 @@ def repair_data_source(capa: str, ruta_antigua: str, ruta_nueva: str,
     el activo, y una capa rota de un data frame secundario se listaba pero no se
     podía reparar). `data_frame` acota la búsqueda a uno; si el nombre casa en más
     de un sitio y no lo indicas, la llamada falla listando los candidatos.
+
+    **Reparada en memoria no es reparada en disco.** Si el documento guarda rutas
+    relativas y la carpeta del .mxd más la ruta relativa del workspace nuevo llega a
+    260 caracteres, ArcMap 10.5 perderá la ruta al guardar (queda `\\fichero.shp`). La
+    respuesta lo avisa en `aviso_ruta_relativa` y `riesgo_ruta_relativa` (no bloquea).
     """
     params = {"capa": capa, "ruta_antigua": ruta_antigua,
               "ruta_nueva": ruta_nueva, "validar": validar}
@@ -1598,23 +1904,19 @@ def describe_mxd(ruta: str) -> dict:
     }
 
 
-def _arcmap_esta_abierto():
-    """True si hay un ArcMap.exe corriendo. None si no se pudo averiguar.
+# Lo que `audit_folder` copia del auditor a cada documento, y lo que suma en el
+# resumen. Los `_en_plano` van primero a propósito: son los que dicen si el plano
+# sale mal; los totales incluyen capas en grupos apagados y marcos fuera de la hoja.
+_CLAVES_AUDITOR = ("num_rotas_en_plano", "num_con_query_en_plano", "num_capas",
+                   "num_rotas", "num_con_query", "num_en_plano_desconocido")
+_SUMAS_AUDITOR = ("num_rotas_en_plano", "num_rotas", "num_con_query_en_plano",
+                  "num_con_query", "num_en_plano_desconocido")
 
-    Importa mucho para `audit_folder`: el arcpy standalone **se bloquea al abrir un
-    documento mientras ArcMap tiene la licencia tomada**. Medido el 2026-08-27 sobre
-    el mismo .mxd: con ArcMap cerrado abre en 0,7 s; con ArcMap abierto sigue
-    bloqueado a los 180 s. El `import arcpy` funciona igual en los dos casos (~6 s),
-    así que el bloqueo NO se ve venir: aparece en `MapDocument()`.
-    """
-    try:
-        import subprocess
-        salida = subprocess.run(
-            ["tasklist", "/FI", "IMAGENAME eq ArcMap.exe", "/NH"],
-            capture_output=True, timeout=20)
-        return b"ArcMap.exe" in salida.stdout
-    except Exception:
-        return None
+
+# Timeouts SEGUIDOS tras los que `audit_folder` deja de abrir documentos. Si algo
+# bloquea al arcpy standalone para todos (lo que se vio el 2026-08-27, de causa sin
+# identificar), sin este corte una carpeta de 200 planos costaría 200 timeouts.
+_CORTE_TIMEOUTS_SEGUIDOS = 2
 
 
 def _python27_arcgis():
@@ -1656,18 +1958,35 @@ def audit_folder(ruta: str, con_capas: bool = True, timeout_por_documento: int =
        documento se atasca, muere su proceso y la auditoría continúa marcándolo
        como `timeout`.
 
-    ⚠️ **CIERRA ARCMAP ANTES DE USAR `con_capas`.** El arcpy standalone se
-    **bloquea al abrir un documento mientras ArcMap tiene la licencia tomada**.
-    Medido el 2026-08-27 sobre el mismo .mxd: con ArcMap cerrado abre en **0,7 s**;
-    con ArcMap abierto sigue bloqueado a los **180 s**. Y no se ve venir, porque
-    `import arcpy` funciona igual en ambos casos: el bloqueo aparece en
-    `MapDocument()`. Por eso esta herramienta comprueba si ArcMap está corriendo y
-    se niega a hacer la pasada 2, salvo que pases
-    `forzar_con_arcmap_abierto=True`.
+    **Funciona con ArcMap abierto.** Hasta la 2.14.0 se negaba a la pasada 2 con
+    ArcMap corriendo, por una medición del 2026-08-27 (mismo .mxd: 0,7 s con ArcMap
+    cerrado, bloqueado a los 180 s con ArcMap abierto). No se ha vuelto a
+    reproducir: el 2026-09-25 el auditor abrió el mismo documento en ~8,5 s con
+    ArcMap cerrado, abierto con ese mismo .mxd y **congelado** (proceso suspendido),
+    así que el estado de ArcMap no es la causa. La causa de agosto sigue sin
+    identificar, y la protección ya no mira a ArcMap sino al síntoma: tras
+    **dos timeouts seguidos** la pasada 2 se corta para el resto de documentos y la
+    respuesta lo dice en `aviso_capas` (quedan con `sin_abrir: true`). Si pasa, lo
+    primero es mirar si hay `python.exe` de ArcGIS huérfanos y si las unidades de red
+    de las capas responden. `forzar_con_arcmap_abierto` se sigue aceptando por
+    compatibilidad y ya no hace nada.
 
-    Presupuesta el tiempo: con ArcMap cerrado, abrir cuesta menos de un segundo por
-    documento más ~6 s de `import arcpy` por proceso. Empieza con `con_capas=False`
-    para tener el mapa de versiones al instante.
+    Presupuesta el tiempo: abrir cuesta ~1-3 s por documento más ~6 s de
+    `import arcpy` por proceso. Empieza con `con_capas=False` para tener el mapa de
+    versiones al instante.
+
+    **QUÉ SALE EN EL PLANO Y QUÉ NO.** Lee primero `num_rotas_en_plano` y
+    `num_con_query_en_plano` (por documento y sumados en `resumen`), no los totales:
+    `num_rotas` cuenta también capas dentro de grupos apagados y en marcos fuera de
+    la hoja, que no se dibujan. En una serie real de planos había 2.335
+    capas rotas y solo 87 salían en los planos. Cada capa trae:
+    - `data_frame` y `nombre_largo` (la ruta de grupos, `Grupo\\Capa`);
+    - `visible` (su casilla), `visible_efectivo` (ella y todos sus grupos) y
+      `en_plano` (además, su marco cae al menos en parte en la hoja).
+    Cada documento trae `marcos`, con posición, tamaño y `en_pagina`
+    (`dentro` / `parcial` / `fuera`). Un `None` en cualquiera de esos campos es «no se
+    pudo leer», no «apagada»; se cuentan en `num_en_plano_desconocido`. Lo que NO se
+    mira: el rango de escalas de la capa, que arcpy.mapping 10.x no expone.
 
     `max_documentos` corta la lista (por defecto 200) y **lo dice** en la
     respuesta: nunca trunca en silencio. `max_documentos` y `timeout_por_documento`
@@ -1720,15 +2039,6 @@ def audit_folder(ruta: str, con_capas: bool = True, timeout_por_documento: int =
     documentos = encontrados[:max_documentos]
 
     aviso_capas = None
-    if con_capas and not forzar_con_arcmap_abierto and _arcmap_esta_abierto():
-        con_capas = False
-        aviso_capas = (
-            "PASADA 2 OMITIDA: ArcMap está abierto. El arcpy standalone se bloquea al "
-            "abrir documentos mientras ArcMap tiene la licencia tomada (medido: 0,7 s "
-            "con ArcMap cerrado frente a >180 s con ArcMap abierto, mismo .mxd). "
-            "Cierra ArcMap y repite, o pasa forzar_con_arcmap_abierto=True si sabes "
-            "lo que haces: cada documento agotará su timeout sin dar nada.")
-
     py27 = _python27_arcgis() if con_capas else None
     auditor = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auditor_mxd.py")
     if con_capas and (py27 is None or not os.path.isfile(auditor)):
@@ -1738,7 +2048,12 @@ def audit_folder(ruta: str, con_capas: bool = True, timeout_por_documento: int =
 
     resultados = []
     resumen = {"con_capas": 0, "timeout": 0, "error_al_abrir": 0, "ilegibles": 0}
+    if con_capas:
+        resumen.update((clave, 0) for clave in _SUMAS_AUDITOR)
+        resumen["sin_abrir"] = 0
     versiones: dict = {}
+    timeouts_seguidos = 0
+    cortada = False
 
     for doc in documentos:
         version, err_version = _mxd_version_declarada(doc)
@@ -1754,7 +2069,11 @@ def audit_folder(ruta: str, con_capas: bool = True, timeout_por_documento: int =
             fila["problema_fichero"] = err_version
             resumen["ilegibles"] += 1
 
-        if con_capas:
+        if con_capas and cortada:
+            fila["sin_abrir"] = True
+            resumen["sin_abrir"] += 1
+        elif con_capas:
+            timeout_previo = resumen["timeout"]
             try:
                 proc = subprocess.run(
                     [py27, auditor, doc],
@@ -1762,9 +2081,11 @@ def audit_folder(ruta: str, con_capas: bool = True, timeout_por_documento: int =
                 bruto = proc.stdout.decode("utf-8", "replace").strip()
                 datos = json.loads(bruto) if bruto else {"ok": False, "error": "sin salida"}
                 if datos.get("ok"):
-                    fila["num_capas"] = datos.get("num_capas")
-                    fila["num_rotas"] = datos.get("num_rotas")
-                    fila["num_con_query"] = datos.get("num_con_query")
+                    for clave in _CLAVES_AUDITOR:
+                        fila[clave] = datos.get(clave)
+                    for clave in _SUMAS_AUDITOR:
+                        resumen[clave] += datos.get(clave) or 0
+                    fila["marcos"] = datos.get("marcos")
                     fila["capas"] = datos.get("capas")
                     resumen["con_capas"] += 1
                 else:
@@ -1780,6 +2101,18 @@ def audit_folder(ruta: str, con_capas: bool = True, timeout_por_documento: int =
             except (json.JSONDecodeError, OSError) as exc:
                 fila["error_al_abrir"] = "no se pudo auditar: %s" % exc
                 resumen["error_al_abrir"] += 1
+            # Seguidos, no en total: un documento con la red caída entre cien sanos
+            # no debe cortar la auditoría; dos seguidos ya huelen a algo general.
+            timeouts_seguidos = timeouts_seguidos + 1 if resumen["timeout"] > timeout_previo else 0
+            if timeouts_seguidos >= _CORTE_TIMEOUTS_SEGUIDOS:
+                cortada = True
+                aviso_capas = (
+                    "PASADA 2 CORTADA tras %d timeouts seguidos (de %d s cada uno): el resto "
+                    "de documentos NO se ha abierto y va marcado con sin_abrir=true. Cuando "
+                    "todo agota el timeout, la causa no suele ser el documento. Mira si hay "
+                    "python.exe de ArcGIS huérfanos (tasklist) y si responden las unidades de "
+                    "red de las capas; luego repite, o sube timeout_por_documento."
+                    % (timeouts_seguidos, timeout_por_documento))
 
         resultados.append(fila)
 

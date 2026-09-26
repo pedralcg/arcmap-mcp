@@ -5,8 +5,8 @@
 > lista existen solo para lo **repetitivo y de alto valor** —sobre todo las series de
 > planos (Data Driven Pages)—, no para replicar toda la API.
 
-**60 herramientas** sobre ArcMap 10.5. Unas **36 están cubiertas por la regresión en sesión
-viva** (`tests/regresion_sesion_viva.py`, 114 comprobaciones); el resto se ha ejercitado a
+**66 herramientas** sobre ArcMap 10.5. Unas **42 están cubiertas por la regresión en sesión
+viva** (`tests/regresion_sesion_viva.py`, 194 comprobaciones); el resto se ha ejercitado a
 mano en trabajo real, pero **no automáticamente**. El README, en «Herramientas MCP», explica
 por qué la distinción importa.
 
@@ -32,7 +32,7 @@ normal falla, que es cuando más falta hace saber algo.
 | Tool | Qué hace |
 |---|---|
 | `describe_mxd` | Versión declarada de un `.mxd` **sin abrirlo**, más un veredicto frente a la versión de ArcMap. Milisegundos, sin arcpy y sin licencia |
-| `audit_folder` | Inventario de TODOS los `.mxd` de una carpeta: versión, capas, fuentes rotas y definition queries |
+| `audit_folder` | Inventario de TODOS los `.mxd` de una carpeta: versión, capas, fuentes rotas y definition queries, **separando lo que sale en el plano** (capa y grupos encendidos, marco dentro de la hoja) de lo que solo está en el documento |
 
 **`describe_mxd` descarta tanto como acusa.** `arcpy.mapping.MapDocument()` falla con un
 mensaje genérico ("no puede abrir documento de mapa") que vale igual para una ruta mala, un
@@ -41,14 +41,24 @@ de tu ArcMap, ahí está la causa; si coincide, la versión queda **descartada**
 otra cosa. Ojo con lo que no garantiza: es lo que el documento dice de sí mismo, no
 necesariamente la versión de la aplicación que lo grabó.
 
-**⚠️ `audit_folder` con `con_capas=True` exige ArcMap CERRADO.** El arcpy standalone se
-**bloquea al abrir un documento mientras ArcMap tiene tomada la licencia de Desktop**: el
-mismo `.mxd` abre en 0,7 s con ArcMap cerrado y sigue bloqueado a los 180 s con ArcMap
-abierto. Y no se ve venir, porque `import arcpy` tarda lo mismo en ambos casos. La
-herramienta lo detecta y omite esa pasada explicando por qué; se fuerza con
-`forzar_con_arcmap_abierto=True`, pero entonces cada documento agotará su timeout sin dar
-nada. Abre cada documento en un **proceso aparte con timeout**, así que uno atascado no
-arrastra al resto, y **anuncia siempre lo que trunca**.
+**`audit_folder` cuenta dos veces, y el número que importa es el del plano.**
+`num_rotas_en_plano` y `num_con_query_en_plano` (por documento y sumados en `resumen`) solo
+cuentan capas que se dibujan: encendidas ellas y todos sus grupos (`visible_efectivo`) y en un
+marco que cae al menos en parte en la hoja (`marcos[].en_pagina`: `dentro` / `parcial` /
+`fuera`). Los totales `num_rotas` y `num_con_query` siguen ahí, pero en una serie real
+arrastran grupos apagados y «Nuevo marco de datos» olvidados fuera de la hoja: en una serie
+real de siete planos, 335 capas rotas en total y 30 en los planos. Un `None` es «no se pudo leer», no
+«apagada», y se cuenta en `num_en_plano_desconocido`. No se mira el rango de escalas de la
+capa (arcpy.mapping 10.x no lo expone).
+
+**`audit_folder` funciona con ArcMap abierto** (desde la 2.15.0). Hasta entonces se negaba,
+por una medición en la que el mismo `.mxd` pasó de 0,7 s a más de 180 s bloqueado con ArcMap
+abierto. No se ha vuelto a reproducir: el mismo documento abre en ~8,5 s con ArcMap cerrado,
+abierto con ese mismo `.mxd` y congelado. La protección mira ahora al síntoma: abre cada
+documento en un **proceso aparte con timeout**, así que uno atascado no arrastra al resto, y
+tras **dos timeouts seguidos** corta la pasada de capas para lo que queda, marcándolo con
+`sin_abrir` y explicándolo en `aviso_capas`. Siempre **anuncia lo que trunca**.
+`forzar_con_arcmap_abierto` se acepta por compatibilidad y ya no hace nada.
 
 ---
 
@@ -178,11 +188,25 @@ respetan definition query y selección, igual que la tabla de atributos).
 | `list_fields` | Campos de capa/tabla (nombre, tipo) |
 | `get_layer_info` | Detalle de una capa: campos, tipo geom, extent, CRS, count |
 | `get_layer_features` | Lee FILAS de atributos (respeta def. query/selección). `limite` entre 1 y 5000; admite campos de una tabla unida |
-| `add_layer` | Añade capa desde shp/fgdb/ráster/`.lyr` al df. `en_leyenda=False`: no entra en la leyenda del plano (las leyendas de ArcMap añaden solas cada capa nueva) |
+| `add_layer` | Añade capa desde shp/fgdb/ráster/`.lyr` o **URL WMS** al df. `en_leyenda=False`: no entra en la leyenda del plano (las leyendas de ArcMap añaden solas cada capa nueva). `visible=False`: entra apagada. En un WMS, `subcapas` elige qué encender (sin ella, todas) |
 | `add_group` | Crea una capa de **grupo** vacía (en la raíz o dentro de otro grupo), encendida o apagada y, si se quiere, fuera de la leyenda |
 | `remove_layer` | Quita capa por nombre |
+| `move_layer` | Recoloca una capa o grupo **sin quitarla**: `BEFORE`/`AFTER` de una `referencia` (cambiando de grupo si hace falta) o `TOP`/`BOTTOM` de un `grupo` (`"/"` = raíz). Devuelve el orden del grupo leído de vuelta |
 | `apply_symbology_from_layer` | Aplica un `.lyr` (estilos canónicos) a una capa |
 | `set_scale` | Fija la escala del df activo |
+
+**Servicios WMS.** `add_layer` con una URL conecta el servicio (`WMSConnectionName`) y
+enciende las subcapas: un WMS recién conectado en ArcMap 10.5 las trae **todas apagadas**, y
+encender solo el nodo padre no pinta nada. Se encienden las pedidas en `subcapas` (por nombre
+o ruta `Grupo/Subcapa`) con los grupos que las contienen, o todas. Una subcapa que no existe
+es error antes de tocar la TOC. Con un WMS encendido, cada zoom o captura lo redibuja por la
+red en el hilo único de ArcMap: al montar un documento, añádelo con `visible=False` y
+enciéndelo al final.
+
+**Reordenar sin perder nada.** `move_layer` mueve el mismo objeto de capa
+(`IMapLayers.MoveLayerEx`): simbología, etiquetas y entradas de leyenda se quedan. Antes, la
+única vía para meter un grupo entre otros dos era quitar las capas de debajo y volver a
+añadirlas, que pierde la simbología que no venga de un `.lyr`.
 
 ---
 
@@ -199,6 +223,37 @@ respuesta lo avisa y te manda aquí.
 | `set_unique_values_symbology` | Categorías por valores únicos de un campo (capas de ENTIDADES) |
 | `set_raster_symbology` | RÁSTER: `modo="clasificado"` (2-32 clases), `"estirado"` (rampa continua) o `"unico"` (un color por valor de píxel) |
 | `apply_symbology_from_layer` | Aplica un `.lyr` plantilla ya preparado |
+| `set_single_symbology` | **Un solo símbolo** (sin clasificar) con los colores pedidos: relleno, borde y grosor, hueco, tamaño en puntos, transparencia. Sin colores sale gris neutro, siempre el mismo |
+| `edit_symbol` | Cambia **solo lo pedido** de la simbología que ya tiene la capa (símbolo único, valores únicos o rangos), sin rehacerla; `categoria` elige la clase. Sin nada que cambiar, la lee |
+| `list_style_symbols` | Sin `estilo`, los estilos `.style` **cargados** en ArcMap; con él (nombre o ruta), sus símbolos de relleno, línea o marcador con nombre y categoría, filtrables por `patron` |
+| `apply_style_symbol` | Pone a una capa, como símbolo único, un símbolo de un `.style` por su nombre. La clase sale de la geometría de la capa |
+| `set_labels` | Etiquetas de una capa de ENTIDADES: expresión, tamaño, color y halo; enciende o apaga. Devuelve cómo quedó cada clase **leída de la capa** y el motor del mapa (Maplex o estándar) |
+
+**Un color, sin rehacer la leyenda.** Antes de `set_single_symbology` no había forma de dejar
+una capa con un solo color: forzar la graduada o los valores únicos a un color pinta bien el
+mapa pero llena la tabla de contenidos con una entrada por entidad, y recargar la capa la trae
+con un color aleatorio. `edit_symbol` trabaja sobre una **copia** del símbolo de cada clase y
+cambia solo lo pedido, así que el tipo de símbolo, los patrones y las demás categorías no se
+tocan. Sin `categoria`, en una capa clasificada cambia lo común a todas (borde, grosor, tamaño,
+transparencia) y **se niega a cambiar el relleno de todas**, que borraría la clasificación. Lo
+que no aplica a la geometría (relleno en líneas, `tamano` en polígonos) es error, no se ignora.
+
+**Los estilos del usuario, sin tocar su galería.** `list_style_symbols` y `apply_style_symbol`
+leen los `.style` con la galería de estilos de ArcMap. Un `.style` que no estaba cargado se
+añade **solo mientras dura la llamada** y se quita al terminar, también si falla: las
+«Referencias de estilo» del usuario no se quedan cambiadas por una consulta. Los estilos de la
+instalación (`ESRI.style`) figuran en la galería con ruta relativa; la respuesta los devuelve
+siempre con la ruta completa. Si hay dos símbolos con el mismo nombre en categorías distintas,
+`apply_style_symbol` falla listándolas y pide `categoria_estilo`.
+
+**`set_labels` modifica las clases de etiquetas que ya tiene la capa; no las sustituye.**
+La vía obvia en ArcObjects, vaciar las clases y crear unas nuevas, tiene un fallo silencioso: en un
+mapa con **Maplex** la capa se queda sin etiquetas y sin error. Con el motor estándar esa vía sí
+pinta, pero modificar las existentes funciona con los dos y además conserva la fuente, la
+colocación y los filtros de cada clase. Solo si la capa no tiene ninguna clase se crea una (hace
+falta `expresion`), con las propiedades de colocación del motor del mapa. La regresión en vivo
+comprueba que las etiquetas **se dibujan** comparando la vista con ellas y sin ellas, porque la
+respuesta de la herramienta sola no delataría el fallo.
 
 Cada una acepta la capa que le toca y **redirige a la correcta si te equivocas**: pedir
 simbología ráster sobre un vectorial responde nombrando las dos alternativas, y al revés.
@@ -286,10 +341,20 @@ el menú de marcadores no se distinguen. La búsqueda por nombre ignora mayúscu
 | Tool | Qué hace | Modo |
 |---|---|---|
 | `run_geoprocessing` | Geoproceso por nombre punteado (`analysis.Buffer`, `management.GetCount`, `sa.Slope`…) + params, sin escribir código. Resuelve nombres de capa de la TOC (honra def. query/selección) | **nativo** — ocupa la interfaz mientras dura |
-| `save_mxd` | Guarda el .mxd en su ruta actual | nativo |
-| `save_mxd_as` | Guarda una copia en otra ruta (absoluta). **`sobrescribir=False` por defecto**: si el destino existe, falla sin tocarlo. Al regenerar una serie de .mxd, pasa `sobrescribir=True` | nativo |
+| `save_mxd` | Guarda el .mxd en su ruta actual. Predice las capas que perderán la ruta relativa (`capas_perderan_ruta`) y, con `verificar` o si predice alguna, **reabre** lo guardado y lista las rotas nuevas | nativo; la verificación, arcpy standalone |
+| `save_mxd_as` | Guarda una copia en otra ruta (absoluta). **`sobrescribir=False` por defecto**: si el destino existe, falla sin tocarlo. Al regenerar una serie de .mxd, pasa `sobrescribir=True`. Predice y verifica las rutas relativas como `save_mxd`, contra la carpeta de destino | nativo |
 | `list_broken_data_sources` | Capas y tablas standalone con ruta rota (muy común en ArcMap), de **todos** los data frames, con `data_frame` y `ruta` | nativo |
-| `repair_data_source` | Reapunta la fuente de una capa (verifica releyendo la fuente). Busca en todos los data frames; `data_frame` acota | nativo |
+| `repair_data_source` | Reapunta la fuente de una capa (verifica releyendo la fuente). Busca en todos los data frames; `data_frame` acota. Avisa (`aviso_ruta_relativa`) si la ruta nueva se va a perder al guardar | nativo |
+
+> **Reparada en memoria no es reparada en disco.** Con *Store relative pathnames*, ArcMap
+> 10.5 concatena sin normalizar la carpeta del .mxd y la ruta relativa del workspace de cada
+> capa (`C:\planos\..\..\datos`). Si esa cadena llega a **260 caracteres** (MAX_PATH), no
+> escribe el workspace: al reabrir la fuente es `\fichero.shp` y la capa está rota, aunque en
+> memoria se vea bien. No depende de la longitud del dato: en la medición del 2026-09-25 un
+> dato a 252 caracteres guardaba bien con el .mxd en una carpeta corta, y uno a 43 se perdía
+> con el .mxd en una carpeta de 247. Por eso `repair_data_source` avisa y `save_mxd` /
+> `save_mxd_as` predicen y, si hace falta, reabren. Arreglo: acortar la carpeta de los datos o
+> la del .mxd, o guardar ese .mxd con rutas absolutas.
 
 > **Multivalor en `run_geoprocessing`.** Un parámetro que admite varias entradas (Merge,
 > Union, Intersect…) se pasa como **lista dentro de `params`**:

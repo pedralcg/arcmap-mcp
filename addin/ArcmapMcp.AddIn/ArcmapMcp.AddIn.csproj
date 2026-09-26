@@ -15,7 +15,7 @@
          2026-08-27 se subió solo Config.xml y `ping` siguió diciendo 2.8.3 con la
          DLL nueva ya cargada, o sea el "binario desfasado" al revés: la versión
          mentía sobre código que sí estaba actualizado. Tocar siempre las dos. -->
-    <Version>2.14.0</Version>
+    <Version>2.15.0</Version>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <!-- Newtonsoft.Json.dll debe caer en bin\ para empaquetarlo en Install\ -->
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
@@ -96,6 +96,11 @@
     </Reference>
     <Reference Include="ESRI.ArcGIS.DataSourcesGDB">
       <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.DataSourcesGDB\v4.0_10.5.0.0__8fc3cc631e44ad86\ESRI.ArcGIS.DataSourcesGDB.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- add_layer de servicios WMS: WMSConnectionName -->
+    <Reference Include="ESRI.ArcGIS.GISClient">
+      <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.GISClient\v4.0_10.5.0.0__8fc3cc631e44ad86\ESRI.ArcGIS.GISClient.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="ESRI.ArcGIS.DataSourcesRaster">

@@ -3,9 +3,9 @@
 
   <Name>arcmap-mcp</Name>
   <AddInID>{51f4ce63-6bcf-49b2-ae3a-ba2c79ea3e1a}</AddInID>
-  <Description>Levanta/para el puente MCP dentro de ArcMap (socket 127.0.0.1:27179, o el puerto de ARCMAP_BRIDGE_PORT; siempre en local). Permite conducir la sesion viva de ArcMap desde un agente IA (Claude, etc.). Autor: Pedro Alcoba Gomez (pedralcg.dev).</Description>
-  <Version>2.14.0</Version>
-  <Author>Pedro Alcoba Gomez — pedralcg.dev · pedro@pedralcg.dev · GitHub @pedralcg</Author>
+  <Description>Levanta/para el puente MCP dentro de ArcMap (socket 127.0.0.1:27179, o el puerto de ARCMAP_BRIDGE_PORT; siempre en local). Permite conducir la sesion viva de ArcMap desde un agente IA (Claude, etc.). Autor: Pedro Alcoba Gómez (pedralcg.dev).</Description>
+  <Version>2.15.0</Version>
+  <Author>Pedro Alcoba Gómez — pedralcg.dev · pedro@pedralcg.dev · GitHub @pedralcg</Author>
   <Company>pedralcg.dev</Company>
   <Date>2026-09-20</Date>
   <Targets>
@@ -73,7 +73,7 @@
                 class="AboutMcpButton"
                 message="Informacion del autor de arcmap-mcp."
                 caption="Acerca de"
-                tip="Ficha del autor: Pedro Alcoba Gomez - pedralcg.dev"
+                tip="Ficha del autor: Pedro Alcoba Gómez - pedralcg.dev"
                 image="Images/about.png"
                 category="arcmap-mcp"
                 onDemand="false" />
