@@ -780,9 +780,13 @@ def op_least_cost_path(job):
 
 
 def _tool_arcpy(tool):
-    """'management.GetCount' o 'GetCount_management' -> (funcion arcpy, alias).
-    Error accionable si no existe: la llamada nativa dice lo mismo, y aqui un
-    getattr fallido daba un AttributeError que no nombraba la tool pedida."""
+    """'management.GetCount' o 'GetCount_management' -> (funcion, nombre, alias).
+
+    Por arcpy.gp.<Tool>_<alias>, NO por arcpy.<modulo>.<Tool>: en Spatial Analyst el
+    modulo es algebra de mapas, con otra firma (arcpy.sa.Slope(in_raster, ...) devuelve
+    un Raster y no admite ruta de salida), mientras que gp tiene la del geoprocesador,
+    la misma que la via nativa y la que se comprueba con Usage en el add-in.
+    Error accionable si no existe: la llamada nativa dice lo mismo."""
     tool = _u(tool or u"").strip()
     if u"." in tool:
         modulo, nombre = tool.split(u".", 1)
@@ -792,8 +796,10 @@ def _tool_arcpy(tool):
         raise ValueError(u"Indica 'tool' como 'modulo.Herramienta' (p. ej. "
                          u"'management.GetCount') o 'Herramienta_modulo'.")
     alias = u"3d" if modulo.lower() == u"ddd" else modulo.lower()
-    mod = getattr(arcpy, "ddd" if alias == u"3d" else str(alias), None)
-    fn = getattr(mod, str(nombre), None) if mod is not None else None
+    try:
+        fn = getattr(arcpy.gp, str(nombre + u"_" + alias))
+    except (AttributeError, UnicodeEncodeError):
+        fn = None
     if fn is None:
         raise ValueError(u"No existe la herramienta de geoproceso '%s'. Usa la forma "
                          u"de arcpy, 'modulo.Herramienta' (p. ej. 'management.GetCount')."
@@ -840,7 +846,8 @@ def op_geoprocessing(job):
         try:
             resultado = fn(*args)
         except TypeError as exc:
-            # Parametros de mas: la funcion arcpy los rechaza con un TypeError de Python.
+            # Red: los parametros de mas los rechaza ANTES el add-in con Usage, porque por
+            # arcpy.gp uno de mas se ignora y dos tumban este proceso (2026-09-26).
             try:
                 firma = _u(arcpy.Usage(str(nombre + u"_" + alias)))
             except Exception:

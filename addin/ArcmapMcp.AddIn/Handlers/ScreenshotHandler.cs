@@ -78,6 +78,18 @@ namespace ArcmapMcp.AddIn.Handlers
                 {
                     av.Output(hdc, dpi, ref outRect, null, cancel);
                 }
+                catch (Exception ex)
+                {
+                    // El mismo E_PENDING que en los export (ADR-007), visto aquí el
+                    // 2026-09-26 en la regresión. Se devuelve con el prefijo y el
+                    // servidor reintenta desde fuera, sin esperar en el hilo de ArcMap.
+                    if (!ExportHandlers.EsPendiente(ex))
+                        throw;
+                    throw new InvalidOperationException(ExportHandlers.Dibujando
+                        + "ArcMap aún está dibujando el mapa (E_PENDING, 0x8000000A): la captura no"
+                        + " se ha hecho. El servidor MCP reintenta solo; si ves este mensaje es que el"
+                        + " mapa no terminó de dibujar en su margen: espera y repite.", ex);
+                }
                 finally
                 {
                     export.FinishExporting();

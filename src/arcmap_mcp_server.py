@@ -796,7 +796,9 @@ def get_canvas_screenshot(modo: str = "vista", dpi: int = 96):
     `dpi` 96 por defecto (payload pequeño; sube para más detalle). Ideal en bucles de
     QA visual: aplicar un filtro/escala y "ver" el resultado.
     """
-    resp = _client.send("get_canvas_screenshot", {"modo": modo, "dpi": dpi})
+    # Por _exportar: la captura también llega con E_PENDING (`dibujando: `) si el mapa
+    # sigue dibujando, y se reintenta aquí, fuera de ArcMap (ADR-007).
+    resp = _exportar("get_canvas_screenshot", {"modo": modo, "dpi": dpi})
     if not resp.get("ok"):
         return resp  # error legible (sin puente, etc.)
     data = base64.b64decode(resp["result"]["imagen_b64"])

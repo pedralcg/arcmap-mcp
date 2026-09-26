@@ -6,7 +6,7 @@
 > planos (Data Driven Pages)—, no para replicar toda la API.
 
 **66 herramientas** sobre ArcMap 10.5. Unas **42 están cubiertas por la regresión en sesión
-viva** (`tests/regresion_sesion_viva.py`, 225 comprobaciones); el resto se ha ejercitado a
+viva** (`tests/regresion_sesion_viva.py`, 231 comprobaciones); el resto se ha ejercitado a
 mano en trabajo real, pero **no automáticamente**. El README, en «Herramientas MCP», explica
 por qué la distinción importa.
 

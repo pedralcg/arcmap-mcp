@@ -1139,10 +1139,22 @@ namespace ArcmapMcp.AddIn.Handlers
                 || parameters["anadir_al_mapa"].Type == JTokenType.Null
                 || (bool)parameters["anadir_al_mapa"];
 
+            string tool = (string)parameters["tool"];
+            if (string.IsNullOrEmpty(tool))
+                throw new ArgumentException(
+                    "Indica 'tool' (ej. 'management.CopyFeatures' o 'Buffer_analysis').");
+
             var traducidas = new JObject();
-            if (resolver)
+            JArray originales = args;
+            JObject t = StaDispatcher.Invoke(delegate
             {
-                JObject t = StaDispatcher.Invoke(delegate
+                // La firma se comprueba AQUÍ y no en el runner: con arcpy.gp un parámetro
+                // de más se ignora y dos tumban Python (violación de acceso, 2026-09-26).
+                string alias;
+                GeoprocessingHandlers.ComprobarFirma(new ESRI.ArcGIS.Geoprocessing.GeoProcessorClass(),
+                    tool, GeoprocessingHandlers.NombreGp(tool, out alias), originales.Count);
+                if (!resolver)
+                    return Protocol.Result(new JObject { ["params"] = originales });
                 {
                     IMxDocument doc;
                     IMap map = MapHandlers.FocusMap(out doc);
@@ -1161,11 +1173,11 @@ namespace ArcmapMcp.AddIn.Handlers
                             nuevos.Add(TraducirCapa(a, capas, traducidas));
                     }
                     return Protocol.Result(new JObject { ["params"] = nuevos });
-                }, StaStepTimeout, "traducir capas a rutas");
-                if (!(bool)t["ok"])
-                    return t;
-                args = (JArray)t["result"]["params"];
-            }
+                }
+            }, StaStepTimeout, "comprobar la firma y traducir capas a rutas");
+            if (!(bool)t["ok"])
+                return t;
+            args = (JArray)t["result"]["params"];
 
             var job = new JObject
             {

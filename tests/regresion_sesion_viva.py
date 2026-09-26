@@ -908,6 +908,22 @@ comprobar("fuera: explica el bloqueo de la sesion", "Usa otra ruta" in str((r or
           str((r or {}).get("error", ""))[:110])
 t("run_geoprocessing_fuera", {"tool": "management.NoExisteEstaTool", "params": ["x"]},
   espera_ok=False, nota="(tool inexistente)")
+# Spatial Analyst: por arcpy.sa.Slope (algebra de mapas) no habia ruta de salida; va por
+# arcpy.gp.Slope_sa, con la firma del geoprocesador.
+PEND_FUERA = DIR_FUERA + SEP + "pend.tif"
+t("run_geoprocessing_fuera", {"tool": "sa.Slope", "params": [RASTER, PEND_FUERA], "anadir_al_mapa": False},
+  nota="(Spatial Analyst)")
+comprobar("fuera: sa.Slope escribe su salida", os.path.exists(PEND_FUERA), PEND_FUERA)
+# Multivalor con un NOMBRE de capa dentro de la lista: viaja por la ruta de su fuente.
+r = t("run_geoprocessing_fuera", {"tool": "management.Merge",
+                                  "params": [[NOMBRE_VEC, BUF_FUERA], DIR_FUERA + SEP + "merge.shp"],
+                                  "anadir_al_mapa": False}, nota="(multivalor con nombre de capa)")
+r = t("run_geoprocessing_fuera", {"tool": "management.GetCount", "params": [DIR_FUERA + SEP + "merge.shp"]})
+comprobar("fuera: el merge tiene 48", ((r or {}).get("result") or {}).get("salidas") == ["48"],
+          str((r or {}).get("result"))[:110])
+# Dos parametros de mas por arcpy.gp tumbaban Python: los rechaza antes el add-in.
+t("run_geoprocessing_fuera", {"tool": "management.GetCount", "params": [VEC, "sobra", "sobra"]},
+  espera_ok=False, nota="(dos de mas: antes del runner)")
 t("run_geoprocessing_fuera", {"tool": "management.GetCount", "params": [VEC, "sobra"]},
   espera_ok=False, nota="(parametros de mas)")
 # Control: con definition query, fuera procesaria la fuente ENTERA. Tiene que negarse,

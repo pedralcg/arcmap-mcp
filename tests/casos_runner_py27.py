@@ -157,6 +157,15 @@ def _montar_arcpy():
         LLAMADAS.append(("CopyFeatures", salida))
         return _ResultFalso([salida])
     management.CopyFeatures = _copy
+
+    # arcpy.gp: lo que usa op_geoprocessing (la firma del geoprocesador). Un atributo
+    # que no existe da AttributeError, como el de verdad.
+    class _Gp(object):
+        pass
+    gp = _Gp()
+    gp.GetCount_management = _get_count
+    gp.CopyFeatures_management = _copy
+    arcpy.gp = gp
     arcpy.management = management
 
     sys.modules["arcpy"] = arcpy

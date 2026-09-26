@@ -84,7 +84,7 @@ firmas, ejemplos y los matices de ejecución de cada grupo).
 
 Qué significa «probado», que conviene decirlo con precisión:
 
-- `tests/regresion_sesion_viva.py` hace **225 comprobaciones contra una sesión de ArcMap
+- `tests/regresion_sesion_viva.py` hace **231 comprobaciones contra una sesión de ArcMap
   real** y cubre unas **42 de las 66** tools, con sus casos de error. 🔴 **Modifica el
   documento abierto** (añade capas, cambia simbología, lanza geoprocesos): se lanza contra
   un mxd de pruebas, nunca contra un proyecto.
@@ -453,8 +453,8 @@ admite `1024`–`65535`; un valor inválido se ignora con aviso en el log y se v
 - [x] Add-in .NET nativo (ArcObjects vía CLR, sin runtime Python embebido)
 - [x] 66 herramientas, incluido el análisis ambiental (índices espectrales, hidrología,
       curvas, perfiles 3D y ruta de mínimo coste) y series de planos reales de decenas
-      de páginas. Cobertura automática: 225 comprobaciones en sesión viva sobre ~42 de
-      ellas, más 91 tests sin ArcMap (ver «Herramientas MCP»)
+      de páginas. Cobertura automática: 231 comprobaciones en sesión viva sobre ~42 de
+      ellas, más 95 tests sin ArcMap (ver «Herramientas MCP»)
 - [x] Geoprocesos arcpy fuera de proceso: la GUI de ArcMap no se congela
 - [x] Cancelación de render/exports con ESC (`ITrackCancel`)
 - [x] Registrable en 5 clientes (Claude Code/Desktop, Gemini CLI, Antigravity, OpenCode)

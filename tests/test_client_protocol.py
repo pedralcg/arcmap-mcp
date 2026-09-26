@@ -615,6 +615,15 @@ class TestExportEsperaAlDibujoDesdeFuera(unittest.TestCase):
         self.assertEqual(servidor._client.llamadas, ["export_jpg"] * 3)
         self.assertIn("2 reintentos", r["result"]["aviso_dibujo"])
 
+    def test_la_captura_del_lienzo_tambien_reintenta(self):
+        """get_canvas_screenshot falló por E_PENDING en la regresión del 2026-09-26."""
+        import base64
+        png = {"ok": True, "result": {"imagen_b64": base64.b64encode(b"png").decode()}}
+        servidor._client = ClienteGuion([self.DIBUJANDO, png])
+        img = servidor.get_canvas_screenshot()
+        self.assertEqual(servidor._client.llamadas, ["get_canvas_screenshot"] * 2)
+        self.assertEqual(img.data, b"png")
+
     def test_sin_dibujando_no_hay_reintento_ni_aviso(self):
         servidor._client = ClienteGuion([dict(self.BIEN, result={"salida": "x.pdf"})])
         r = servidor.export_pdf(r"C:\x.pdf")
@@ -682,7 +691,17 @@ class TestGeoprocesoNoArrastraMensajesAjenos(unittest.TestCase):
         self.assertLess(self.run.index("gp.ClearMessages();"), self.run.index("gp.Execute("))
 
     def test_comprueba_la_firma_antes_de_ejecutar(self):
-        self.assertLess(self.run.index("MaxParametros("), self.run.index("gp.Execute("))
+        self.assertLess(self.run.index("ComprobarFirma("), self.run.index("gp.Execute("))
+
+    def test_fuera_de_arcmap_tambien_la_comprueba_antes_del_runner(self):
+        """Por arcpy.gp, dos parámetros de más tumban Python: la vía de fuera no puede
+        dejar la comprobación al runner (2026-09-26)."""
+        ruta = os.path.join(RAIZ, "addin", "ArcmapMcp.AddIn", "Handlers", "PythonHandlers.cs")
+        with open(ruta, encoding="utf-8") as fh:
+            cs = fh.read()
+        fuera = cs[cs.index("public static JObject GeoprocesoFuera("):]
+        self.assertLess(fuera.index("GeoprocessingHandlers.ComprobarFirma("),
+                        fuera.index('RunJob("geoprocessing"'))
 
 
 class TestGeoprocesoFueraDeArcMap(unittest.TestCase):
@@ -1053,8 +1072,9 @@ class TestContratoDeTools(unittest.TestCase):
         sueltas = []
         for bloque in bloques:
             cuerpo = bloque.split("@mcp.tool()")[0]
-            # _exportar es _client.send con el reintento de E_PENDING (los tres export).
-            if "_client.send" in cuerpo or "return _exportar(" in cuerpo:
+            # _exportar es _client.send con el reintento de E_PENDING (los tres export y,
+            # desde la 2.16.0, la captura del lienzo).
+            if "_client.send" in cuerpo or "_exportar(" in cuerpo:
                 continue
             nombre = ""
             for linea in cuerpo.strip().splitlines():
