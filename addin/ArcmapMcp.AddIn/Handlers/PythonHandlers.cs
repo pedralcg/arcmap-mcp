@@ -1101,6 +1101,114 @@ namespace ArcmapMcp.AddIn.Handlers
             return Ambiental("least_cost_path", parameters, "salida");
         }
 
+        /// <summary>
+        /// run_geoprocessing(fuera_de_arcmap=true): el geoproceso en el runner, con
+        /// ArcMap libre mientras corre. El camino nativo (GeoprocessingHandlers) congela
+        /// la interfaz porque ejecuta en el hilo de ArcMap.
+        ///
+        /// El precio es que el runner no ve la sesión: los nombres de capa de la TOC se
+        /// traducen aquí a la ruta de su fuente. Una capa con definition query o con
+        /// selección NO se traduce, porque el runner procesaría la fuente ENTERA y el
+        /// resultado sería otro sin avisar: se devuelve error y se remite al camino
+        /// nativo, que sí las respeta.
+        /// </summary>
+        public static JObject GeoprocesoFuera(JObject parameters)
+        {
+            JArray args = parameters["params"] as JArray ?? new JArray();
+            bool resolver = parameters["resolver_capas"] == null
+                || parameters["resolver_capas"].Type == JTokenType.Null
+                || (bool)parameters["resolver_capas"];
+            bool anadir = parameters["anadir_al_mapa"] == null
+                || parameters["anadir_al_mapa"].Type == JTokenType.Null
+                || (bool)parameters["anadir_al_mapa"];
+
+            var traducidas = new JObject();
+            if (resolver)
+            {
+                JObject t = StaDispatcher.Invoke(delegate
+                {
+                    IMxDocument doc;
+                    IMap map = MapHandlers.FocusMap(out doc);
+                    var capas = MapHandlers.Capas(map);
+                    var nuevos = new JArray();
+                    foreach (JToken a in args)
+                    {
+                        if (a.Type == JTokenType.Array)
+                        {
+                            var lista = new JArray();
+                            foreach (JToken el in (JArray)a)
+                                lista.Add(TraducirCapa(el, capas, traducidas));
+                            nuevos.Add(lista);
+                        }
+                        else
+                            nuevos.Add(TraducirCapa(a, capas, traducidas));
+                    }
+                    return Protocol.Result(new JObject { ["params"] = nuevos });
+                }, StaStepTimeout, "traducir capas a rutas");
+                if (!(bool)t["ok"])
+                    return t;
+                args = (JArray)t["result"]["params"];
+            }
+
+            var job = new JObject
+            {
+                ["tool"] = parameters["tool"],
+                ["params"] = args,
+                ["sobrescribir"] = parameters["sobrescribir"] ?? false,
+            };
+            JObject r = RunJob("geoprocessing", job, null);
+            if (!(bool)r["ok"])
+                return r;
+            JObject res = (JObject)r["result"];
+            res["fuera_de_arcmap"] = true;
+            if (traducidas.Count > 0)
+                res["capas_por_ruta"] = traducidas;
+            var anadidas = new JArray();
+            if (anadir && res["capas_salida"] is JArray)
+                foreach (JToken ruta in (JArray)res["capas_salida"])
+                    if (AddToMap((string)ruta))
+                        anadidas.Add(ruta);
+            res["anadidas_al_mapa"] = anadidas;
+            return r;
+        }
+
+        /// <summary>Nombre de capa de la TOC → ruta de su fuente (en el hilo de ArcMap).
+        /// Mismo criterio que la resolución nativa: lo que tiene pinta de ruta o de SQL
+        /// no se toca, y el nombre se compara sin mayúsculas.</summary>
+        private static JToken TraducirCapa(JToken a, System.Collections.Generic.List<ILayer> capas,
+                                           JObject traducidas)
+        {
+            if (a.Type != JTokenType.String)
+                return a;
+            string s = (string)a;
+            if (s.IndexOfAny(GeoprocessingHandlers.NoResolver) >= 0)
+                return a;
+            foreach (ILayer lyr in capas)
+            {
+                if (!string.Equals(lyr.Name, s, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                var def = lyr as IFeatureLayerDefinition;
+                if (def != null && !string.IsNullOrEmpty(def.DefinitionExpression))
+                    throw new ArgumentException("La capa '" + lyr.Name + "' tiene una definition query ("
+                        + def.DefinitionExpression + "). Fuera de ArcMap se procesaría la fuente ENTERA:"
+                        + " usa fuera_de_arcmap=false, que la respeta, o exporta antes lo filtrado.");
+                var sel = lyr as IFeatureSelection;
+                if (sel != null && sel.SelectionSet != null && sel.SelectionSet.Count > 0)
+                    throw new ArgumentException("La capa '" + lyr.Name + "' tiene " + sel.SelectionSet.Count
+                        + " entidades seleccionadas. Fuera de ArcMap se procesaría la fuente ENTERA:"
+                        + " usa fuera_de_arcmap=false, que respeta la selección, o limpia la selección.");
+                string workspace;
+                string ruta = DataAccess.RutaFuente(lyr, out workspace);
+                if (string.IsNullOrEmpty(ruta))
+                    throw new ArgumentException("La capa '" + lyr.Name + "' no tiene una fuente en disco"
+                        + " resoluble, así que el geoproceso fuera de ArcMap no podría abrirla."
+                        + " Pásale la ruta del dato o usa fuera_de_arcmap=false.");
+                traducidas[lyr.Name] = ruta;
+                return ruta;
+            }
+            return a;
+        }
+
         // calculate_geometry NO va por subprocess: la sesión viva mantiene un schema
         // lock sobre las fuentes cargadas en la TOC y AddGeometryAttributes añade
         // campos → nativo in-process en GeoprocessingHandlers.CalculateGeometry.

@@ -55,6 +55,27 @@ class _Env(object):
         self.scratchFolder = tempfile.gettempdir()
 
 
+TIPOS = {}             # ruta -> dataType que devolvera `arcpy.Describe`
+FALLA_GP = {}          # entrada -> mensaje con el que falla el GetCount de mentira
+
+
+class _Desc(object):
+    def __init__(self, tipo):
+        self.dataType = tipo
+
+
+class _ResultFalso(object):
+    def __init__(self, salidas):
+        self.salidas = salidas
+        self.outputCount = len(salidas)
+
+    def getOutput(self, i):
+        return self.salidas[i]
+
+    def getMessages(self):
+        return u"Completado"
+
+
 class _RasterFalso(object):
     def __init__(self, ruta=None):
         self.ruta = ruta
@@ -69,7 +90,7 @@ def _montar_arcpy():
     arcpy = types.ModuleType("arcpy")
     arcpy.env = _Env()
     arcpy.Exists = lambda ruta: ruta in EXISTENTES
-    arcpy.GetMessages = lambda: u"mensajes de mentira"
+    arcpy.GetMessages = lambda severidad=None: FALLA_GP.get("_ultimo", u"mensajes de mentira")
     arcpy.CheckExtension = lambda ext: "Available"
     arcpy.CheckOutExtension = lambda ext: None
     arcpy.CheckInExtension = lambda ext: None
@@ -115,7 +136,31 @@ def _montar_arcpy():
     sa.CostPath = _cost_path
     arcpy.sa = sa
 
+    class ExecuteError(Exception):
+        pass
+    arcpy.ExecuteError = ExecuteError
+    arcpy.Usage = lambda nombre: u"Usage: %s in_rows" % nombre
+    arcpy.Describe = lambda ruta: _Desc(TIPOS.get(ruta, u"File"))
+
+    management = types.ModuleType("arcpy.management")
+
+    def _get_count(in_rows):
+        # Firma fija de un parametro: con mas, Python da TypeError, como arcpy.
+        LLAMADAS.append(("GetCount", in_rows))
+        if in_rows in FALLA_GP:
+            FALLA_GP["_ultimo"] = FALLA_GP[in_rows]
+            raise ExecuteError(FALLA_GP[in_rows])
+        return _ResultFalso([u"24"])
+    management.GetCount = _get_count
+
+    def _copy(entrada, salida):
+        LLAMADAS.append(("CopyFeatures", salida))
+        return _ResultFalso([salida])
+    management.CopyFeatures = _copy
+    arcpy.management = management
+
     sys.modules["arcpy"] = arcpy
+    sys.modules["arcpy.management"] = management
     sys.modules["arcpy.mapping"] = mapping
     sys.modules["arcpy.da"] = da
     sys.modules["arcpy.ddd"] = ddd
@@ -836,6 +881,88 @@ def auditor_sin_tamano_de_pagina_no_adivina():
     assert salida["marcos"][0]["en_pagina"] is None, salida
     assert salida["capas"][0]["en_plano"] is None, salida
     assert salida["capas"][0]["visible_efectivo"] is True, salida
+
+
+# --------------------------------------------------------------------------- #
+# run_geoprocessing(fuera_de_arcmap=True) -> op_geoprocessing (2.16.0)
+# --------------------------------------------------------------------------- #
+
+def _gp(tool, params, **kw):
+    p = {"tool": tool, "params": params}
+    p.update(kw)
+    return runner.op_geoprocessing({"params": p})
+
+
+@caso
+def gp_fuera_forma_punteada_y_clasica():
+    del LLAMADAS[:]
+    assert _gp(u"management.GetCount", [u"a.shp"])["salidas"] == [u"24"]
+    assert _gp(u"GetCount_management", [u"a.shp"])["salidas"] == [u"24"]
+    assert LLAMADAS == [("GetCount", u"a.shp")] * 2, LLAMADAS
+
+
+@caso
+def gp_fuera_tool_inexistente_lo_dice():
+    try:
+        _gp(u"management.NoExiste", [u"x"])
+    except ValueError as ex:
+        assert u"No existe la herramienta" in unicode(ex), unicode(ex)
+        return
+    raise AssertionError("una tool inexistente tenia que fallar")
+
+
+@caso
+def gp_fuera_parametros_de_mas_dan_la_firma():
+    del LLAMADAS[:]
+    try:
+        _gp(u"management.GetCount", [u"a.shp", u"sobra"])
+    except ValueError as ex:
+        assert u"Usage: GetCount_management" in unicode(ex), unicode(ex)
+        assert LLAMADAS == [], LLAMADAS
+        return
+    raise AssertionError("con parametros de mas tenia que fallar")
+
+
+@caso
+def gp_fuera_no_sobrescribe_por_defecto():
+    ARCPY.env.overwriteOutput = True
+    _gp(u"management.GetCount", [u"a.shp"])
+    assert ARCPY.env.overwriteOutput is False, ARCPY.env.overwriteOutput
+    _gp(u"management.GetCount", [u"a.shp"], sobrescribir=True)
+    assert ARCPY.env.overwriteOutput is True, ARCPY.env.overwriteOutput
+
+
+@caso
+def gp_fuera_000258_con_sobrescribir_explica_el_bloqueo():
+    FALLA_GP[u"bloqueada.shp"] = u"ERROR 000258: Ya existe la salida"
+    try:
+        for sobrescribir, pista in ((True, True), (False, False)):
+            try:
+                _gp(u"management.GetCount", [u"bloqueada.shp"], sobrescribir=sobrescribir)
+            except ValueError as ex:
+                texto = unicode(ex)
+                assert u"000258" in texto, texto
+                assert (u"Usa otra ruta" in texto) == pista, (sobrescribir, texto)
+            else:
+                raise AssertionError("tenia que fallar")
+    finally:
+        FALLA_GP.clear()
+
+
+@caso
+def gp_fuera_capas_salida_solo_datos_que_existen():
+    EXISTENTES.clear()
+    TIPOS.clear()
+    EXISTENTES.add(u"C:\\s\\copia.shp")
+    TIPOS[u"C:\\s\\copia.shp"] = u"ShapeFile"
+    try:
+        assert _gp(u"management.CopyFeatures", [u"a.shp", u"C:\\s\\copia.shp"])["capas_salida"] \
+            == [u"C:\\s\\copia.shp"]
+        # un derivado (el recuento) no es una capa, aunque sea la salida
+        assert _gp(u"management.GetCount", [u"a.shp"])["capas_salida"] == []
+    finally:
+        EXISTENTES.clear()
+        TIPOS.clear()
 
 
 # --------------------------------------------------------------------------- #

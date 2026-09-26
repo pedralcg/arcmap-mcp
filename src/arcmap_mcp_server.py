@@ -1447,7 +1447,8 @@ def repair_data_source(capa: str, ruta_antigua: str, ruta_nueva: str,
 
 @mcp.tool()
 def run_geoprocessing(tool: str, params: list = None,
-                      resolver_capas: bool = True) -> dict:
+                      resolver_capas: bool = True, fuera_de_arcmap: bool = False,
+                      anadir_al_mapa: bool = True, sobrescribir: bool = False) -> dict:
     """
     Ejecuta un geoproceso por nombre NOMINAL sin escribir código (paridad con el MCP de
     ArcGIS Pro). `tool` admite forma punteada por toolbox (`management.CopyFeatures`,
@@ -1467,9 +1468,31 @@ def run_geoprocessing(tool: str, params: list = None,
     definition query y su selección (en un multivalor viaja una cadena, no el objeto
     Layer). Si necesitas respetarlas, expórtala antes o pásala como argumento suelto.
 
-    Nota: un geoproceso largo congela la GUI de ArcMap (hilo único, limitación conocida);
-    se usa un timeout amplio (ARCMAP_GP_TIMEOUT) para no cortar la espera.
+    Una tool que no existe o con parámetros de más da error ANTES de ejecutar (el
+    geoprocesador ignoraba los de más y devolvía ok).
+
+    Por defecto el geoproceso corre DENTRO de ArcMap y congela su interfaz mientras
+    dura. `fuera_de_arcmap=True` lo lanza con el arcpy de ArcGIS en otro proceso y
+    ArcMap queda libre; úsalo con geoprocesos largos sobre datos en disco. Diferencias:
+    - las capas de la TOC se pasan por la RUTA de su fuente (`capas_por_ruta` en la
+      respuesta); una capa con definition query o selección da error en vez de
+      procesarse entera sin avisar;
+    - `anadir_al_mapa` (defecto True) añade al mapa las salidas que son capas;
+    - `sobrescribir=False` (defecto): una salida que ya existe falla antes de calcular.
+      Con True tampoco se puede sobrescribir un dato que esté o haya estado cargado
+      en esta sesión: ArcMap lo mantiene bloqueado aunque se quite del mapa;
+    - arrancar el arcpy de fuera cuesta ~10 s fijos: para geoprocesos cortos, mejor
+      dentro.
+    Dentro de ArcMap, `anadir_al_mapa` y `sobrescribir` no se usan (manda la
+    configuración de geoprocesamiento de ArcMap).
     """
+    if fuera_de_arcmap:
+        return _client.send("run_geoprocessing_fuera",
+                            {"tool": tool, "params": params or [],
+                             "resolver_capas": resolver_capas,
+                             "anadir_al_mapa": anadir_al_mapa,
+                             "sobrescribir": sobrescribir},
+                            timeout=FONDO_TIMEOUT)
     return _client.send("run_geoprocessing",
                         {"tool": tool, "params": params or [],
                          "resolver_capas": resolver_capas},

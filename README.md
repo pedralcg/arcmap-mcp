@@ -84,7 +84,7 @@ firmas, ejemplos y los matices de ejecución de cada grupo).
 
 Qué significa «probado», que conviene decirlo con precisión:
 
-- `tests/regresion_sesion_viva.py` hace **194 comprobaciones contra una sesión de ArcMap
+- `tests/regresion_sesion_viva.py` hace **222 comprobaciones contra una sesión de ArcMap
   real** y cubre unas **42 de las 66** tools, con sus casos de error. 🔴 **Modifica el
   documento abierto** (añade capas, cambia simbología, lanza geoprocesos): se lanza contra
   un mxd de pruebas, nunca contra un proyecto.
@@ -374,7 +374,9 @@ admite `1024`–`65535`; un valor inválido se ignora con aviso en el log y se v
   de ArcMap (`execute_arcpy`, las 3 de Data Driven Pages y el análisis ambiental) **no
   congelan la interfaz**: puedes seguir trabajando mientras duran. En cambio
   `run_geoprocessing` (nativo, dentro de ArcMap) y los exports/render sí ocupan el
-  hilo de la interfaz mientras se ejecutan — igual que si los lanzaras a mano. El
+  hilo de la interfaz mientras se ejecutan — igual que si los lanzaras a mano. Para un
+  geoproceso largo sobre datos en disco, `run_geoprocessing(fuera_de_arcmap=True)` lo
+  lanza aparte (unos 10 s fijos de arranque; las capas viajan por la ruta de su fuente). El
   render y los exports se pueden cancelar con **ESC**.
 - **Semántica de snapshot.** Las herramientas out-of-process trabajan sobre una
   **copia temporal del .mxd** con el estado actual de la sesión: leen el documento
@@ -444,8 +446,8 @@ admite `1024`–`65535`; un valor inválido se ignora con aviso en el log y se v
 - [x] Add-in .NET nativo (ArcObjects vía CLR, sin runtime Python embebido)
 - [x] 66 herramientas, incluido el análisis ambiental (índices espectrales, hidrología,
       curvas, perfiles 3D y ruta de mínimo coste) y series de planos reales de decenas
-      de páginas. Cobertura automática: 194 comprobaciones en sesión viva sobre ~42 de
-      ellas, más 84 tests sin ArcMap (ver «Herramientas MCP»)
+      de páginas. Cobertura automática: 222 comprobaciones en sesión viva sobre ~42 de
+      ellas, más 89 tests sin ArcMap (ver «Herramientas MCP»)
 - [x] Geoprocesos arcpy fuera de proceso: la GUI de ArcMap no se congela
 - [x] Cancelación de render/exports con ESC (`ITrackCancel`)
 - [x] Registrable en 5 clientes (Claude Code/Desktop, Gemini CLI, Antigravity, OpenCode)

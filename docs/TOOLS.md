@@ -6,7 +6,7 @@
 > planos (Data Driven Pages)—, no para replicar toda la API.
 
 **66 herramientas** sobre ArcMap 10.5. Unas **42 están cubiertas por la regresión en sesión
-viva** (`tests/regresion_sesion_viva.py`, 194 comprobaciones); el resto se ha ejercitado a
+viva** (`tests/regresion_sesion_viva.py`, 222 comprobaciones); el resto se ha ejercitado a
 mano en trabajo real, pero **no automáticamente**. El README, en «Herramientas MCP», explica
 por qué la distinción importa.
 
@@ -340,7 +340,7 @@ el menú de marcadores no se distinguen. La búsqueda por nombre ignora mayúscu
 
 | Tool | Qué hace | Modo |
 |---|---|---|
-| `run_geoprocessing` | Geoproceso por nombre punteado (`analysis.Buffer`, `management.GetCount`, `sa.Slope`…) + params, sin escribir código. Resuelve nombres de capa de la TOC (honra def. query/selección) | **nativo** — ocupa la interfaz mientras dura |
+| `run_geoprocessing` | Geoproceso por nombre punteado (`analysis.Buffer`, `management.GetCount`, `sa.Slope`…) + params, sin escribir código. Resuelve nombres de capa de la TOC (honra def. query/selección). Una tool inexistente o con parámetros de más da error **antes** de ejecutar | **nativo** — ocupa la interfaz mientras dura. Con `fuera_de_arcmap=True`, **out-of-process**: ArcMap libre, las capas viajan por la ruta de su fuente (con def. query o selección se niega), `anadir_al_mapa` y `sobrescribir` |
 | `save_mxd` | Guarda el .mxd en su ruta actual. Predice las capas que perderán la ruta relativa (`capas_perderan_ruta`) y, con `verificar` o si predice alguna, **reabre** lo guardado y lista las rotas nuevas | nativo; la verificación, arcpy standalone |
 | `save_mxd_as` | Guarda una copia en otra ruta (absoluta). **`sobrescribir=False` por defecto**: si el destino existe, falla sin tocarlo. Al regenerar una serie de .mxd, pasa `sobrescribir=True`. Predice y verifica las rutas relativas como `save_mxd`, contra la carpeta de destino | nativo |
 | `list_broken_data_sources` | Capas y tablas standalone con ruta rota (muy común en ArcMap), de **todos** los data frames, con `data_frame` y `ruta` | nativo |

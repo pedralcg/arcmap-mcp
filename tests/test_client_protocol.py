@@ -643,6 +643,44 @@ class TestGeoprocesoNoArrastraMensajesAjenos(unittest.TestCase):
         self.assertLess(self.run.index("MaxParametros("), self.run.index("gp.Execute("))
 
 
+class TestGeoprocesoFueraDeArcMap(unittest.TestCase):
+    """`fuera_de_arcmap` elige el comando; sin él, la llamada es la de siempre."""
+
+    def setUp(self):
+        self.original = servidor._client
+        self.addCleanup(setattr, servidor, "_client", self.original)
+
+    def _llamar(self, **kw):
+        enviados = []
+
+        class Cliente(object):
+            def send(self, ctype, params=None, timeout=None):
+                enviados.append((ctype, params, timeout))
+                return {"ok": True, "result": {}}
+        servidor._client = Cliente()
+        servidor.run_geoprocessing("management.GetCount", ["a.shp"], **kw)
+        return enviados[0]
+
+    def test_por_defecto_dentro_y_con_el_contrato_de_siempre(self):
+        ctype, params, timeout = self._llamar()
+        self.assertEqual(ctype, "run_geoprocessing")
+        self.assertEqual(set(params), {"tool", "params", "resolver_capas"})
+        self.assertEqual(timeout, servidor.GP_TIMEOUT)
+
+    def test_fuera_va_al_comando_de_fondo_con_sus_opciones(self):
+        ctype, params, timeout = self._llamar(fuera_de_arcmap=True, sobrescribir=True)
+        self.assertEqual(ctype, "run_geoprocessing_fuera")
+        self.assertIs(params["sobrescribir"], True)
+        self.assertIs(params["anadir_al_mapa"], True)
+        self.assertEqual(timeout, servidor.FONDO_TIMEOUT)
+
+    def test_el_comando_existe_en_el_add_in(self):
+        ruta = os.path.join(RAIZ, "addin", "ArcmapMcp.AddIn", "McpServer.cs")
+        with open(ruta, encoding="utf-8") as fh:
+            self.assertIn('{ "run_geoprocessing_fuera", Handlers.PythonHandlers.GeoprocesoFuera }',
+                          fh.read())
+
+
 class TestSetLabelsParametros(unittest.TestCase):
     """`set_labels` solo toca lo que se pasa: un None que llegara al add-in como
     null sería indistinguible de «quítalo». Por `call_tool`, como una llamada real,

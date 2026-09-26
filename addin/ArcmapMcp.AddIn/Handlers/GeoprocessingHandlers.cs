@@ -20,7 +20,7 @@ namespace ArcmapMcp.AddIn.Handlers
     {
         // Guard de resolución: strings con pinta de ruta o de SQL no se resuelven
         // a capa (un nombre de campo o keyword que coincida se sustituiría en silencio).
-        private static readonly char[] NoResolver = "\\/:*?\"<>|='".ToCharArray();
+        internal static readonly char[] NoResolver = "\\/:*?\"<>|='".ToCharArray();
 
         // Módulo arcpy -> alias de toolbox del GeoProcessor: coinciden salvo ddd.
         private static string AliasToolbox(string moduloArcpy)

@@ -882,6 +882,51 @@ r = t("run_geoprocessing", {"tool": "management.GetCount", "params": [VEC]})
 salida_gp = (r or {}).get("result") or {}
 comprobar("GetCount valido tras los errores", salida_gp.get("salidas") == ["24"], str(salida_gp)[:110])
 
+sys.stdout.write("--- run_geoprocessing fuera de ArcMap (2.16.0) ---" + chr(10))
+# El servidor manda fuera_de_arcmap=True como 'run_geoprocessing_fuera'. Carpeta nueva en
+# cada pasada: ArcMap no suelta un dato que ha cargado aunque se quite la capa, asi que
+# reutilizar la de la pasada anterior daria ERROR 000258 por un motivo ajeno a la prueba.
+import uuid
+DIR_FUERA = "C:" + SEP + "temp" + SEP + "arcmap-mcp-regresion" + SEP + "fuera_" + uuid.uuid4().hex[:8]
+os.makedirs(DIR_FUERA)
+BUF_FUERA = DIR_FUERA + SEP + "buf.shp"
+r = t("run_geoprocessing_fuera", {"tool": "management.GetCount", "params": [VEC]}, nota="(por ruta)")
+f = (r or {}).get("result") or {}
+comprobar("fuera: GetCount da 24 y no añade nada",
+          f.get("salidas") == ["24"] and f.get("capas_salida") == [] and f.get("fuera_de_arcmap") is True,
+          str(f)[:110])
+r = t("run_geoprocessing_fuera", {"tool": "analysis.Buffer", "params": [NOMBRE_VEC, BUF_FUERA, "100 Meters"]},
+      nota="(capa por NOMBRE)")
+f = (r or {}).get("result") or {}
+comprobar("fuera: el nombre de capa viaja como ruta", NOMBRE_VEC in (f.get("capas_por_ruta") or {}), str(f)[:110])
+comprobar("fuera: la salida entra en el mapa", len(f.get("anadidas_al_mapa") or []) == 1, str(f)[:110])
+r = t("run_geoprocessing_fuera", {"tool": "analysis.Buffer", "params": [NOMBRE_VEC, BUF_FUERA, "100 Meters"]},
+      espera_ok=False, nota="(salida existente, sin sobrescribir)")
+r = t("run_geoprocessing_fuera", {"tool": "analysis.Buffer", "params": [NOMBRE_VEC, BUF_FUERA, "200 Meters"],
+                                  "sobrescribir": True}, espera_ok=False, nota="(salida cargada en la sesion)")
+comprobar("fuera: explica el bloqueo de la sesion", "Usa otra ruta" in str((r or {}).get("error", "")),
+          str((r or {}).get("error", ""))[:110])
+t("run_geoprocessing_fuera", {"tool": "management.NoExisteEstaTool", "params": ["x"]},
+  espera_ok=False, nota="(tool inexistente)")
+t("run_geoprocessing_fuera", {"tool": "management.GetCount", "params": [VEC, "sobra"]},
+  espera_ok=False, nota="(parametros de mas)")
+# Control: con definition query, fuera procesaria la fuente ENTERA. Tiene que negarse,
+# y la misma llamada dentro de ArcMap tiene que contar solo lo filtrado.
+t("set_definition_query", {"capa": NOMBRE_VEC, "query": "FID < 5"})
+r = t("run_geoprocessing_fuera", {"tool": "management.GetCount", "params": [NOMBRE_VEC]},
+      espera_ok=False, nota="(capa con definition query)")
+comprobar("fuera: se niega con definition query", "definition query" in str((r or {}).get("error", "")),
+          str((r or {}).get("error", ""))[:110])
+r = t("run_geoprocessing", {"tool": "management.GetCount", "params": [NOMBRE_VEC]}, nota="(dentro, control)")
+comprobar("dentro: la misma capa cuenta 5", ((r or {}).get("result") or {}).get("salidas") == ["5"],
+          str((r or {}).get("result"))[:110])
+t("set_definition_query", {"capa": NOMBRE_VEC, "query": ""})
+t("select_by_attribute", {"capa": NOMBRE_VEC, "where": "FID < 3"})
+t("run_geoprocessing_fuera", {"tool": "management.GetCount", "params": [NOMBRE_VEC]},
+  espera_ok=False, nota="(capa con seleccion)")
+t("clear_selection", {"capa": NOMBRE_VEC})
+t("remove_layer", {"capa": "buf"})
+
 sys.stdout.write("--- limpieza ---" + chr(10))
 t("remove_layer", {"capa": "real_NUEVO.tif"})
 t("remove_layer", {"capa": NOMBRE_VEC})

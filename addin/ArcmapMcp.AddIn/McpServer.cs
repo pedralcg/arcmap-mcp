@@ -514,6 +514,7 @@ namespace ArcmapMcp.AddIn
                 { "contours",             Handlers.PythonHandlers.Contours },
                 { "topographic_profile",  Handlers.PythonHandlers.TopographicProfile },
                 { "least_cost_path",      Handlers.PythonHandlers.LeastCostPath },
+                { "run_geoprocessing_fuera", Handlers.PythonHandlers.GeoprocesoFuera },
             };
 
         /// <summary>Cuántos comandos entiende el puente. Lo consume la ficha "Acerca de"
