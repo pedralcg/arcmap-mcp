@@ -591,17 +591,18 @@ namespace ArcmapMcp.AddIn.Handlers
         /// Medido el 2026-09-26: con ArcMap abierto, CIERTOS documentos bloquean al arcpy de
         /// fuera en cuanto los carga (ListDataFrames): se queda esperando una llamada COM a
         /// este ArcMap que no vuelve nunca. Con ArcMap cerrado el mismo documento abre en ~1 s,
-        /// y matar ArcMap lo desbloquea al instante. No es el add-in: sin él pasa igual. Lo
-        /// que lo dispara dentro del documento no está localizado (descartados capas, WMS,
-        /// https e imágenes del layout). Y deja secuela: al cerrar ArcMap, la ventana se va
-        /// pero el proceso no termina.
+        /// y matar ArcMap lo desbloquea al instante. No es el add-in: sin él pasa igual. El
+        /// disparador son los MARCOS OLE del layout (ver MarcosOle): lo que abre el documento
+        /// en sesión ya lo comprueba antes, así que esto queda para el código que abre OTROS
+        /// .mxd por ruta. Secuela: al cerrar ArcMap, la ventana se va pero el proceso no termina.
         /// </summary>
         private const string AvisoBloqueoCom =
-            " Si el documento abre en segundos con ArcMap CERRADO, puede ser un bloqueo conocido"
-            + " de ArcMap 10.5: con ArcMap abierto, algunos .mxd dejan al arcpy de fuera esperando"
-            + " a este ArcMap para siempre. Subir el timeout no sirve; ábrelo con ArcMap cerrado."
-            + " Ojo: tras esto, al cerrar ArcMap el proceso puede quedarse vivo y sin ventana; no"
-            + " hay nada que guardar, termínalo por PID.";
+            " Si abre otro .mxd, mira si tiene marcos OLE (objetos incrustados, p. ej. de Word):"
+            + " describe_mxd los cuenta sin abrirlo. Con ArcMap abierto, un .mxd con marcos OLE"
+            + " deja al arcpy de fuera esperando a este ArcMap para siempre; subir el timeout no"
+            + " sirve, ábrelo con ArcMap cerrado o quita esos marcos. Ojo: tras esto, al cerrar"
+            + " ArcMap el proceso puede quedarse vivo y sin ventana; no hay nada que guardar,"
+            + " termínalo por PID.";
 
         /// <summary>Lanza el runner con el job y devuelve su JSON de salida.
         /// Timeout duro con Kill: sin zombies de python.exe.</summary>
@@ -852,6 +853,18 @@ namespace ArcmapMcp.AddIn.Handlers
         private static JObject RunJobConSnapshot(string op, JObject parameters, bool serializarSesion = false,
                                                  TimeSpan? timeout = null)
         {
+            // Antes de copiar nada: con marcos OLE en el documento, el arcpy de fuera se
+            // cuelga al cargarlo mientras ArcMap está abierto (ver MarcosOle).
+            JObject ole = StaDispatcher.Invoke(delegate
+            {
+                IMxDocument doc;
+                MapHandlers.FocusMap(out doc);
+                MarcosOle.ComprobarAntesDeCopia(doc, "'" + op + "'");
+                return Protocol.Result(new JObject());
+            }, StaStepTimeout, "buscar marcos OLE");
+            if (!(bool)ole["ok"])
+                return ole;
+
             Instantanea snap = Snapshot(serializarSesion);
             try
             {

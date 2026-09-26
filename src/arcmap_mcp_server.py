@@ -18,6 +18,7 @@ import re
 import base64
 import socket
 import struct
+import uuid
 
 from mcp.server.fastmcp import FastMCP, Image
 
@@ -257,6 +258,46 @@ _MARCA = 0xFFFFFFFA  # de aquí arriba son marcas (ENDOFCHAIN, FREESECT, ...)
 
 def _mxd_version_declarada(ruta):
     """Devuelve (version, error). `version` es p.ej. '10.5'; None si no se pudo."""
+    streams, error = _mxd_streams(ruta, ("Version",))
+    if error:
+        return None, error
+    raw = streams.get("Version")
+    if raw is None:
+        return None, "el .mxd no tiene stream Version"
+    if len(raw) < 4:
+        return None, "el stream Version salió vacío"
+    nbytes = struct.unpack_from("<I", raw, 0)[0]
+    if nbytes <= 0 or nbytes > len(raw) - 4:
+        return None, "el stream Version tiene una longitud incoherente"
+    txt = raw[4:4 + nbytes].decode("utf-16-le", "replace").rstrip("\x00")
+    return (txt.strip() or None), (None if txt.strip() else "versión vacía")
+
+
+# Clase del marco OLE (objeto incrustado, p. ej. un documento de Word) en ArcMap 10.5. No
+# está en el registro: la sirve ArcMap desde su propio proceso, y por eso, con ArcMap
+# abierto, un arcpy de fuera que carga un .mxd con uno se queda esperando para siempre
+# (medido 2026-09-26; ver MarcosOle.cs). Leída del propio ArcMap con IPersist.GetClassID.
+_CLSID_MARCO_OLE = uuid.UUID("f6705e85-523b-11d1-86e7-0000f8751720").bytes_le
+
+
+def _mxd_marcos_ole(ruta):
+    """Devuelve (n, error): cuántos marcos OLE tiene el layout del .mxd, sin abrirlo.
+
+    El layout vive en `PageLayout` en lo que guarda ArcMap; lo que guarda ArcObjects desde
+    fuera (MapDocument.SaveAs) lo escribe en `Mx Document` y deja el `PageLayout` antiguo sin
+    tocar. Si hay `Mx Document`, manda ese. Validado contra 7 documentos (el plano del caso,
+    sus copias por ArcMap, arcpy y ArcObjects, y tres sin marcos)."""
+    streams, error = _mxd_streams(ruta, ("Mx Document", "PageLayout"))
+    if error:
+        return None, error
+    capa = streams.get("Mx Document") if "Mx Document" in streams else streams.get("PageLayout")
+    if capa is None:
+        return None, "el .mxd no tiene layout legible"
+    return capa.count(_CLSID_MARCO_OLE), None
+
+
+def _mxd_streams(ruta, nombres):
+    """Devuelve ({nombre: bytes}, error) con los streams de primer nivel pedidos que existan."""
     try:
         with open(ruta, "rb") as fh:
             datos = fh.read()
@@ -334,19 +375,12 @@ def _mxd_version_declarada(ruta):
                 n += 1
             return b"".join(out)[:size]
 
+        salida = {}
         for nombre, tipo, inicio, size in entradas:
-            if nombre != "Version" or tipo != 2 or size < 6:
+            if nombre not in nombres or tipo != 2:
                 continue
-            raw = leer_mini(inicio, size) if size < 4096 else leer_sectores(inicio, size)
-            if len(raw) < 4:
-                return None, "el stream Version salió vacío"
-            nbytes = struct.unpack_from("<I", raw, 0)[0]
-            if nbytes <= 0 or nbytes > len(raw) - 4:
-                return None, "el stream Version tiene una longitud incoherente"
-            txt = raw[4:4 + nbytes].decode("utf-16-le", "replace").rstrip("\x00")
-            return (txt.strip() or None), (None if txt.strip() else "versión vacía")
-
-        return None, "el .mxd no tiene stream Version"
+            salida[nombre] = leer_mini(inicio, size) if size < 4096 else leer_sectores(inicio, size)
+        return salida, None
     except (struct.error, IndexError, ValueError) as exc:
         return None, "estructura del .mxd ilegible: %s" % exc
 
@@ -1357,7 +1391,18 @@ def _tras_guardar(r, clave_ruta, verificar):
     res = r.get("result") or {}
     memoria = res.pop("rotas_en_memoria", None) or []
     if verificar or (verificar is None and res.get("capas_perderan_ruta")):
-        res["verificacion"] = _verificar_guardado(res.get(clave_ruta), memoria)
+        if res.get("marcos_ole"):
+            # Reabrir con el arcpy de fuera un .mxd con marcos OLE se cuelga mientras
+            # ArcMap está abierto (medido 2026-09-26; ver MarcosOle.cs): se avisa y no se lanza.
+            res["verificacion"] = {
+                "reabierto": False,
+                "motivo": ("el documento tiene %d marco(s) OLE (objetos incrustados, p. ej. de Word) y,"
+                           " con ArcMap abierto, el arcpy de fuera se queda colgado al cargarlo; ábrelo"
+                           " con ArcMap cerrado para comprobar las rutas, o quita esos marcos"
+                           % len(res["marcos_ole"])),
+            }
+        else:
+            res["verificacion"] = _verificar_guardado(res.get(clave_ruta), memoria)
     return r
 
 
@@ -1793,6 +1838,18 @@ def _clave_version(v):
         return ()
 
 
+def _arcmap_en_marcha():
+    """¿Hay algún ArcMap.exe corriendo en este equipo? Si no se puede saber, se asume que sí:
+    es lo prudente para no abrir un .mxd con marcos OLE (ver _CLSID_MARCO_OLE)."""
+    import subprocess
+    try:
+        out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq ArcMap.exe", "/NH"],
+                             capture_output=True, timeout=15).stdout.decode("utf-8", "replace")
+        return "arcmap.exe" in out.lower()
+    except (OSError, subprocess.SubprocessError):
+        return True
+
+
 def _arcmap_por_registro():
     """Versiones de ArcGIS Desktop según el registro: [(version, install_dir), ...].
 
@@ -1888,7 +1945,9 @@ def describe_mxd(ruta: str) -> dict:
     la versión queda DESCARTADA y hay que mirar otra cosa (fuentes de datos
     inaccesibles, permisos, ruta). Descartar vale tanto como acusar.
 
-    Devuelve `version_declarada`, `version_arcmap_local`, `veredicto` y `motivo`.
+    Devuelve `version_declarada`, `version_arcmap_local`, `veredicto` y `motivo`, y
+    `marcos_ole`: los objetos incrustados del layout, que con ArcMap abierto dejan
+    colgado a cualquier arcpy de fuera que abra el documento.
 
     LÍMITE, dicho claro: `version_declarada` es lo que el documento dice de sí
     mismo en su stream `Version`, no necesariamente la versión de la aplicación
@@ -1932,7 +1991,7 @@ def describe_mxd(ruta: str) -> dict:
         motivo = ("versión del documento: %s; ArcMap local: %s. No se pudieron comparar "
                   "(formato de versión no reconocido)." % (version, local))
 
-    return {
+    salida = {
         "ok": True,
         "ruta": ruta_abs,
         "tamano_bytes": os.path.getsize(ruta_abs),
@@ -1944,6 +2003,15 @@ def describe_mxd(ruta: str) -> dict:
         "aviso_version_local": ("'version_arcmap_local' se deduce de la instalación de "
                                 "ESTA máquina, no de la sesión conectada al puente."),
     }
+    n_ole, _err_ole = _mxd_marcos_ole(ruta_abs)
+    if n_ole is not None:
+        salida["marcos_ole"] = n_ole
+    if n_ole:
+        salida["aviso_marcos_ole"] = (
+            "tiene %d marco(s) OLE (objetos incrustados, p. ej. de Word). Con ArcMap abierto, "
+            "abrirlo con el arcpy de fuera (execute_arcpy, audit_folder, un script) se queda "
+            "colgado; en ArcMap abre bien, y con ArcMap cerrado también." % n_ole)
+    return salida
 
 
 # Lo que `audit_folder` copia del auditor a cada documento, y lo que suma en el
@@ -2096,6 +2164,9 @@ def audit_folder(ruta: str, con_capas: bool = True, timeout_por_documento: int =
     versiones: dict = {}
     timeouts_seguidos = 0
     cortada = False
+    # Solo se pregunta si algún documento tiene marcos OLE: es lo único que depende de que
+    # ArcMap esté abierto (desde la 2.15.0 la pasada 2 no mira a ArcMap para nada más).
+    arcmap_abierto = None
 
     for doc in documentos:
         version, err_version = _mxd_version_declarada(doc)
@@ -2111,8 +2182,24 @@ def audit_folder(ruta: str, con_capas: bool = True, timeout_por_documento: int =
             fila["problema_fichero"] = err_version
             resumen["ilegibles"] += 1
 
+        n_ole, _err_ole = _mxd_marcos_ole(doc)
+        if n_ole:
+            fila["marcos_ole"] = n_ole
+            resumen["con_marcos_ole"] = resumen.get("con_marcos_ole", 0) + 1
+            if con_capas and arcmap_abierto is None:
+                arcmap_abierto = _arcmap_en_marcha()
+
         if con_capas and cortada:
             fila["sin_abrir"] = True
+            resumen["sin_abrir"] += 1
+        elif con_capas and n_ole and arcmap_abierto:
+            # Abrirlo con el arcpy de fuera colgaría hasta el timeout y dejaría a ArcMap sin
+            # poder cerrarse (medido 2026-09-26; ver _CLSID_MARCO_OLE). Con ArcMap cerrado
+            # se abre sin problema, así que no se da por perdido: se dice cómo auditarlo.
+            fila["sin_abrir"] = True
+            fila["error_al_abrir"] = ("no se abre: tiene %d marco(s) OLE y ArcMap está abierto, y en "
+                                      "ese caso el arcpy de fuera se queda colgado al cargarlo. Repite "
+                                      "con ArcMap cerrado." % n_ole)
             resumen["sin_abrir"] += 1
         elif con_capas:
             timeout_previo = resumen["timeout"]

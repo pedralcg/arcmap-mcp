@@ -378,13 +378,16 @@ admite `1024`–`65535`; un valor inválido se ignora con aviso en el log y se v
   geoproceso largo sobre datos en disco, `run_geoprocessing(fuera_de_arcmap=True)` lo
   lanza aparte (unos 10 s fijos de arranque; las capas viajan por la ruta de su fuente). El
   render y los exports se pueden cancelar con **ESC**.
-- **Documentos que bloquean al arcpy de fuera con ArcMap abierto.** Es un fallo de ArcMap
-  10.5, no del add-in (pasa igual sin él): con ArcMap abierto, algunos `.mxd` dejan al
-  arcpy de fuera esperando una llamada a ese ArcMap que no vuelve nunca, mientras que con
-  ArcMap cerrado abren en un segundo. Afecta a lo que abre documentos fuera de ArcMap
-  (`execute_arcpy`, DDP, `audit_folder`): acaba en timeout, y el error lo explica. Qué
-  tienen esos documentos no está localizado. Secuela: al cerrar ArcMap, la ventana se va
-  pero el proceso sigue vivo y sin ventana. No hay nada que guardar: termínalo por PID.
+- **Documentos con marcos OLE (objetos incrustados, p. ej. de Word).** Es un fallo de ArcMap
+  10.5, no del add-in (pasa igual sin él): la clase del marco OLE la sirve ArcMap desde su
+  propio proceso, así que con ArcMap abierto un arcpy de fuera que carga ese `.mxd` se queda
+  esperando una llamada a ArcMap que no vuelve nunca (con ArcMap cerrado abre en un segundo).
+  El add-in los cuenta en el documento abierto y lo que abriría una copia fuera de ArcMap
+  (`execute_arcpy` con documento, DDP, la verificación de `save_mxd`) **se niega al momento**
+  diciendo dónde están; `describe_mxd` los cuenta sin abrir el fichero, y `audit_folder` no abre
+  con ArcMap abierto los que tienen. Suelen estar fuera de la página, donde no se imprimen:
+  borrarlos quita el problema. Si llega a pasar (un script que abre otro `.mxd`), al cerrar
+  ArcMap la ventana se va pero el proceso sigue vivo: no hay nada que guardar, termínalo por PID.
 - **Semántica de snapshot.** Las herramientas out-of-process trabajan sobre una
   **copia temporal del .mxd** con el estado actual de la sesión: leen el documento
   real (capas, definition queries, atlas), pero **sus cambios al documento no
@@ -454,7 +457,7 @@ admite `1024`–`65535`; un valor inválido se ignora con aviso en el log y se v
 - [x] 66 herramientas, incluido el análisis ambiental (índices espectrales, hidrología,
       curvas, perfiles 3D y ruta de mínimo coste) y series de planos reales de decenas
       de páginas. Cobertura automática: 231 comprobaciones en sesión viva sobre ~42 de
-      ellas, más 95 tests sin ArcMap (ver «Herramientas MCP»)
+      ellas, más 102 tests sin ArcMap (ver «Herramientas MCP»)
 - [x] Geoprocesos arcpy fuera de proceso: la GUI de ArcMap no se congela
 - [x] Cancelación de render/exports con ESC (`ITrackCancel`)
 - [x] Registrable en 5 clientes (Claude Code/Desktop, Gemini CLI, Antigravity, OpenCode)

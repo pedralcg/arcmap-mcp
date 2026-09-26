@@ -28,6 +28,7 @@ namespace ArcmapMcp.AddIn.Handlers
             int enRiesgo = Prediccion(doc, ruta, r);
             if (verificar || enRiesgo > 0)
                 r["rotas_en_memoria"] = RotasEnMemoria(doc);
+            AnotarMarcosOle(doc, r);
             app.SaveDocument(ruta);
             return Protocol.Result(r);
         }
@@ -112,8 +113,27 @@ namespace ArcmapMcp.AddIn.Handlers
             bool verificar = Parametros.LeerBool(parameters["verificar"], "verificar", false);
             if (Prediccion(doc, salida, r) > 0 || verificar)
                 r["rotas_en_memoria"] = RotasEnMemoria(doc);
+            AnotarMarcosOle(doc, r);
             app.SaveAsDocument(salida, true); // true = copia: el doc activo no cambia
             return Protocol.Result(r);
+        }
+
+        /// <summary>La verificación del guardado (la hace el servidor) reabre el .mxd con el
+        /// arcpy de fuera, y con marcos OLE eso se cuelga mientras ArcMap está abierto (ver
+        /// MarcosOle). Se avisa aquí para que el servidor no la lance. Best-effort: nunca
+        /// impide guardar.</summary>
+        private static void AnotarMarcosOle(IMxDocument doc, JObject r)
+        {
+            try
+            {
+                JArray m = MarcosOle.Buscar(doc);
+                if (m.Count > 0)
+                    r["marcos_ole"] = m;
+            }
+            catch (Exception ex)
+            {
+                Log.Info("No se pudieron contar los marcos OLE antes de guardar: " + ex.Message);
+            }
         }
     }
 }
