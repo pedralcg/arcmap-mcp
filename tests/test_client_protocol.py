@@ -646,6 +646,23 @@ class TestExportEsperaAlDibujoDesdeFuera(unittest.TestCase):
         self.assertNotIn("DoEvents()", cs, "la espera volvió al hilo de ArcMap")
 
 
+class TestTimeoutDelRunnerExplicaElBloqueoCom(unittest.TestCase):
+    """El error de timeout del runner decía que con ArcMap abierto no se bloqueaba, y el
+    2026-09-26 se midió lo contrario con un documento concreto. Que no vuelva."""
+
+    def setUp(self):
+        ruta = os.path.join(RAIZ, "addin", "ArcmapMcp.AddIn", "Handlers", "PythonHandlers.cs")
+        with open(ruta, encoding="utf-8") as fh:
+            self.cs = fh.read()
+
+    def test_no_niega_el_bloqueo_con_arcmap_abierto(self):
+        self.assertNotIn("que ArcMap esté abierto o colgado no lo", self.cs)
+
+    def test_el_aviso_va_en_el_error_de_timeout(self):
+        self.assertIn("const string AvisoBloqueoCom", self.cs)
+        self.assertIn("? AvisoBloqueoCom", self.cs)
+
+
 class TestGeoprocesoNoArrastraMensajesAjenos(unittest.TestCase):
     """Los mensajes del geoprocesador son del PROCESO, no de cada GeoProcessorClass: un
     geoproceso que fallaba antes de arrancar (tool inexistente) salía con el error del

@@ -378,6 +378,13 @@ admite `1024`–`65535`; un valor inválido se ignora con aviso en el log y se v
   geoproceso largo sobre datos en disco, `run_geoprocessing(fuera_de_arcmap=True)` lo
   lanza aparte (unos 10 s fijos de arranque; las capas viajan por la ruta de su fuente). El
   render y los exports se pueden cancelar con **ESC**.
+- **Documentos que bloquean al arcpy de fuera con ArcMap abierto.** Es un fallo de ArcMap
+  10.5, no del add-in (pasa igual sin él): con ArcMap abierto, algunos `.mxd` dejan al
+  arcpy de fuera esperando una llamada a ese ArcMap que no vuelve nunca, mientras que con
+  ArcMap cerrado abren en un segundo. Afecta a lo que abre documentos fuera de ArcMap
+  (`execute_arcpy`, DDP, `audit_folder`): acaba en timeout, y el error lo explica. Qué
+  tienen esos documentos no está localizado. Secuela: al cerrar ArcMap, la ventana se va
+  pero el proceso sigue vivo y sin ventana. No hay nada que guardar: termínalo por PID.
 - **Semántica de snapshot.** Las herramientas out-of-process trabajan sobre una
   **copia temporal del .mxd** con el estado actual de la sesión: leen el documento
   real (capas, definition queries, atlas), pero **sus cambios al documento no

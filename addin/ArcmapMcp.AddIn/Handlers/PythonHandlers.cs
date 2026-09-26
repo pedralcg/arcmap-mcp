@@ -587,6 +587,22 @@ namespace ArcmapMcp.AddIn.Handlers
                          + limiteUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm") + " borrados de " + carpeta);
         }
 
+        /// <summary>
+        /// Medido el 2026-09-26: con ArcMap abierto, CIERTOS documentos bloquean al arcpy de
+        /// fuera en cuanto los carga (ListDataFrames): se queda esperando una llamada COM a
+        /// este ArcMap que no vuelve nunca. Con ArcMap cerrado el mismo documento abre en ~1 s,
+        /// y matar ArcMap lo desbloquea al instante. No es el add-in: sin él pasa igual. Lo
+        /// que lo dispara dentro del documento no está localizado (descartados capas, WMS,
+        /// https e imágenes del layout). Y deja secuela: al cerrar ArcMap, la ventana se va
+        /// pero el proceso no termina.
+        /// </summary>
+        private const string AvisoBloqueoCom =
+            " Si el documento abre en segundos con ArcMap CERRADO, puede ser un bloqueo conocido"
+            + " de ArcMap 10.5: con ArcMap abierto, algunos .mxd dejan al arcpy de fuera esperando"
+            + " a este ArcMap para siempre. Subir el timeout no sirve; ábrelo con ArcMap cerrado."
+            + " Ojo: tras esto, al cerrar ArcMap el proceso puede quedarse vivo y sin ventana; no"
+            + " hay nada que guardar, termínalo por PID.";
+
         /// <summary>Lanza el runner con el job y devuelve su JSON de salida.
         /// Timeout duro con Kill: sin zombies de python.exe.</summary>
         private static JObject RunJob(string op, JObject parameters, string mxdSnapshot,
@@ -682,14 +698,15 @@ namespace ArcmapMcp.AddIn.Handlers
                             + ". Proceso terminado (sin zombies)."
                             + (fase != null && fase.StartsWith("abriendo documento")
                                 ? " Se quedó ABRIENDO EL DOCUMENTO. Abrir en sí NO es caro (medido 0,7 s"
-                                  + " en un .mxd de 36 capas), y que ArcMap esté abierto o colgado no lo"
-                                  + " bloquea (medido 2026-09-25). Mira si hay python.exe de ArcGIS"
+                                  + " en un .mxd de 36 capas). Mira si hay python.exe de ArcGIS"
                                   + " huérfanos de llamadas anteriores y si responden las unidades de red"
                                   + " de las capas antes de subir el timeout, que solo alarga la espera."
                                   + " Si tu código no usa mxd ni df, pasa usar_documento=false."
                                 : op == "execute_code"
                                     ? " Sube ARCMAP_EXEC_TIMEOUT (segundos) si la operación es legítimamente larga."
                                     : " Sube ARCMAP_SUBPROCESS_TIMEOUT (segundos) si la operación es legítimamente larga.")
+                            + (fase != null && (fase.StartsWith("abriendo documento") || fase.StartsWith("ejecutando"))
+                                ? AvisoBloqueoCom : "")
                             + " Evidencia conservada: " + jobPath);
                     }
                     // Con salida redirigida en asíncrono hay que rematar con un WaitForExit
