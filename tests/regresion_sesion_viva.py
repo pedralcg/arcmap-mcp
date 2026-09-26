@@ -858,6 +858,30 @@ if doc_mxd and doc_mxd.lower().endswith(".mxd") and PY27:
 else:
     sys.stdout.write("  [---] documento sin ruta .mxd o sin Python 2.7 de ArcGIS: bloque saltado" + chr(10))
 
+sys.stdout.write("--- run_geoprocessing: errores propios (2.16.0) ---" + chr(10))
+# El sintoma del informe de agosto: una tool INEXISTENTE fallaba antes de arrancar, sin
+# mensajes propios, y el error salia con los del geoproceso ANTERIOR (los mensajes del
+# geoprocesador son del proceso). Control: la llamada previa deja una marca unica en la
+# cola de mensajes, y la siguiente no puede nombrarla.
+MARCA_GP = "C:" + SEP + "temp" + SEP + "no_existe_MARCA_GP_2160.shp"
+t("run_geoprocessing", {"tool": "management.GetCount", "params": [MARCA_GP]},
+  espera_ok=False, nota="(deja la marca en los mensajes)")
+r = t("run_geoprocessing", {"tool": "management.NoExisteEstaTool", "params": ["x"]},
+      espera_ok=False, nota="(tool inexistente)")
+err = str((r or {}).get("error", ""))
+comprobar("tool inexistente no trae el error anterior", "MARCA_GP_2160" not in err, err[:110])
+comprobar("tool inexistente lo dice", "No existe la herramienta" in err, err[:110])
+# Parametros de mas: el geoprocesador los ignoraba y daba ok habiendo hecho otra cosa.
+r = t("run_geoprocessing", {"tool": "management.GetCount", "params": [VEC, "sobra", "sobra"]},
+      espera_ok=False, nota="(parametros de mas)")
+comprobar("parametros de mas: dice cuantos admite", "admite" in str((r or {}).get("error", "")),
+          str((r or {}).get("error", ""))[:110])
+# Y la misma tool con sus parametros justos sigue funcionando (control del control).
+r = t("run_geoprocessing", {"tool": "management.GetCount", "params": [VEC]})
+# (r or {}).get("result"), no res(r): mas arriba el script reutiliza `res` como variable.
+salida_gp = (r or {}).get("result") or {}
+comprobar("GetCount valido tras los errores", salida_gp.get("salidas") == ["24"], str(salida_gp)[:110])
+
 sys.stdout.write("--- limpieza ---" + chr(10))
 t("remove_layer", {"capa": "real_NUEVO.tif"})
 t("remove_layer", {"capa": NOMBRE_VEC})

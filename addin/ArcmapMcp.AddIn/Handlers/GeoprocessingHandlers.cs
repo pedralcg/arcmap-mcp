@@ -97,15 +97,31 @@ namespace ArcmapMcp.AddIn.Handlers
                 capas = MapHandlers.Capas(map);
             }
 
+            IGeoProcessor2 gp = new GeoProcessorClass();
+
+            // La firma de la tool, antes de nada. Sin esto, un nombre de tool que no
+            // existe fallaba en Execute ANTES de arrancar, sin escribir mensajes propios,
+            // y el error salía con los mensajes del geoproceso ANTERIOR: los mensajes
+            // del geoprocesador son del proceso, no de cada GeoProcessorClass.
+            // Reproducido el 2026-09-26 (era el «devuelve el error de la llamada
+            // anterior» del informe de uso de agosto).
+            int maxParams = MaxParametros(gp, tool, nombreGp);
+            if (maxParams >= 0 && args.Count > maxParams)
+                throw new ArgumentException(
+                    "'" + tool + "' admite " + maxParams + " parámetros y se han pasado " + args.Count
+                    + ". El geoprocesador ignora los de más sin avisar, así que no se ejecuta."
+                    + " Firma: " + gp.Usage(nombreGp));
+
             IVariantArray valores = new VarArrayClass();
             foreach (JToken a in args)
                 valores.Add(ResolverArg(a, resolverCapas, capas));
 
-            IGeoProcessor2 gp = new GeoProcessorClass();
             gp.AddOutputsToMap = true; // mismo comportamiento que arcpy dentro de ArcMap
             ESRI.ArcGIS.esriSystem.ITrackCancel cancel =
                 (ESRI.ArcGIS.esriSystem.ITrackCancel)new ESRI.ArcGIS.Display.CancelTrackerClass();
 
+            // Por la misma razón: lo que quede en la cola de mensajes es de otra llamada.
+            gp.ClearMessages();
             IGeoProcessorResult resultado;
             try
             {
@@ -113,8 +129,11 @@ namespace ArcmapMcp.AddIn.Handlers
             }
             catch (Exception ex)
             {
+                string mensajes = Mensajes(gp);
                 throw new InvalidOperationException(
-                    "Geoproceso '" + tool + "' falló: " + ex.Message + ". Mensajes GP: " + Mensajes(gp), ex);
+                    "Geoproceso '" + tool + "' falló: " + ex.Message + ". Mensajes GP: "
+                    + (string.IsNullOrWhiteSpace(mensajes)
+                        ? "(ninguno: el geoproceso no llegó a arrancar)" : mensajes), ex);
             }
 
             var salidas = new JArray();
@@ -263,6 +282,60 @@ namespace ArcmapMcp.AddIn.Handlers
                 }
             }
             return string.Join(";", partes);
+        }
+
+        /// <summary>
+        /// Número máximo de parámetros según la firma que da <c>Usage</c>, p. ej.
+        /// "Usage: GetCount_management in_rows" → 1. Lanza si la tool no existe. Devuelve -1
+        /// si la firma no se deja leer, y entonces no se comprueba nada: mejor no
+        /// validar que rechazar una llamada buena por un formato de firma inesperado.
+        /// </summary>
+        private static int MaxParametros(IGeoProcessor2 gp, string tool, string nombreGp)
+        {
+            string firma;
+            try
+            {
+                firma = gp.Usage(nombreGp);
+            }
+            catch (Exception ex)
+            {
+                throw new ArgumentException("No existe la herramienta de geoproceso '" + tool
+                    + "' (nombre GP '" + nombreGp + "'): " + ex.Message
+                    + ". Usa la forma de arcpy, 'modulo.Herramienta' (p. ej. 'management.GetCount').", ex);
+            }
+            // Con una tool inexistente Usage NO lanza: devuelve "Method X not found."
+            // (medido en 10.5, en inglés aunque ArcMap esté en español).
+            if (string.IsNullOrWhiteSpace(firma)
+                || firma.IndexOf(" not found", StringComparison.OrdinalIgnoreCase) >= 0)
+                throw new ArgumentException("No existe la herramienta de geoproceso '" + tool
+                    + "' (nombre GP '" + nombreGp + "'). Usa la forma de arcpy, 'modulo.Herramienta'"
+                    + " (p. ej. 'management.GetCount').");
+            return ContarParametros(firma);
+        }
+
+        /// <summary>Cuenta los parámetros de una firma de <c>Usage</c>, que en 10.5 es
+        /// "Usage: Buffer_analysis in_features out_feature_class {FULL | LEFT} {a;a...}":
+        /// tras el prefijo y el nombre, un parámetro por palabra, con los opcionales entre
+        /// llaves (que llevan espacios dentro). Devuelve -1 con cualquier otro formato.
+        /// Internal para poder probarlo sin ArcMap.</summary>
+        internal static int ContarParametros(string firma)
+        {
+            string s = firma.Trim();
+            if (!s.StartsWith("Usage:", StringComparison.OrdinalIgnoreCase))
+                return -1;
+            s = s.Substring("Usage:".Length);
+            int nivel = 0, n = 0;
+            bool enPalabra = false;
+            foreach (char c in s)
+            {
+                if (c == '{' || c == '[' || c == '(') nivel++;
+                else if (c == '}' || c == ']' || c == ')') nivel--;
+                bool blanco = char.IsWhiteSpace(c) && nivel == 0;
+                if (!blanco && !enPalabra) n++;
+                enPalabra = !blanco;
+            }
+            // La primera palabra es el nombre de la tool.
+            return nivel == 0 && n > 0 ? n - 1 : -1;
         }
 
         private static string Mensajes(IGeoProcessor2 gp)

@@ -621,6 +621,28 @@ class TestExportEsperaAlDibujoDesdeFuera(unittest.TestCase):
         self.assertNotIn("DoEvents()", cs, "la espera volvió al hilo de ArcMap")
 
 
+class TestGeoprocesoNoArrastraMensajesAjenos(unittest.TestCase):
+    """Los mensajes del geoprocesador son del PROCESO, no de cada GeoProcessorClass: un
+    geoproceso que fallaba antes de arrancar (tool inexistente) salía con el error del
+    anterior. Reproducido el 2026-09-26. El comportamiento se prueba en
+    `regresion_sesion_viva.py`; aquí se vigila que el arreglo no se pierda."""
+
+    def setUp(self):
+        ruta = os.path.join(RAIZ, "addin", "ArcmapMcp.AddIn", "Handlers",
+                            "GeoprocessingHandlers.cs")
+        with open(ruta, encoding="utf-8") as fh:
+            cs = fh.read()
+        ini = cs.index("public static JObject RunGeoprocessing(")
+        self.run = cs[ini:cs.index("public static JObject CalculateGeometry(")]
+
+    def test_vacia_los_mensajes_antes_de_ejecutar(self):
+        self.assertIn("gp.ClearMessages();", self.run)
+        self.assertLess(self.run.index("gp.ClearMessages();"), self.run.index("gp.Execute("))
+
+    def test_comprueba_la_firma_antes_de_ejecutar(self):
+        self.assertLess(self.run.index("MaxParametros("), self.run.index("gp.Execute("))
+
+
 class TestSetLabelsParametros(unittest.TestCase):
     """`set_labels` solo toca lo que se pasa: un None que llegara al add-in como
     null sería indistinguible de «quítalo». Por `call_tool`, como una llamada real,
