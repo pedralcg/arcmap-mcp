@@ -3,6 +3,55 @@
 Formato inspirado en [Keep a Changelog](https://keepachangelog.com/es/); versionado
 [SemVer](https://semver.org/lang/es/).
 
+## [2.16.0] - 2026-09-26
+
+La tanda de los fallos que esperaban un repro. En vez de esperar a que volvieran a pasar en
+uso real se buscaron a propósito, y se encontró la causa de todos: el «error del geoproceso
+anterior», el WinError 10054, el `execute_code` que no volvía nunca y la caída de ArcMap en
+Maplex. Además, `run_geoprocessing` puede correr fuera de ArcMap sin congelarlo.
+
+Verificado en sesión viva: **231/231** en la regresión general, **16 pasadas seguidas** sin
+una sola caída (8 en cada documento de prueba; antes caía 1 de cada 4-5), y `regresion_ddp.py`
+**14/14**; **102 tests** sin ArcMap y 50 casos del runner. Cada bloque nuevo lleva control: con
+la 2.15.0 falla en los mismos puntos.
+
+### Añadido
+- **`run_geoprocessing(fuera_de_arcmap=True)`**: el geoproceso corre con el arcpy de ArcGIS en
+  otro proceso y ArcMap queda libre (medido con una cuadrícula de 640.000 polígonos: 26 de 26
+  muestras respondiendo, frente a 10 de 13 dentro). Las capas de la TOC viajan por la ruta de
+  su fuente (`capas_por_ruta`) y, si tienen definition query o selección, se niega en vez de
+  procesar la fuente entera. `anadir_al_mapa` y `sobrescribir`. Arrancar el arcpy cuesta ~10 s
+  fijos: para geoprocesos cortos, mejor dentro. Sin el parámetro, nada cambia.
+- **`describe_mxd` cuenta los marcos OLE** (`marcos_ole`) sin abrir el fichero, y
+  **`audit_folder`** no abre con ArcMap abierto los documentos que los tienen, y dice por qué.
+
+### Corregido
+- **La caída de ArcMap en `MaplexAnnotation.dll`** (+0xD76B, puntero nulo al redibujar el
+  layout; también con la 2.14.0). ArcMap atiende mensajes mientras dibuja, y los comandos del
+  puente entraban en mitad de un dibujado: 72 por pasada de la regresión, 14 de ellos
+  `remove_layer`. Ahora, si hay un dibujado en curso, el comando espera a que termine (tope de
+  20 s). Coste medido: 65 s por pasada de la regresión, 4,2 s como mucho por comando.
+- **Los `.mxd` con marcos OLE dejaban colgado al arcpy de fuera** mientras ArcMap estaba
+  abierto, y después ArcMap no terminaba al cerrarlo. La clase del marco OLE la sirve ArcMap
+  desde su propio proceso: el arcpy de fuera le llamaba y la llamada no volvía. Era el
+  `execute_code` de nueve minutos del incidente del 27 de agosto: dos objetos de Word fuera
+  de la página. Ahora `execute_code` con documento, las tres de DDP y la verificación de
+  `save_mxd` se niegan al momento y dicen dónde están los marcos.
+- **`run_geoprocessing` devolvía el error del geoproceso anterior** con una tool inexistente:
+  los mensajes del geoprocesador son del proceso, no de cada `GeoProcessorClass`. Se comprueba
+  la firma con `Usage` antes de ejecutar (auditado contra las 977 tools de sistema: no rechaza
+  ninguna llamada válida) y se vacían los mensajes. Los **parámetros de más**, que se ignoraban
+  sin avisar, ahora son error.
+- **WinError 10054 con requests de más de 1 MB**: el add-in contestaba y cerraba sin leer el
+  resto, y Windows mandaba un RST en vez de la respuesta. El servidor ya no los envía y el
+  add-in lee el resto antes de contestar y lo anota en el log.
+- **`get_canvas_screenshot` con el mapa aún dibujando** (E_PENDING): reintenta desde el
+  servidor, como los export (ADR-007).
+
+### Conocido, sin arreglar
+- Un `execute_code` que abre por ruta **otro** `.mxd` con marcos OLE sigue pudiendo colgarse
+  con ArcMap abierto: el error de timeout lo explica y `describe_mxd` los cuenta antes.
+
 ## [2.15.0] - 2026-09-25
 
 La tanda de mejoras que pedían las series de planos de ID2018 y el montaje de un MXD real:
