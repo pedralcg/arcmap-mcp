@@ -98,6 +98,13 @@ EXEC_SESION_TIMEOUT = _Espera("ARCMAP_EXEC_SESION_TIMEOUT_CLIENTE", 1560)  # 600
 ESPERA_DIBUJO = _Espera("ARCMAP_ESPERA_DIBUJO", 120)
 _PAUSA_DIBUJO = 3
 
+# Tope del add-in para un request (MaxRequestBytes en McpServer.cs). Se mira AQUÍ, antes
+# de enviar: el add-in que recibe un request mayor contesta y cierra sin leer el resto, y
+# Windows convierte ese cierre en un RST. El cliente veía WinError 10054 en vez del motivo,
+# y el log del add-in no decía nada (reproducido el 2026-09-26 con un execute_code de
+# 1,1 MB; era el «crash del puente» del informe de uso de agosto).
+MAX_REQUEST_BYTES = 1024 * 1024
+
 
 class ArcMapClient:
     """Cliente socket hacia el puente dentro de ArcMap. Reconecta por comando."""
@@ -113,6 +120,16 @@ class ArcMapClient:
         según el tope que el add-in aplique a ESE comando."""
         eff = timeout or self.timeout
         msg = json.dumps({"type": ctype, "params": params or {}}).encode("utf-8")
+        if len(msg) > MAX_REQUEST_BYTES:
+            return {
+                "ok": False,
+                "error": (
+                    "Request DEMASIADO GRANDE: %d KB, y el puente admite %d KB. No se ha "
+                    "enviado. Si estás mandando datos a granel dentro de 'code', escríbelos "
+                    "a un fichero y que el código los lea de ahí."
+                    % (len(msg) // 1024, MAX_REQUEST_BYTES // 1024)
+                ),
+            }
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(eff)
         try:

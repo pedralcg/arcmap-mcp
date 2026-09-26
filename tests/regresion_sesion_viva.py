@@ -927,6 +927,16 @@ t("run_geoprocessing_fuera", {"tool": "management.GetCount", "params": [NOMBRE_V
 t("clear_selection", {"capa": NOMBRE_VEC})
 t("remove_layer", {"capa": "buf"})
 
+sys.stdout.write("--- request de mas de 1 MB (2.16.0) ---" + chr(10))
+# Por el socket directo, sin el servidor MCP (que ya no lo enviaria). Hasta la 2.15.0 el
+# add-in cerraba sin leer el resto y aqui saltaba WinError 10054 (-> [EXC]); ahora tiene
+# que llegar su error.
+r = t("execute_code", {"code": "x = 1" + chr(10) + "#" + "a" * (1100 * 1024)},
+      espera_ok=False, nota="(1,1 MB)")
+comprobar("request grande: llega el motivo, no un 10054", "DEMASIADO GRANDE" in str((r or {}).get("error", "")),
+          str(r)[:110])
+t("ping", nota="(el puente sigue atendiendo)")
+
 sys.stdout.write("--- limpieza ---" + chr(10))
 t("remove_layer", {"capa": "real_NUEVO.tif"})
 t("remove_layer", {"capa": NOMBRE_VEC})

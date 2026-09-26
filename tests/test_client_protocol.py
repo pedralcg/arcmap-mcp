@@ -137,6 +137,31 @@ class TestPuenteCaido(unittest.TestCase):
         self.assertNotEqual(r.get("estado"), "puente_ocupado")
 
 
+class TestRequestDemasiadoGrande(unittest.TestCase):
+    """Un request de más de 1 MB no sale del cliente. Enviado, el add-in cerraba sin
+    leer el resto y el cliente veía WinError 10054 en vez del motivo (2026-09-26)."""
+
+    def test_no_se_envia_y_dice_por_que(self):
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        s.listen(1)
+        self.addCleanup(s.close)
+        s.settimeout(0.5)
+        cli = ArcMapClient(host="127.0.0.1", port=s.getsockname()[1], timeout=2)
+        r = cli.send("execute_code", {"code": "#" + "a" * (1024 * 1024)})
+        self.assertFalse(r["ok"])
+        self.assertIn("DEMASIADO GRANDE", r["error"])
+        with self.assertRaises(socket.timeout, msg="el cliente llegó a conectar"):
+            s.accept()
+
+    def test_el_tope_es_el_del_add_in(self):
+        ruta = os.path.join(RAIZ, "addin", "ArcmapMcp.AddIn", "McpServer.cs")
+        with open(ruta, encoding="utf-8") as fh:
+            cs = fh.read()
+        self.assertIn("private const int MaxRequestBytes = 1024 * 1024;", cs)
+        self.assertEqual(servidor.MAX_REQUEST_BYTES, 1024 * 1024)
+
+
 class TestPuenteOcupado(unittest.TestCase):
     """La conexión se abre pero ArcMap no contesta: hilo principal ocupado."""
 
