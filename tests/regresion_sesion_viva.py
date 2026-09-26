@@ -858,6 +858,101 @@ if doc_mxd and doc_mxd.lower().endswith(".mxd") and PY27:
 else:
     sys.stdout.write("  [---] documento sin ruta .mxd o sin Python 2.7 de ArcGIS: bloque saltado" + chr(10))
 
+sys.stdout.write("--- run_geoprocessing: errores propios (2.16.0) ---" + chr(10))
+# El sintoma del informe de agosto: una tool INEXISTENTE fallaba antes de arrancar, sin
+# mensajes propios, y el error salia con los del geoproceso ANTERIOR (los mensajes del
+# geoprocesador son del proceso). Control: la llamada previa deja una marca unica en la
+# cola de mensajes, y la siguiente no puede nombrarla.
+MARCA_GP = "C:" + SEP + "temp" + SEP + "no_existe_MARCA_GP_2160.shp"
+t("run_geoprocessing", {"tool": "management.GetCount", "params": [MARCA_GP]},
+  espera_ok=False, nota="(deja la marca en los mensajes)")
+r = t("run_geoprocessing", {"tool": "management.NoExisteEstaTool", "params": ["x"]},
+      espera_ok=False, nota="(tool inexistente)")
+err = str((r or {}).get("error", ""))
+comprobar("tool inexistente no trae el error anterior", "MARCA_GP_2160" not in err, err[:110])
+comprobar("tool inexistente lo dice", "No existe la herramienta" in err, err[:110])
+# Parametros de mas: el geoprocesador los ignoraba y daba ok habiendo hecho otra cosa.
+r = t("run_geoprocessing", {"tool": "management.GetCount", "params": [VEC, "sobra", "sobra"]},
+      espera_ok=False, nota="(parametros de mas)")
+comprobar("parametros de mas: dice cuantos admite", "admite" in str((r or {}).get("error", "")),
+          str((r or {}).get("error", ""))[:110])
+# Y la misma tool con sus parametros justos sigue funcionando (control del control).
+r = t("run_geoprocessing", {"tool": "management.GetCount", "params": [VEC]})
+# (r or {}).get("result"), no res(r): mas arriba el script reutiliza `res` como variable.
+salida_gp = (r or {}).get("result") or {}
+comprobar("GetCount valido tras los errores", salida_gp.get("salidas") == ["24"], str(salida_gp)[:110])
+
+sys.stdout.write("--- run_geoprocessing fuera de ArcMap (2.16.0) ---" + chr(10))
+# El servidor manda fuera_de_arcmap=True como 'run_geoprocessing_fuera'. Carpeta nueva en
+# cada pasada: ArcMap no suelta un dato que ha cargado aunque se quite la capa, asi que
+# reutilizar la de la pasada anterior daria ERROR 000258 por un motivo ajeno a la prueba.
+import uuid
+DIR_FUERA = "C:" + SEP + "temp" + SEP + "arcmap-mcp-regresion" + SEP + "fuera_" + uuid.uuid4().hex[:8]
+os.makedirs(DIR_FUERA)
+BUF_FUERA = DIR_FUERA + SEP + "buf.shp"
+r = t("run_geoprocessing_fuera", {"tool": "management.GetCount", "params": [VEC]}, nota="(por ruta)")
+f = (r or {}).get("result") or {}
+comprobar("fuera: GetCount da 24 y no añade nada",
+          f.get("salidas") == ["24"] and f.get("capas_salida") == [] and f.get("fuera_de_arcmap") is True,
+          str(f)[:110])
+r = t("run_geoprocessing_fuera", {"tool": "analysis.Buffer", "params": [NOMBRE_VEC, BUF_FUERA, "100 Meters"]},
+      nota="(capa por NOMBRE)")
+f = (r or {}).get("result") or {}
+comprobar("fuera: el nombre de capa viaja como ruta", NOMBRE_VEC in (f.get("capas_por_ruta") or {}), str(f)[:110])
+comprobar("fuera: la salida entra en el mapa", len(f.get("anadidas_al_mapa") or []) == 1, str(f)[:110])
+r = t("run_geoprocessing_fuera", {"tool": "analysis.Buffer", "params": [NOMBRE_VEC, BUF_FUERA, "100 Meters"]},
+      espera_ok=False, nota="(salida existente, sin sobrescribir)")
+r = t("run_geoprocessing_fuera", {"tool": "analysis.Buffer", "params": [NOMBRE_VEC, BUF_FUERA, "200 Meters"],
+                                  "sobrescribir": True}, espera_ok=False, nota="(salida cargada en la sesion)")
+comprobar("fuera: explica el bloqueo de la sesion", "Usa otra ruta" in str((r or {}).get("error", "")),
+          str((r or {}).get("error", ""))[:110])
+t("run_geoprocessing_fuera", {"tool": "management.NoExisteEstaTool", "params": ["x"]},
+  espera_ok=False, nota="(tool inexistente)")
+# Spatial Analyst: por arcpy.sa.Slope (algebra de mapas) no habia ruta de salida; va por
+# arcpy.gp.Slope_sa, con la firma del geoprocesador.
+PEND_FUERA = DIR_FUERA + SEP + "pend.tif"
+t("run_geoprocessing_fuera", {"tool": "sa.Slope", "params": [RASTER, PEND_FUERA], "anadir_al_mapa": False},
+  nota="(Spatial Analyst)")
+comprobar("fuera: sa.Slope escribe su salida", os.path.exists(PEND_FUERA), PEND_FUERA)
+# Multivalor con un NOMBRE de capa dentro de la lista: viaja por la ruta de su fuente.
+r = t("run_geoprocessing_fuera", {"tool": "management.Merge",
+                                  "params": [[NOMBRE_VEC, BUF_FUERA], DIR_FUERA + SEP + "merge.shp"],
+                                  "anadir_al_mapa": False}, nota="(multivalor con nombre de capa)")
+r = t("run_geoprocessing_fuera", {"tool": "management.GetCount", "params": [DIR_FUERA + SEP + "merge.shp"]})
+comprobar("fuera: el merge tiene 48", ((r or {}).get("result") or {}).get("salidas") == ["48"],
+          str((r or {}).get("result"))[:110])
+# Dos parametros de mas por arcpy.gp tumbaban Python: los rechaza antes el add-in.
+t("run_geoprocessing_fuera", {"tool": "management.GetCount", "params": [VEC, "sobra", "sobra"]},
+  espera_ok=False, nota="(dos de mas: antes del runner)")
+t("run_geoprocessing_fuera", {"tool": "management.GetCount", "params": [VEC, "sobra"]},
+  espera_ok=False, nota="(parametros de mas)")
+# Control: con definition query, fuera procesaria la fuente ENTERA. Tiene que negarse,
+# y la misma llamada dentro de ArcMap tiene que contar solo lo filtrado.
+t("set_definition_query", {"capa": NOMBRE_VEC, "query": "FID < 5"})
+r = t("run_geoprocessing_fuera", {"tool": "management.GetCount", "params": [NOMBRE_VEC]},
+      espera_ok=False, nota="(capa con definition query)")
+comprobar("fuera: se niega con definition query", "definition query" in str((r or {}).get("error", "")),
+          str((r or {}).get("error", ""))[:110])
+r = t("run_geoprocessing", {"tool": "management.GetCount", "params": [NOMBRE_VEC]}, nota="(dentro, control)")
+comprobar("dentro: la misma capa cuenta 5", ((r or {}).get("result") or {}).get("salidas") == ["5"],
+          str((r or {}).get("result"))[:110])
+t("set_definition_query", {"capa": NOMBRE_VEC, "query": ""})
+t("select_by_attribute", {"capa": NOMBRE_VEC, "where": "FID < 3"})
+t("run_geoprocessing_fuera", {"tool": "management.GetCount", "params": [NOMBRE_VEC]},
+  espera_ok=False, nota="(capa con seleccion)")
+t("clear_selection", {"capa": NOMBRE_VEC})
+t("remove_layer", {"capa": "buf"})
+
+sys.stdout.write("--- request de mas de 1 MB (2.16.0) ---" + chr(10))
+# Por el socket directo, sin el servidor MCP (que ya no lo enviaria). Hasta la 2.15.0 el
+# add-in cerraba sin leer el resto y aqui saltaba WinError 10054 (-> [EXC]); ahora tiene
+# que llegar su error.
+r = t("execute_code", {"code": "x = 1" + chr(10) + "#" + "a" * (1100 * 1024)},
+      espera_ok=False, nota="(1,1 MB)")
+comprobar("request grande: llega el motivo, no un 10054", "DEMASIADO GRANDE" in str((r or {}).get("error", "")),
+          str(r)[:110])
+t("ping", nota="(el puente sigue atendiendo)")
+
 sys.stdout.write("--- limpieza ---" + chr(10))
 t("remove_layer", {"capa": "real_NUEVO.tif"})
 t("remove_layer", {"capa": NOMBRE_VEC})

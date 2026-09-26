@@ -587,6 +587,23 @@ namespace ArcmapMcp.AddIn.Handlers
                          + limiteUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm") + " borrados de " + carpeta);
         }
 
+        /// <summary>
+        /// Medido el 2026-09-26: con ArcMap abierto, CIERTOS documentos bloquean al arcpy de
+        /// fuera en cuanto los carga (ListDataFrames): se queda esperando una llamada COM a
+        /// este ArcMap que no vuelve nunca. Con ArcMap cerrado el mismo documento abre en ~1 s,
+        /// y matar ArcMap lo desbloquea al instante. No es el add-in: sin él pasa igual. El
+        /// disparador son los MARCOS OLE del layout (ver MarcosOle): lo que abre el documento
+        /// en sesión ya lo comprueba antes, así que esto queda para el código que abre OTROS
+        /// .mxd por ruta. Secuela: al cerrar ArcMap, la ventana se va pero el proceso no termina.
+        /// </summary>
+        private const string AvisoBloqueoCom =
+            " Si abre otro .mxd, mira si tiene marcos OLE (objetos incrustados, p. ej. de Word):"
+            + " describe_mxd los cuenta sin abrirlo. Con ArcMap abierto, un .mxd con marcos OLE"
+            + " deja al arcpy de fuera esperando a este ArcMap para siempre; subir el timeout no"
+            + " sirve, ábrelo con ArcMap cerrado o quita esos marcos. Ojo: tras esto, al cerrar"
+            + " ArcMap el proceso puede quedarse vivo y sin ventana; no hay nada que guardar,"
+            + " termínalo por PID.";
+
         /// <summary>Lanza el runner con el job y devuelve su JSON de salida.
         /// Timeout duro con Kill: sin zombies de python.exe.</summary>
         private static JObject RunJob(string op, JObject parameters, string mxdSnapshot,
@@ -682,14 +699,15 @@ namespace ArcmapMcp.AddIn.Handlers
                             + ". Proceso terminado (sin zombies)."
                             + (fase != null && fase.StartsWith("abriendo documento")
                                 ? " Se quedó ABRIENDO EL DOCUMENTO. Abrir en sí NO es caro (medido 0,7 s"
-                                  + " en un .mxd de 36 capas), y que ArcMap esté abierto o colgado no lo"
-                                  + " bloquea (medido 2026-09-25). Mira si hay python.exe de ArcGIS"
+                                  + " en un .mxd de 36 capas). Mira si hay python.exe de ArcGIS"
                                   + " huérfanos de llamadas anteriores y si responden las unidades de red"
                                   + " de las capas antes de subir el timeout, que solo alarga la espera."
                                   + " Si tu código no usa mxd ni df, pasa usar_documento=false."
                                 : op == "execute_code"
                                     ? " Sube ARCMAP_EXEC_TIMEOUT (segundos) si la operación es legítimamente larga."
                                     : " Sube ARCMAP_SUBPROCESS_TIMEOUT (segundos) si la operación es legítimamente larga.")
+                            + (fase != null && (fase.StartsWith("abriendo documento") || fase.StartsWith("ejecutando"))
+                                ? AvisoBloqueoCom : "")
                             + " Evidencia conservada: " + jobPath);
                     }
                     // Con salida redirigida en asíncrono hay que rematar con un WaitForExit
@@ -835,6 +853,18 @@ namespace ArcmapMcp.AddIn.Handlers
         private static JObject RunJobConSnapshot(string op, JObject parameters, bool serializarSesion = false,
                                                  TimeSpan? timeout = null)
         {
+            // Antes de copiar nada: con marcos OLE en el documento, el arcpy de fuera se
+            // cuelga al cargarlo mientras ArcMap está abierto (ver MarcosOle).
+            JObject ole = StaDispatcher.Invoke(delegate
+            {
+                IMxDocument doc;
+                MapHandlers.FocusMap(out doc);
+                MarcosOle.ComprobarAntesDeCopia(doc, "'" + op + "'");
+                return Protocol.Result(new JObject());
+            }, StaStepTimeout, "buscar marcos OLE");
+            if (!(bool)ole["ok"])
+                return ole;
+
             Instantanea snap = Snapshot(serializarSesion);
             try
             {
@@ -1099,6 +1129,126 @@ namespace ArcmapMcp.AddIn.Handlers
         public static JObject LeastCostPath(JObject parameters)
         {
             return Ambiental("least_cost_path", parameters, "salida");
+        }
+
+        /// <summary>
+        /// run_geoprocessing(fuera_de_arcmap=true): el geoproceso en el runner, con
+        /// ArcMap libre mientras corre. El camino nativo (GeoprocessingHandlers) congela
+        /// la interfaz porque ejecuta en el hilo de ArcMap.
+        ///
+        /// El precio es que el runner no ve la sesión: los nombres de capa de la TOC se
+        /// traducen aquí a la ruta de su fuente. Una capa con definition query o con
+        /// selección NO se traduce, porque el runner procesaría la fuente ENTERA y el
+        /// resultado sería otro sin avisar: se devuelve error y se remite al camino
+        /// nativo, que sí las respeta.
+        /// </summary>
+        public static JObject GeoprocesoFuera(JObject parameters)
+        {
+            JArray args = parameters["params"] as JArray ?? new JArray();
+            bool resolver = parameters["resolver_capas"] == null
+                || parameters["resolver_capas"].Type == JTokenType.Null
+                || (bool)parameters["resolver_capas"];
+            bool anadir = parameters["anadir_al_mapa"] == null
+                || parameters["anadir_al_mapa"].Type == JTokenType.Null
+                || (bool)parameters["anadir_al_mapa"];
+
+            string tool = (string)parameters["tool"];
+            if (string.IsNullOrEmpty(tool))
+                throw new ArgumentException(
+                    "Indica 'tool' (ej. 'management.CopyFeatures' o 'Buffer_analysis').");
+
+            var traducidas = new JObject();
+            JArray originales = args;
+            JObject t = StaDispatcher.Invoke(delegate
+            {
+                // La firma se comprueba AQUÍ y no en el runner: con arcpy.gp un parámetro
+                // de más se ignora y dos tumban Python (violación de acceso, 2026-09-26).
+                string alias;
+                GeoprocessingHandlers.ComprobarFirma(new ESRI.ArcGIS.Geoprocessing.GeoProcessorClass(),
+                    tool, GeoprocessingHandlers.NombreGp(tool, out alias), originales.Count);
+                if (!resolver)
+                    return Protocol.Result(new JObject { ["params"] = originales });
+                {
+                    IMxDocument doc;
+                    IMap map = MapHandlers.FocusMap(out doc);
+                    var capas = MapHandlers.Capas(map);
+                    var nuevos = new JArray();
+                    foreach (JToken a in args)
+                    {
+                        if (a.Type == JTokenType.Array)
+                        {
+                            var lista = new JArray();
+                            foreach (JToken el in (JArray)a)
+                                lista.Add(TraducirCapa(el, capas, traducidas));
+                            nuevos.Add(lista);
+                        }
+                        else
+                            nuevos.Add(TraducirCapa(a, capas, traducidas));
+                    }
+                    return Protocol.Result(new JObject { ["params"] = nuevos });
+                }
+            }, StaStepTimeout, "comprobar la firma y traducir capas a rutas");
+            if (!(bool)t["ok"])
+                return t;
+            args = (JArray)t["result"]["params"];
+
+            var job = new JObject
+            {
+                ["tool"] = parameters["tool"],
+                ["params"] = args,
+                ["sobrescribir"] = parameters["sobrescribir"] ?? false,
+            };
+            JObject r = RunJob("geoprocessing", job, null);
+            if (!(bool)r["ok"])
+                return r;
+            JObject res = (JObject)r["result"];
+            res["fuera_de_arcmap"] = true;
+            if (traducidas.Count > 0)
+                res["capas_por_ruta"] = traducidas;
+            var anadidas = new JArray();
+            if (anadir && res["capas_salida"] is JArray)
+                foreach (JToken ruta in (JArray)res["capas_salida"])
+                    if (AddToMap((string)ruta))
+                        anadidas.Add(ruta);
+            res["anadidas_al_mapa"] = anadidas;
+            return r;
+        }
+
+        /// <summary>Nombre de capa de la TOC → ruta de su fuente (en el hilo de ArcMap).
+        /// Mismo criterio que la resolución nativa: lo que tiene pinta de ruta o de SQL
+        /// no se toca, y el nombre se compara sin mayúsculas.</summary>
+        private static JToken TraducirCapa(JToken a, System.Collections.Generic.List<ILayer> capas,
+                                           JObject traducidas)
+        {
+            if (a.Type != JTokenType.String)
+                return a;
+            string s = (string)a;
+            if (s.IndexOfAny(GeoprocessingHandlers.NoResolver) >= 0)
+                return a;
+            foreach (ILayer lyr in capas)
+            {
+                if (!string.Equals(lyr.Name, s, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                var def = lyr as IFeatureLayerDefinition;
+                if (def != null && !string.IsNullOrEmpty(def.DefinitionExpression))
+                    throw new ArgumentException("La capa '" + lyr.Name + "' tiene una definition query ("
+                        + def.DefinitionExpression + "). Fuera de ArcMap se procesaría la fuente ENTERA:"
+                        + " usa fuera_de_arcmap=false, que la respeta, o exporta antes lo filtrado.");
+                var sel = lyr as IFeatureSelection;
+                if (sel != null && sel.SelectionSet != null && sel.SelectionSet.Count > 0)
+                    throw new ArgumentException("La capa '" + lyr.Name + "' tiene " + sel.SelectionSet.Count
+                        + " entidades seleccionadas. Fuera de ArcMap se procesaría la fuente ENTERA:"
+                        + " usa fuera_de_arcmap=false, que respeta la selección, o limpia la selección.");
+                string workspace;
+                string ruta = DataAccess.RutaFuente(lyr, out workspace);
+                if (string.IsNullOrEmpty(ruta))
+                    throw new ArgumentException("La capa '" + lyr.Name + "' no tiene una fuente en disco"
+                        + " resoluble, así que el geoproceso fuera de ArcMap no podría abrirla."
+                        + " Pásale la ruta del dato o usa fuera_de_arcmap=false.");
+                traducidas[lyr.Name] = ruta;
+                return ruta;
+            }
+            return a;
         }
 
         // calculate_geometry NO va por subprocess: la sesión viva mantiene un schema

@@ -779,6 +779,108 @@ def op_least_cost_path(job):
         arcpy.CheckInExtension("Spatial")
 
 
+def _tool_arcpy(tool):
+    """'management.GetCount' o 'GetCount_management' -> (funcion, nombre, alias).
+
+    Por arcpy.gp.<Tool>_<alias>, NO por arcpy.<modulo>.<Tool>: en Spatial Analyst el
+    modulo es algebra de mapas, con otra firma (arcpy.sa.Slope(in_raster, ...) devuelve
+    un Raster y no admite ruta de salida), mientras que gp tiene la del geoprocesador,
+    la misma que la via nativa y la que se comprueba con Usage en el add-in.
+    Error accionable si no existe: la llamada nativa dice lo mismo."""
+    tool = _u(tool or u"").strip()
+    if u"." in tool:
+        modulo, nombre = tool.split(u".", 1)
+    elif u"_" in tool:
+        nombre, modulo = tool.rsplit(u"_", 1)
+    else:
+        raise ValueError(u"Indica 'tool' como 'modulo.Herramienta' (p. ej. "
+                         u"'management.GetCount') o 'Herramienta_modulo'.")
+    alias = u"3d" if modulo.lower() == u"ddd" else modulo.lower()
+    try:
+        fn = getattr(arcpy.gp, str(nombre + u"_" + alias))
+    except (AttributeError, UnicodeEncodeError):
+        fn = None
+    if fn is None:
+        raise ValueError(u"No existe la herramienta de geoproceso '%s'. Usa la forma "
+                         u"de arcpy, 'modulo.Herramienta' (p. ej. 'management.GetCount')."
+                         % tool)
+    return fn, nombre, alias
+
+
+def _capas_salida(resultado):
+    """Salidas del Result que son datos que se pueden ver (feature class, raster,
+    shapefile). Un derivado como el recuento de GetCount ('24') no lo es."""
+    rutas = []
+    for i in range(resultado.outputCount):
+        try:
+            valor = _u(resultado.getOutput(i))
+        except Exception:
+            continue
+        if not valor or not _existe(valor):
+            continue
+        try:
+            tipo = arcpy.Describe(valor).dataType
+        except Exception:
+            continue
+        if tipo in (u"FeatureClass", u"ShapeFile", u"RasterDataset", u"RasterBand"):
+            rutas.append(valor)
+    return rutas
+
+
+def op_geoprocessing(job):
+    """run_geoprocessing(fuera_de_arcmap=True): el geoproceso en este proceso, no en
+    el hilo de ArcMap, que se queda libre mientras corre. Los parametros llegan ya
+    como rutas: el add-in traduce las capas de la TOC antes de lanzar el job."""
+    params = job["params"]
+    tool = params.get("tool")
+    fn, nombre, alias = _tool_arcpy(tool)
+    args = params.get("params") or []
+    # Por defecto NO se sobrescribe: el geoprocesador rechaza una salida existente al
+    # validar, antes de calcular (ERROR 000725), y con True una ruta mal tecleada
+    # borraria el resultado de ayer sin decir nada.
+    arcpy.env.overwriteOutput = bool(params.get("sobrescribir", False))
+    ext = {u"sa": "Spatial", u"3d": "3D"}.get(alias)
+    if ext:
+        _checkout(ext)
+    try:
+        try:
+            resultado = fn(*args)
+        except TypeError as exc:
+            # Red: los parametros de mas los rechaza ANTES el add-in con Usage, porque por
+            # arcpy.gp uno de mas se ignora y dos tumban este proceso (2026-09-26).
+            try:
+                firma = _u(arcpy.Usage(str(nombre + u"_" + alias)))
+            except Exception:
+                firma = u"(no disponible)"
+            raise ValueError(u"Parametros no validos para '%s': %s. Firma: %s"
+                             % (_u(tool), _u(exc), firma))
+        except arcpy.ExecuteError:
+            mensajes = _u(arcpy.GetMessages(2) or arcpy.GetMessages())
+            pista = u""
+            if u"000258" in mensajes and params.get("sobrescribir"):
+                # Medido 2026-09-26: ArcMap bloquea un dato que se ha cargado en la
+                # sesion y NO lo suelta al quitar la capa (seguia bloqueado 15 s despues
+                # de remove_layer, y forzar el recolector de .NET no lo cambiaba). Desde
+                # este proceso no se puede borrar hasta cerrar ArcMap.
+                pista = (u" Con sobrescribir=true esto pasa cuando la salida está o ha estado"
+                         u" cargada en esta sesión de ArcMap, que la mantiene bloqueada aunque se"
+                         u" quite del mapa. Usa otra ruta.")
+            raise ValueError(u"Geoproceso '%s' falló. Mensajes GP: %s%s"
+                             % (_u(tool), mensajes, pista))
+        salidas = []
+        for i in range(resultado.outputCount):
+            try:
+                salidas.append(_u(resultado.getOutput(i)))
+            except Exception:
+                salidas.append(None)
+        return {"tool": tool, "salidas": salidas,
+                "mensajes": _u(resultado.getMessages()),
+                "capas_salida": _capas_salida(resultado)}
+    finally:
+        if ext:
+            arcpy.CheckInExtension(ext)
+
+
 # calculate_geometry NO vive aquí: la sesión viva mantiene un schema lock sobre
 # las fuentes cargadas en la TOC y AddGeometryAttributes añade campos → imposible
 # out-of-process. Va nativo por IGeoProcessor2 dentro del add-in.
@@ -793,6 +895,7 @@ OPS = {
     "contours": op_contours,
     "topographic_profile": op_topographic_profile,
     "least_cost_path": op_least_cost_path,
+    "geoprocessing": op_geoprocessing,
 }
 
 

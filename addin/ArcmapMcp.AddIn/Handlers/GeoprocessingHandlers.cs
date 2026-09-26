@@ -20,7 +20,7 @@ namespace ArcmapMcp.AddIn.Handlers
     {
         // Guard de resolución: strings con pinta de ruta o de SQL no se resuelven
         // a capa (un nombre de campo o keyword que coincida se sustituiría en silencio).
-        private static readonly char[] NoResolver = "\\/:*?\"<>|='".ToCharArray();
+        internal static readonly char[] NoResolver = "\\/:*?\"<>|='".ToCharArray();
 
         // Módulo arcpy -> alias de toolbox del GeoProcessor: coinciden salvo ddd.
         private static string AliasToolbox(string moduloArcpy)
@@ -64,21 +64,8 @@ namespace ArcmapMcp.AddIn.Handlers
                 || parameters["resolver_capas"].Type == JTokenType.Null
                 || (bool)parameters["resolver_capas"];
 
-            // Forma punteada estilo arcpy (management.GetCount) -> nombre GP (GetCount_management).
-            string nombreGp = tool;
-            string alias = null;
-            int punto = tool.IndexOf('.');
-            if (punto > 0)
-            {
-                alias = AliasToolbox(tool.Substring(0, punto));
-                nombreGp = tool.Substring(punto + 1) + "_" + alias;
-            }
-            else
-            {
-                int guion = tool.LastIndexOf('_');
-                if (guion > 0)
-                    alias = tool.Substring(guion + 1);
-            }
+            string alias;
+            string nombreGp = NombreGp(tool, out alias);
             if (alias != null)
                 CheckoutSiHaceFalta(alias);
 
@@ -97,15 +84,26 @@ namespace ArcmapMcp.AddIn.Handlers
                 capas = MapHandlers.Capas(map);
             }
 
+            IGeoProcessor2 gp = new GeoProcessorClass();
+
+            // La firma de la tool, antes de nada. Sin esto, un nombre de tool que no
+            // existe fallaba en Execute ANTES de arrancar, sin escribir mensajes propios,
+            // y el error salía con los mensajes del geoproceso ANTERIOR: los mensajes
+            // del geoprocesador son del proceso, no de cada GeoProcessorClass.
+            // Reproducido el 2026-09-26 (era el «devuelve el error de la llamada
+            // anterior» del informe de uso de agosto).
+            ComprobarFirma(gp, tool, nombreGp, args.Count);
+
             IVariantArray valores = new VarArrayClass();
             foreach (JToken a in args)
                 valores.Add(ResolverArg(a, resolverCapas, capas));
 
-            IGeoProcessor2 gp = new GeoProcessorClass();
             gp.AddOutputsToMap = true; // mismo comportamiento que arcpy dentro de ArcMap
             ESRI.ArcGIS.esriSystem.ITrackCancel cancel =
                 (ESRI.ArcGIS.esriSystem.ITrackCancel)new ESRI.ArcGIS.Display.CancelTrackerClass();
 
+            // Por la misma razón: lo que quede en la cola de mensajes es de otra llamada.
+            gp.ClearMessages();
             IGeoProcessorResult resultado;
             try
             {
@@ -113,8 +111,11 @@ namespace ArcmapMcp.AddIn.Handlers
             }
             catch (Exception ex)
             {
+                string mensajes = Mensajes(gp);
                 throw new InvalidOperationException(
-                    "Geoproceso '" + tool + "' falló: " + ex.Message + ". Mensajes GP: " + Mensajes(gp), ex);
+                    "Geoproceso '" + tool + "' falló: " + ex.Message + ". Mensajes GP: "
+                    + (string.IsNullOrWhiteSpace(mensajes)
+                        ? "(ninguno: el geoproceso no llegó a arrancar)" : mensajes), ex);
             }
 
             var salidas = new JArray();
@@ -263,6 +264,99 @@ namespace ArcmapMcp.AddIn.Handlers
                 }
             }
             return string.Join(";", partes);
+        }
+
+        /// <summary>Forma punteada estilo arcpy (management.GetCount) → nombre GP
+        /// (GetCount_management); el alias de toolbox sale por <paramref name="alias"/>.</summary>
+        internal static string NombreGp(string tool, out string alias)
+        {
+            alias = null;
+            int punto = tool.IndexOf('.');
+            if (punto > 0)
+            {
+                alias = AliasToolbox(tool.Substring(0, punto));
+                return tool.Substring(punto + 1) + "_" + alias;
+            }
+            int guion = tool.LastIndexOf('_');
+            if (guion > 0)
+                alias = tool.Substring(guion + 1);
+            return tool;
+        }
+
+        /// <summary>
+        /// Lanza si la tool no existe o si se le pasan más parámetros de los que admite.
+        /// Lo usan las DOS vías de run_geoprocessing: dentro de ArcMap el geoprocesador
+        /// ignoraba los de más sin avisar, y fuera (arcpy.gp en el runner) uno de más se
+        /// ignora y DOS tumban Python con una violación de acceso (medido 2026-09-26).
+        /// Corre en el hilo de ArcMap (GeoProcessorClass es STA).
+        /// </summary>
+        internal static void ComprobarFirma(IGeoProcessor2 gp, string tool, string nombreGp, int nArgs)
+        {
+            int maxParams = MaxParametros(gp, tool, nombreGp);
+            if (maxParams >= 0 && nArgs > maxParams)
+                throw new ArgumentException(
+                    "'" + tool + "' admite " + maxParams + " parámetros y se han pasado " + nArgs
+                    + ". El geoprocesador ignora los de más sin avisar, así que no se ejecuta."
+                    + " Firma: " + gp.Usage(nombreGp));
+        }
+
+        /// <summary>
+        /// Número máximo de parámetros según la firma que da <c>Usage</c>, p. ej.
+        /// "Usage: GetCount_management in_rows" → 1. Lanza si la tool no existe. Devuelve -1
+        /// si la firma no se deja leer o Usage falla, y entonces no se comprueba nada: mejor no
+        /// validar que rechazar una llamada buena por un formato de firma inesperado.
+        /// </summary>
+        private static int MaxParametros(IGeoProcessor2 gp, string tool, string nombreGp)
+        {
+            string firma;
+            try
+            {
+                firma = gp.Usage(nombreGp);
+            }
+            catch (Exception ex)
+            {
+                // Que Usage LANCE no quiere decir que la tool no exista: en las 977 tools de
+                // sistema de 10.5 solo lanza en las de Data Interoperability sin la extensión
+                // instalada ("Clase no registrada"). No se valida y el geoproceso da su error.
+                Log.Info("Usage(" + nombreGp + ") lanzó: " + ex.Message + ". Se ejecuta sin comprobar la firma.");
+                return -1;
+            }
+            // Con una tool inexistente Usage NO lanza: devuelve "Method X not found."
+            // (medido en 10.5, en inglés aunque ArcMap esté en español). Auditado el
+            // 2026-09-26 contra las 977 tools de sistema: ninguna devuelve "not found" y el
+            // recuento nunca queda por debajo de lo que la tool admite (827 exactos, 148 por
+            // encima: ahí los parámetros de más no se detectan, pero no se rechaza nada bueno).
+            if (string.IsNullOrWhiteSpace(firma)
+                || firma.IndexOf(" not found", StringComparison.OrdinalIgnoreCase) >= 0)
+                throw new ArgumentException("No existe la herramienta de geoproceso '" + tool
+                    + "' (nombre GP '" + nombreGp + "'). Usa la forma de arcpy, 'modulo.Herramienta'"
+                    + " (p. ej. 'management.GetCount').");
+            return ContarParametros(firma);
+        }
+
+        /// <summary>Cuenta los parámetros de una firma de <c>Usage</c>, que en 10.5 es
+        /// "Usage: Buffer_analysis in_features out_feature_class {FULL | LEFT} {a;a...}":
+        /// tras el prefijo y el nombre, un parámetro por palabra, con los opcionales entre
+        /// llaves (que llevan espacios dentro). Devuelve -1 con cualquier otro formato.
+        /// Internal para poder probarlo sin ArcMap.</summary>
+        internal static int ContarParametros(string firma)
+        {
+            string s = firma.Trim();
+            if (!s.StartsWith("Usage:", StringComparison.OrdinalIgnoreCase))
+                return -1;
+            s = s.Substring("Usage:".Length);
+            int nivel = 0, n = 0;
+            bool enPalabra = false;
+            foreach (char c in s)
+            {
+                if (c == '{' || c == '[' || c == '(') nivel++;
+                else if (c == '}' || c == ']' || c == ')') nivel--;
+                bool blanco = char.IsWhiteSpace(c) && nivel == 0;
+                if (!blanco && !enPalabra) n++;
+                enPalabra = !blanco;
+            }
+            // La primera palabra es el nombre de la tool.
+            return nivel == 0 && n > 0 ? n - 1 : -1;
         }
 
         private static string Mensajes(IGeoProcessor2 gp)

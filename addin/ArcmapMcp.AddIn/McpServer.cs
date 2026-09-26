@@ -384,9 +384,10 @@ namespace ArcmapMcp.AddIn
                 if (buf.Length + n > MaxRequestBytes)
                 {
                     motivo = "Request DEMASIADO GRANDE: pasa de " + (MaxRequestBytes / 1024)
-                        + " KB y se corta sin leerlo. Los comandos del puente son pequeños; si estás "
+                        + " KB y no se ejecuta. Los comandos del puente son pequeños; si estás "
                         + "mandando datos a granel dentro de 'code', escríbelos a un fichero y que el "
                         + "código los lea de ahí.";
+                    Log.Info(motivo + " (" + DescartarResto(stream, buf.Length + n) + " bytes recibidos)");
                     return null;
                 }
                 buf.Write(chunk, 0, n);
@@ -415,6 +416,31 @@ namespace ArcmapMcp.AddIn
                   + " s): el cliente abrió la conexión y no mandó el request."
                 : "Request ilegible (no llegó un objeto JSON válido; " + buf.Length + " bytes recibidos)";
             return null;
+        }
+
+        /// <summary>
+        /// Lee y tira lo que quede del request hasta que el cliente deje de enviar. Cerrar
+        /// un socket con datos sin leer hace que Windows mande un RST, y el cliente veía
+        /// WinError 10054 en vez del error que se le había escrito (reproducido el
+        /// 2026-09-26 con un request de 1,1 MB). Con tope, para que un cliente que no para
+        /// de enviar no retenga el hilo: pasado el tope se corta igual que antes.
+        /// </summary>
+        private static long DescartarResto(NetworkStream stream, long leidos)
+        {
+            const long tope = 64L * 1024 * 1024;
+            var basura = new byte[65536];
+            stream.ReadTimeout = 1000;
+            try
+            {
+                int n;
+                while (leidos < tope && (n = stream.Read(basura, 0, basura.Length)) > 0)
+                    leidos += n;
+            }
+            catch (IOException)
+            {
+                // Un segundo sin datos: el cliente ya lo mandó todo y espera la respuesta.
+            }
+            return leidos;
         }
 
         /// <summary>¿El último byte no-blanco del buffer es '}'? Sin copiar el buffer:
@@ -514,6 +540,7 @@ namespace ArcmapMcp.AddIn
                 { "contours",             Handlers.PythonHandlers.Contours },
                 { "topographic_profile",  Handlers.PythonHandlers.TopographicProfile },
                 { "least_cost_path",      Handlers.PythonHandlers.LeastCostPath },
+                { "run_geoprocessing_fuera", Handlers.PythonHandlers.GeoprocesoFuera },
             };
 
         /// <summary>Cuántos comandos entiende el puente. Lo consume la ficha "Acerca de"

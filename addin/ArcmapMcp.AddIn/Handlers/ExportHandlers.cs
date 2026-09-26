@@ -153,7 +153,7 @@ namespace ArcmapMcp.AddIn.Handlers
         /// que "busy: ") y reintenta; si cambia aquí, cambia en arcmap_mcp_server.py.</summary>
         internal const string Dibujando = "dibujando: ";
 
-        private static bool EsPendiente(Exception ex)
+        internal static bool EsPendiente(Exception ex)
         {
             for (Exception e = ex; e != null; e = e.InnerException)
             {

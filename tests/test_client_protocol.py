@@ -137,6 +137,31 @@ class TestPuenteCaido(unittest.TestCase):
         self.assertNotEqual(r.get("estado"), "puente_ocupado")
 
 
+class TestRequestDemasiadoGrande(unittest.TestCase):
+    """Un request de más de 1 MB no sale del cliente. Enviado, el add-in cerraba sin
+    leer el resto y el cliente veía WinError 10054 en vez del motivo (2026-09-26)."""
+
+    def test_no_se_envia_y_dice_por_que(self):
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        s.listen(1)
+        self.addCleanup(s.close)
+        s.settimeout(0.5)
+        cli = ArcMapClient(host="127.0.0.1", port=s.getsockname()[1], timeout=2)
+        r = cli.send("execute_code", {"code": "#" + "a" * (1024 * 1024)})
+        self.assertFalse(r["ok"])
+        self.assertIn("DEMASIADO GRANDE", r["error"])
+        with self.assertRaises(socket.timeout, msg="el cliente llegó a conectar"):
+            s.accept()
+
+    def test_el_tope_es_el_del_add_in(self):
+        ruta = os.path.join(RAIZ, "addin", "ArcmapMcp.AddIn", "McpServer.cs")
+        with open(ruta, encoding="utf-8") as fh:
+            cs = fh.read()
+        self.assertIn("private const int MaxRequestBytes = 1024 * 1024;", cs)
+        self.assertEqual(servidor.MAX_REQUEST_BYTES, 1024 * 1024)
+
+
 class TestPuenteOcupado(unittest.TestCase):
     """La conexión se abre pero ArcMap no contesta: hilo principal ocupado."""
 
@@ -590,6 +615,15 @@ class TestExportEsperaAlDibujoDesdeFuera(unittest.TestCase):
         self.assertEqual(servidor._client.llamadas, ["export_jpg"] * 3)
         self.assertIn("2 reintentos", r["result"]["aviso_dibujo"])
 
+    def test_la_captura_del_lienzo_tambien_reintenta(self):
+        """get_canvas_screenshot falló por E_PENDING en la regresión del 2026-09-26."""
+        import base64
+        png = {"ok": True, "result": {"imagen_b64": base64.b64encode(b"png").decode()}}
+        servidor._client = ClienteGuion([self.DIBUJANDO, png])
+        img = servidor.get_canvas_screenshot()
+        self.assertEqual(servidor._client.llamadas, ["get_canvas_screenshot"] * 2)
+        self.assertEqual(img.data, b"png")
+
     def test_sin_dibujando_no_hay_reintento_ni_aviso(self):
         servidor._client = ClienteGuion([dict(self.BIEN, result={"salida": "x.pdf"})])
         r = servidor.export_pdf(r"C:\x.pdf")
@@ -619,6 +653,93 @@ class TestExportEsperaAlDibujoDesdeFuera(unittest.TestCase):
             cs = fh.read()
         self.assertRegex(cs, r'const string Dibujando = "dibujando: ";')
         self.assertNotIn("DoEvents()", cs, "la espera volvió al hilo de ArcMap")
+
+
+class TestTimeoutDelRunnerExplicaElBloqueoCom(unittest.TestCase):
+    """El error de timeout del runner decía que con ArcMap abierto no se bloqueaba, y el
+    2026-09-26 se midió lo contrario con un documento concreto. Que no vuelva."""
+
+    def setUp(self):
+        ruta = os.path.join(RAIZ, "addin", "ArcmapMcp.AddIn", "Handlers", "PythonHandlers.cs")
+        with open(ruta, encoding="utf-8") as fh:
+            self.cs = fh.read()
+
+    def test_no_niega_el_bloqueo_con_arcmap_abierto(self):
+        self.assertNotIn("que ArcMap esté abierto o colgado no lo", self.cs)
+
+    def test_el_aviso_va_en_el_error_de_timeout(self):
+        self.assertIn("const string AvisoBloqueoCom", self.cs)
+        self.assertIn("? AvisoBloqueoCom", self.cs)
+
+
+class TestGeoprocesoNoArrastraMensajesAjenos(unittest.TestCase):
+    """Los mensajes del geoprocesador son del PROCESO, no de cada GeoProcessorClass: un
+    geoproceso que fallaba antes de arrancar (tool inexistente) salía con el error del
+    anterior. Reproducido el 2026-09-26. El comportamiento se prueba en
+    `regresion_sesion_viva.py`; aquí se vigila que el arreglo no se pierda."""
+
+    def setUp(self):
+        ruta = os.path.join(RAIZ, "addin", "ArcmapMcp.AddIn", "Handlers",
+                            "GeoprocessingHandlers.cs")
+        with open(ruta, encoding="utf-8") as fh:
+            cs = fh.read()
+        ini = cs.index("public static JObject RunGeoprocessing(")
+        self.run = cs[ini:cs.index("public static JObject CalculateGeometry(")]
+
+    def test_vacia_los_mensajes_antes_de_ejecutar(self):
+        self.assertIn("gp.ClearMessages();", self.run)
+        self.assertLess(self.run.index("gp.ClearMessages();"), self.run.index("gp.Execute("))
+
+    def test_comprueba_la_firma_antes_de_ejecutar(self):
+        self.assertLess(self.run.index("ComprobarFirma("), self.run.index("gp.Execute("))
+
+    def test_fuera_de_arcmap_tambien_la_comprueba_antes_del_runner(self):
+        """Por arcpy.gp, dos parámetros de más tumban Python: la vía de fuera no puede
+        dejar la comprobación al runner (2026-09-26)."""
+        ruta = os.path.join(RAIZ, "addin", "ArcmapMcp.AddIn", "Handlers", "PythonHandlers.cs")
+        with open(ruta, encoding="utf-8") as fh:
+            cs = fh.read()
+        fuera = cs[cs.index("public static JObject GeoprocesoFuera("):]
+        self.assertLess(fuera.index("GeoprocessingHandlers.ComprobarFirma("),
+                        fuera.index('RunJob("geoprocessing"'))
+
+
+class TestGeoprocesoFueraDeArcMap(unittest.TestCase):
+    """`fuera_de_arcmap` elige el comando; sin él, la llamada es la de siempre."""
+
+    def setUp(self):
+        self.original = servidor._client
+        self.addCleanup(setattr, servidor, "_client", self.original)
+
+    def _llamar(self, **kw):
+        enviados = []
+
+        class Cliente(object):
+            def send(self, ctype, params=None, timeout=None):
+                enviados.append((ctype, params, timeout))
+                return {"ok": True, "result": {}}
+        servidor._client = Cliente()
+        servidor.run_geoprocessing("management.GetCount", ["a.shp"], **kw)
+        return enviados[0]
+
+    def test_por_defecto_dentro_y_con_el_contrato_de_siempre(self):
+        ctype, params, timeout = self._llamar()
+        self.assertEqual(ctype, "run_geoprocessing")
+        self.assertEqual(set(params), {"tool", "params", "resolver_capas"})
+        self.assertEqual(timeout, servidor.GP_TIMEOUT)
+
+    def test_fuera_va_al_comando_de_fondo_con_sus_opciones(self):
+        ctype, params, timeout = self._llamar(fuera_de_arcmap=True, sobrescribir=True)
+        self.assertEqual(ctype, "run_geoprocessing_fuera")
+        self.assertIs(params["sobrescribir"], True)
+        self.assertIs(params["anadir_al_mapa"], True)
+        self.assertEqual(timeout, servidor.FONDO_TIMEOUT)
+
+    def test_el_comando_existe_en_el_add_in(self):
+        ruta = os.path.join(RAIZ, "addin", "ArcmapMcp.AddIn", "McpServer.cs")
+        with open(ruta, encoding="utf-8") as fh:
+            self.assertIn('{ "run_geoprocessing_fuera", Handlers.PythonHandlers.GeoprocesoFuera }',
+                          fh.read())
 
 
 class TestSetLabelsParametros(unittest.TestCase):
@@ -951,8 +1072,9 @@ class TestContratoDeTools(unittest.TestCase):
         sueltas = []
         for bloque in bloques:
             cuerpo = bloque.split("@mcp.tool()")[0]
-            # _exportar es _client.send con el reintento de E_PENDING (los tres export).
-            if "_client.send" in cuerpo or "return _exportar(" in cuerpo:
+            # _exportar es _client.send con el reintento de E_PENDING (los tres export y,
+            # desde la 2.16.0, la captura del lienzo).
+            if "_client.send" in cuerpo or "_exportar(" in cuerpo:
                 continue
             nombre = ""
             for linea in cuerpo.strip().splitlines():
@@ -1031,6 +1153,75 @@ class TestVersionMxd(unittest.TestCase):
         version, error = _mxd_version_declarada(tmp)  # no debe lanzar
         self.assertIsNone(version)
         self.assertTrue(error)
+
+
+class TestMarcosOle(unittest.TestCase):
+    """Un .mxd con marcos OLE deja colgado al arcpy de fuera mientras ArcMap está abierto
+    (medido 2026-09-26). Se detectan sin abrirlo por el CLSID de la clase en el layout."""
+
+    def _streams(self, **streams):
+        p = unittest.mock.patch.object(servidor, "_mxd_streams",
+                                       return_value=({k.replace("_", " "): v for k, v in streams.items()}, None))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_cuenta_en_el_pagelayout(self):
+        h = servidor._CLSID_MARCO_OLE
+        self._streams(PageLayout=b"xx" + h + b"yy" + h)
+        self.assertEqual(servidor._mxd_marcos_ole("x.mxd"), (2, None))
+
+    def test_si_hay_mx_document_manda_ese(self):
+        """Lo que guarda ArcObjects desde fuera va a `Mx Document` y deja el `PageLayout`
+        antiguo: sin esta regla, la copia ya limpia seguía contando dos."""
+        h = servidor._CLSID_MARCO_OLE
+        self._streams(PageLayout=h + h, Mx_Document=b"limpio")
+        self.assertEqual(servidor._mxd_marcos_ole("x.mxd"), (0, None))
+
+    def test_la_verificacion_del_guardado_no_se_lanza(self):
+        r = {"ok": True, "result": {"ruta": "C:\\x.mxd", "marcos_ole": [{"donde": "layout"}]}}
+        with unittest.mock.patch.object(servidor, "_verificar_guardado") as verificar:
+            servidor._tras_guardar(r, "ruta", True)
+        verificar.assert_not_called()
+        self.assertFalse(r["result"]["verificacion"]["reabierto"])
+        self.assertIn("marco(s) OLE", r["result"]["verificacion"]["motivo"])
+
+    def test_el_clsid_es_el_del_add_in(self):
+        ruta = os.path.join(RAIZ, "addin", "ArcmapMcp.AddIn", "Handlers", "MarcosOle.cs")
+        with open(ruta, encoding="utf-8") as fh:
+            cs = fh.read()
+        self.assertIn('internal const string Prefijo = "marcos_ole: ";', cs)
+        import uuid
+        self.assertEqual(servidor._CLSID_MARCO_OLE,
+                         uuid.UUID("f6705e85-523b-11d1-86e7-0000f8751720").bytes_le)
+
+    def test_las_copias_fuera_de_arcmap_miran_antes_los_marcos(self):
+        ruta = os.path.join(RAIZ, "addin", "ArcmapMcp.AddIn", "Handlers", "PythonHandlers.cs")
+        with open(ruta, encoding="utf-8") as fh:
+            cs = fh.read()
+        con_copia = cs[cs.index("private static JObject RunJobConSnapshot("):]
+        self.assertLess(con_copia.index("MarcosOle.ComprobarAntesDeCopia("),
+                        con_copia.index("Snapshot(serializarSesion)"))
+
+
+class TestNoEjecutarDentroDeUnDibujado(unittest.TestCase):
+    """ArcMap bombea mensajes mientras dibuja y los comandos entraban en mitad de un
+    dibujado: 72 veces en una pasada de la regresión (2026-09-26). Hipótesis de la caída
+    en MaplexAnnotation.dll. El dispatcher aplaza el comando si hay un dibujado en curso."""
+
+    def setUp(self):
+        ruta = os.path.join(RAIZ, "addin", "ArcmapMcp.AddIn", "StaDispatcher.cs")
+        with open(ruta, encoding="utf-8") as fh:
+            self.cs = fh.read()
+
+    def test_si_esta_dibujando_no_ejecuta_el_handler(self):
+        invoke = self.cs[self.cs.index("public static JObject Invoke("):self.cs.index("private static JObject Ejecutar(")]
+        self.assertIn("VigiaDibujo.Asegurar();", invoke)
+        self.assertLess(invoke.index("if (VigiaDibujo.Dibujando && !forzar)"),
+                        invoke.index("return Ejecutar(handler"))
+
+    def test_la_espera_tiene_tope(self):
+        """Un DisplayFinished que no llega no puede dejar el puente parado."""
+        self.assertIn("AplazamientoMaximo = TimeSpan.FromSeconds(20)", self.cs)
 
 
 class TestArcMapLocal(unittest.TestCase):
