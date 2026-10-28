@@ -37,7 +37,7 @@ namespace ArcmapMcp.AddIn.Handlers
 
         public static JObject ListStyleSymbols(JObject parameters)
         {
-            IMxDocument doc;
+            Documento doc;
             MapHandlers.FocusMap(out doc);
             IStyleGallery galeria = doc.StyleGallery;
 
@@ -96,7 +96,7 @@ namespace ArcmapMcp.AddIn.Handlers
 
         public static JObject ApplyStyleSymbol(JObject parameters)
         {
-            IMxDocument doc;
+            Documento doc;
             IMap map;
             IGeoFeatureLayer gfl = SymbolHandlers.CapaDeEntidades(parameters, out doc, out map);
             esriGeometryType shp = SymbolHandlers.Geometria(gfl);

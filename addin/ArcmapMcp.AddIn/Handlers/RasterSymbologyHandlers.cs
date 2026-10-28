@@ -1,5 +1,6 @@
 using System;
 using System.Globalization;
+using System.Linq;
 using ESRI.ArcGIS.ArcMapUI;
 using ESRI.ArcGIS.Carto;
 using ESRI.ArcGIS.DataSourcesRaster;
@@ -42,11 +43,11 @@ namespace ArcmapMcp.AddIn.Handlers
             if (modo == "classified") modo = "clasificado";
             if (modo == "stretched") modo = "estirado";
             if (modo == "unique" || modo == "unique_values" || modo == "unicos") modo = "unico";
-            if (modo != "clasificado" && modo != "estirado" && modo != "unico")
-                throw new ArgumentException("'modo' debe ser 'clasificado', 'estirado' o 'unico' "
+            if (modo != "clasificado" && modo != "estirado" && modo != "unico" && modo != "rgb")
+                throw new ArgumentException("'modo' debe ser 'clasificado', 'estirado', 'unico' o 'rgb' "
                     + "(alias: classified / stretched / unique). Recibido: " + modo);
 
-            IMxDocument doc;
+            Documento doc;
             IMap map = MapHandlers.FocusMap(out doc);
             ILayer capaEncontrada = MapHandlers.FindLayer(map, capa);
             IRasterLayer rl = capaEncontrada as IRasterLayer;
@@ -96,6 +97,8 @@ namespace ArcmapMcp.AddIn.Handlers
                 detalle = AplicarClasificado(rl, raster, parameters, desde, hasta);
             else if (modo == "unico")
                 detalle = AplicarValoresUnicos(rl, raster, parameters);
+            else if (modo == "rgb")
+                detalle = AplicarRgb(rl, raster, parameters);
             else
                 detalle = AplicarEstirado(rl, raster, desde, hasta, LeerAlgoritmo(parameters["algoritmo"]));
 
@@ -112,10 +115,98 @@ namespace ArcmapMcp.AddIn.Handlers
             return Protocol.Result(detalle);
         }
 
+        /// <summary>
+        /// Composición RGB de un ráster multibanda. Una ortofoto PNOA de 4 bandas (ECW)
+        /// añadida desde fuera entraba con UNA banda estirada, en azul, y la salida era
+        /// copiar un .lyr de otro plano (serie real, 2026-10-06).
+        ///
+        /// En 8 bits no se estira: una ortofoto ya viene con su rango de 0 a 255, y así
+        /// no hace falta calcular estadísticas (que se escriben junto a la fuente). Con
+        /// más bits se deja el estiramiento por defecto del renderer.
+        /// </summary>
+        private static JObject AplicarRgb(IRasterLayer rl, IRaster raster, JObject parameters)
+        {
+            // 🔴 El ráster de la capa NO sirve para contar bandas: tras una simbología de una
+            // banda (clasificado, estirado), rl.Raster devuelve SOLO esa banda, y un fichero de
+            // 3 bandas decía tener 1 (lo cazó la regresión, 2026-10-06). Se usa el ráster
+            // completo del dataset.
+            IRasterDataset ds = ((IRaster2)raster).RasterDataset;
+            raster = ((IRasterDataset2)ds).CreateFullRaster();
+            int nBandas = ((IRasterBandCollection)raster).Count;
+            int[] bandas = { 1, 2, 3 };
+            JArray tBandas = parameters["bandas"] as JArray;
+            if (Parametros.Dado(parameters["bandas"]))
+            {
+                if (tBandas == null || tBandas.Count != 3)
+                    throw new ArgumentException("'bandas' son tres números, rojo, verde y azul, contando desde 1: [1, 2, 3].");
+                bandas = tBandas.Select(t => (int)t).ToArray();
+            }
+            foreach (int b in bandas)
+                if (b < 1 || b > nBandas)
+                    throw new ArgumentException("El ráster tiene " + nBandas + " banda(s); la " + b + " no existe."
+                        + (nBandas < 3 ? " Con menos de 3 bandas no hay composición RGB: usa 'estirado'." : ""));
+
+            IRasterRGBRenderer rgb = new RasterRGBRendererClass();
+            IRasterRenderer render = (IRasterRenderer)rgb;
+            render.Raster = raster;
+            rgb.RedBandIndex = bandas[0] - 1;
+            rgb.GreenBandIndex = bandas[1] - 1;
+            rgb.BlueBandIndex = bandas[2] - 1;
+            bool ochoBits = ((IRasterProps)raster).PixelType == rstPixelType.PT_UCHAR;
+            if (ochoBits)
+                ((IRasterStretch)rgb).StretchType = esriRasterStretchTypesEnum.esriRasterStretch_NONE;
+            render.Update();
+            rl.Renderer = render;
+
+            IRasterRGBRenderer leido = (IRasterRGBRenderer)rl.Renderer;
+            return new JObject
+            {
+                ["bandas"] = new JArray(leido.RedBandIndex + 1, leido.GreenBandIndex + 1, leido.BlueBandIndex + 1),
+                ["num_bandas"] = nBandas,
+                ["estiramiento"] = ((IRasterStretch)leido).StretchType.ToString().Replace("esriRasterStretch_", "")
+            };
+        }
+
         private static JObject AplicarClasificado(IRasterLayer rl, IRaster raster,
             JObject parameters, IColor desde, IColor hasta)
         {
-            int numClases = Parametros.LeerEntero(parameters["num_clases"], "num_clases", 5, 2, 32);
+            // Cortes fijos: los límites superiores de cada clase. El inferior de la primera es
+            // el mínimo del ráster, que lo pone el propio renderer (get_Break(0)).
+            double[] cortesFijos = LayerHandlers.LeerCortes(parameters["cortes"]);
+            if (cortesFijos != null && Parametros.Dado(parameters["num_clases"]))
+                throw new ArgumentException("Con 'cortes' sobra 'num_clases': las clases son las que dan los cortes.");
+            int numClases = cortesFijos != null ? cortesFijos.Length
+                : Parametros.LeerEntero(parameters["num_clases"], "num_clases", 5, 2, 32);
+
+            // conservar_colores: los colores de la clasificación que la capa YA tiene, para
+            // cambiar solo los cortes (op `breaks` de una serie de montes, 212 veces: los planos traían su
+            // paleta y lo que cambiaba eran los límites). Se leen ANTES de sustituir el renderer.
+            bool conservar = Parametros.LeerBool(parameters["conservar_colores"], "conservar_colores", false);
+            IColor[] coloresActuales = null;
+            if (conservar)
+            {
+                if (Parametros.Dado(parameters["colores"]) || Parametros.Dado(parameters["color_desde"])
+                    || Parametros.Dado(parameters["color_hasta"]))
+                    throw new ArgumentException("'conservar_colores' y 'colores'/'color_desde'/'color_hasta' se excluyen.");
+                IRasterClassifyColorRampRenderer actual = rl.Renderer as IRasterClassifyColorRampRenderer;
+                if (actual == null)
+                    throw new ArgumentException("'conservar_colores' necesita que la capa ya esté clasificada (ahora es "
+                        + (rl.Renderer == null ? "sin simbología" : rl.Renderer.GetType().Name) + ").");
+                coloresActuales = new IColor[actual.ClassCount];
+                for (int i = 0; i < actual.ClassCount; i++)
+                {
+                    IFillSymbol fs = actual.get_Symbol(i) as IFillSymbol;
+                    if (fs == null || fs.Color == null)
+                        throw new ArgumentException("La clase " + (i + 1) + " no tiene un color de relleno que conservar.");
+                    coloresActuales[i] = (IColor)((ESRI.ArcGIS.esriSystem.IClone)fs.Color).Clone();
+                }
+                if (cortesFijos != null && cortesFijos.Length != coloresActuales.Length)
+                    throw new ArgumentException("La capa tiene " + coloresActuales.Length + " clases y 'cortes' trae "
+                        + cortesFijos.Length + ": para conservar los colores hacen falta tantos cortes como clases. Pasa"
+                        + " 'colores' si cambias el número de clases.");
+                if (cortesFijos == null && !Parametros.Dado(parameters["num_clases"]))
+                    numClases = coloresActuales.Length;
+            }
 
             // Sin estadísticas no hay clasificación posible: el renderer necesita
             // saber mínimo, máximo e histograma. Muchos .tif llegan sin ellas (los
@@ -148,19 +239,48 @@ namespace ArcmapMcp.AddIn.Handlers
             }
 
             int nReal = clasificado.ClassCount;
+            if (cortesFijos != null)
+            {
+                if (nReal != cortesFijos.Length)
+                    throw new ArgumentException("El ráster no admite " + cortesFijos.Length + " clases (salen " + nReal
+                        + "): ¿tiene menos valores distintos que cortes?");
+                for (int k = 0; k < nReal; k++)
+                    clasificado.set_Break(k + 1, cortesFijos[k]);
+            }
 
             // Los colores salen de una de dos vías, y la explícita manda: o los N
             // colores que da quien llama, o una rampa entre los dos extremos. Los
             // explícitos son la ÚNICA vía fiable cuando las clases son categóricas
             // o los cortes vienen fijados por percentil, porque entonces el color
             // no es un gradiente que se pueda derivar: es una decisión por clase.
-            IColor[] paleta = LeerPaleta(parameters["colores"], nReal);
-            if (paleta == null)
-                paleta = ConstruirRampa(desde, hasta, nReal, LeerAlgoritmo(parameters["algoritmo"]));
+            IColor[] paleta;
+            if (coloresActuales != null)
+            {
+                if (coloresActuales.Length != nReal)
+                    throw new ArgumentException("La capa tenía " + coloresActuales.Length + " clases y salen " + nReal
+                        + ": no se pueden conservar los colores. Pasa 'cortes' (uno por clase) o 'colores'.");
+                paleta = coloresActuales;
+            }
+            else
+            {
+                paleta = LeerPaleta(parameters["colores"], nReal);
+                if (paleta == null)
+                    paleta = ConstruirRampa(desde, hasta, nReal, LeerAlgoritmo(parameters["algoritmo"]));
+            }
 
-            string[] etiquetas = LeerEtiquetas(parameters["etiquetas"], nReal);
+            string[] etiquetas;
+            JToken tEtiquetas = parameters["etiquetas"];
+            if (tEtiquetas != null && tEtiquetas.Type == JTokenType.String)
+            {
+                // "auto": a partir de los cortes, igual que set_graduated_symbology.
+                var limites = new double[nReal + 1];
+                for (int k = 0; k <= nReal; k++)
+                    limites[k] = clasificado.get_Break(k);
+                etiquetas = LayerHandlers.LeerEtiquetasDeClases(tEtiquetas, limites);
+            }
+            else
+                etiquetas = LeerEtiquetas(tEtiquetas, nReal);
 
-            var cortes = new JArray();
             for (int i = 0; i < nReal; i++)
             {
                 ISimpleFillSymbol relleno = new SimpleFillSymbolClass
@@ -190,18 +310,50 @@ namespace ArcmapMcp.AddIn.Handlers
                 clasificado.set_Label(i, etiquetas != null
                     ? etiquetas[i]
                     : Etiqueta(inf) + " – " + Etiqueta(sup));
-                cortes.Add(sup);
             }
 
             // Segundo Update(): consolida símbolos y etiquetas en la leyenda.
             render.Update();
+            // El anterior se guarda: si ArcMap no respeta los cortes se devuelve, para que el
+            // error no deje la capa reclasificada en vivo (revisión del 2026-10-25).
+            IRasterRenderer anterior = rl.Renderer;
             rl.Renderer = render;
 
+            // Leídos de vuelta del renderer de la capa, después del Update: si este
+            // reclasificara, los cortes pedidos no serían los dibujados.
+            var leido = (IRasterClassifyColorRampRenderer)rl.Renderer;
+            var cortes = new JArray();
+            var etiquetasLeidas = new JArray();
+            for (int i = 0; i < leido.ClassCount; i++)
+            {
+                cortes.Add(leido.get_Break(i + 1));
+                etiquetasLeidas.Add(leido.get_Label(i));
+            }
+            if (cortesFijos != null)
+                for (int k = 0; k < cortesFijos.Length; k++)
+                    if (Math.Abs((double)cortes[k] - cortesFijos[k]) > 1e-9 * Math.Max(1, Math.Abs(cortesFijos[k])))
+                    {
+                        rl.Renderer = anterior;
+                        throw new InvalidOperationException("ArcMap no ha respetado los cortes: pedidos "
+                            + string.Join(", ", cortesFijos) + "; dibujados " + string.Join(", ", cortes)
+                            + ". La capa se queda con la simbología que tenía.");
+                    }
+
+            var colores = new JArray();
+            for (int i = 0; i < leido.ClassCount; i++)
+            {
+                IFillSymbol fs = leido.get_Symbol(i) as IFillSymbol;
+                colores.Add(fs != null ? Parametros.Hex(fs.Color) : null);
+            }
             var res = new JObject
             {
-                ["num_clases"] = nReal,
+                ["num_clases"] = leido.ClassCount,
                 ["cortes"] = cortes,
+                ["etiquetas"] = etiquetasLeidas,
+                ["colores"] = colores
             };
+            if (coloresActuales != null)
+                res["colores_conservados"] = true;
             if (estadisticas != null)
                 res["estadisticas_calculadas"] = estadisticas;
             return res;

@@ -19,15 +19,9 @@ namespace ArcmapMcp.AddIn.Handlers
             IApplication app = ArcSession.App();
             IMxDocument doc = ArcSession.Doc(app);
 
-            // Ruta del .mxd: el último item de ITemplates es el documento actual.
-            string mxdPath = null;
-            try
-            {
-                ITemplates templates = app.Templates;
-                if (templates != null && templates.Count > 0)
-                    mxdPath = templates.get_Item(templates.Count - 1);
-            }
-            catch { /* documento sin guardar o Templates no disponible */ }
+            // Ruta del .mxd, con la misma regla que save_mxd: un documento nuevo desde una
+            // plantilla no da la ruta de la plantilla como si fuera la suya.
+            string mxdPath = ArcSession.MxdPath(app);
 
             var dataFrames = new JArray();
             IMaps maps = doc.Maps;

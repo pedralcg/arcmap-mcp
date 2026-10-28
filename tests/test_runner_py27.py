@@ -68,7 +68,7 @@ class TestRunnerBajoPython27(unittest.TestCase):
         for marca in ("stdout_mezclado", "sys_exit", "serializar_sanea",
                       "export_ddp_delata", "salida_existente_aborta",
                       "backlink_es_unico", "auditor_grupo_apagado",
-                      "auditor_marco_fuera"):
+                      "auditor_marco_fuera", "exportador_con_fallar"):
             self.assertIn(marca, nombres)
 
 

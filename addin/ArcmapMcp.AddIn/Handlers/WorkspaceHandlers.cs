@@ -145,23 +145,37 @@ namespace ArcmapMcp.AddIn.Handlers
                 return Protocol.Result(salida);
             }
 
+            // Todo lo que se abre aquí se SUELTA al terminar (SoltarCom). Sin eso el objeto
+            // COM vive hasta que pase el GC y mantiene el bloqueo de esquema (.sr.lock): el
+            // 2026-10-01, tras un describe_data, sobrescribir el shapefile desde fuera fallaba
+            // y la capa seguía con los datos viejos.
             if (ext == ".shp")
             {
                 IWorkspace ws = DataAccess.AbrirWorkspace(Path.GetDirectoryName(ruta), false);
-                IFeatureClass fc = ((IFeatureWorkspace)ws).OpenFeatureClass(Path.GetFileNameWithoutExtension(ruta));
-                return Protocol.Result(DescribirFeatureClass(salida, fc, "ShapeFile"));
+                IFeatureClass fc = null;
+                try
+                {
+                    fc = ((IFeatureWorkspace)ws).OpenFeatureClass(Path.GetFileNameWithoutExtension(ruta));
+                    return Protocol.Result(DescribirFeatureClass(salida, fc, "ShapeFile"));
+                }
+                finally { DataAccess.SoltarCom(fc); }
             }
 
             if (ext == ".dbf")
             {
                 IWorkspace ws = DataAccess.AbrirWorkspace(Path.GetDirectoryName(ruta), false);
-                ITable tabla = ((IFeatureWorkspace)ws).OpenTable(Path.GetFileNameWithoutExtension(ruta));
-                salida["dataType"] = "DbaseTable";
-                salida["baseName"] = Path.GetFileNameWithoutExtension(ruta);
-                salida["shapeType"] = null;
-                salida["datasetType"] = DataAccess.NombreTipoDataset(((IDataset)tabla).Type);
-                salida["campos"] = CamposAJson(tabla.Fields);
-                return Protocol.Result(salida);
+                ITable tabla = null;
+                try
+                {
+                    tabla = ((IFeatureWorkspace)ws).OpenTable(Path.GetFileNameWithoutExtension(ruta));
+                    salida["dataType"] = "DbaseTable";
+                    salida["baseName"] = Path.GetFileNameWithoutExtension(ruta);
+                    salida["shapeType"] = null;
+                    salida["datasetType"] = DataAccess.NombreTipoDataset(((IDataset)tabla).Type);
+                    salida["campos"] = CamposAJson(tabla.Fields);
+                    return Protocol.Result(salida);
+                }
+                finally { DataAccess.SoltarCom(tabla); }
             }
 
             if (DataAccess.SepararRutaGdb(ruta, out gdb, out nombre))
@@ -169,18 +183,20 @@ namespace ArcmapMcp.AddIn.Handlers
                 if (!Directory.Exists(gdb))
                     throw new ArgumentException("No existe la geodatabase: " + gdb);
                 IWorkspace ws = DataAccess.AbrirWorkspace(gdb, false);
+                IFeatureClass fc = null;
                 try
                 {
-                    IFeatureClass fc = ((IFeatureWorkspace)ws).OpenFeatureClass(nombre);
+                    fc = ((IFeatureWorkspace)ws).OpenFeatureClass(nombre);
                     return Protocol.Result(DescribirFeatureClass(salida, fc, "FeatureClass"));
                 }
                 catch (ArgumentException) { throw; }
                 catch
                 {
                     // No es feature class: tabla o ráster de gdb.
+                    ITable tabla = null;
                     try
                     {
-                        ITable tabla = ((IFeatureWorkspace)ws).OpenTable(nombre);
+                        tabla = ((IFeatureWorkspace)ws).OpenTable(nombre);
                         salida["dataType"] = "Table";
                         salida["baseName"] = nombre;
                         salida["shapeType"] = null;
@@ -193,10 +209,17 @@ namespace ArcmapMcp.AddIn.Handlers
                         IRasterWorkspaceEx rwx = ws as IRasterWorkspaceEx;
                         if (rwx == null)
                             throw;
-                        IRasterDataset rd = rwx.OpenRasterDataset(nombre);
-                        return Protocol.Result(DescribirRaster(salida, rd, nombre));
+                        IRasterDataset rd = null;
+                        try
+                        {
+                            rd = rwx.OpenRasterDataset(nombre);
+                            return Protocol.Result(DescribirRaster(salida, rd, nombre));
+                        }
+                        finally { DataAccess.SoltarCom(rd); }
                     }
+                    finally { DataAccess.SoltarCom(tabla); }
                 }
+                finally { DataAccess.SoltarCom(fc); }
             }
 
             if (DataAccess.EsExtensionRaster(ext))
@@ -204,8 +227,13 @@ namespace ArcmapMcp.AddIn.Handlers
                 if (!File.Exists(ruta))
                     throw new ArgumentException("No existe el ráster: " + ruta);
                 IRasterWorkspace rw = (IRasterWorkspace)DataAccess.AbrirWorkspace(Path.GetDirectoryName(ruta), true);
-                IRasterDataset rd = rw.OpenRasterDataset(Path.GetFileName(ruta));
-                return Protocol.Result(DescribirRaster(salida, rd, Path.GetFileNameWithoutExtension(ruta)));
+                IRasterDataset rd = null;
+                try
+                {
+                    rd = rw.OpenRasterDataset(Path.GetFileName(ruta));
+                    return Protocol.Result(DescribirRaster(salida, rd, Path.GetFileNameWithoutExtension(ruta)));
+                }
+                finally { DataAccess.SoltarCom(rd); }
             }
 
             throw new ArgumentException(

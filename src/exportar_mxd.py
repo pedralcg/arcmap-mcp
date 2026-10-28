@@ -15,7 +15,8 @@ UN proceso por documento. Ese aislamiento es la razón de existir de este ficher
 
 Uso:
     python27 exportar_mxd.py <trabajo.json>
-    trabajo = {"mxd": ruta, "salida": ruta, "formato": "jpg"|"pdf", "dpi": int}
+    trabajo = {"mxd": ruta, "salida": ruta, "formato": "jpg"|"pdf", "dpi": int,
+               "si_capas_rotas": "exportar"|"fallar"}
 
 El trabajo va en un JSON UTF-8 y no en argumentos a propósito: en Python 2 sobre
 Windows `sys.argv` llega en bytes de la codepage ANSI, y una tilde en la ruta es
@@ -55,6 +56,7 @@ def main():
         salida = trabajo["salida"]
         formato = trabajo.get("formato", "jpg").lower()
         dpi = int(trabajo.get("dpi", 230))
+        si_rotas = trabajo.get("si_capas_rotas", "exportar")
     except Exception as ex:
         _responder({"ok": False, "fase": "leer trabajo", "error": _texto(ex)})
         return 1
@@ -62,10 +64,23 @@ def main():
     base, ext = os.path.splitext(salida)
     tmp = u"%s.mcp-%s%s" % (base, uuid.uuid4().hex[:8], ext)
     fase = u"importando arcpy"
+    rotas = None
     try:
         import arcpy.mapping as MAP
         fase = u"abriendo documento"
         mxd = MAP.MapDocument(ruta)
+        fase = u"comprobando capas"
+        rotas = _capas_rotas(MAP, mxd)
+        if si_rotas == "fallar" and rotas.get("capas_rotas"):
+            # Antes de exportar nada: el plano que ya había se queda como estaba.
+            del mxd
+            datos = {"ok": False, "fase": fase,
+                     "error": u"no se exporta: %d capa(s) rota(s) salen en el plano y "
+                              u"si_capas_rotas='fallar'" % len(rotas["capas_rotas"]),
+                     "segundos": round(time.time() - inicio, 1)}
+            datos.update(rotas)
+            _responder(datos)
+            return 1
         fase = u"exportando"
         if formato == "pdf":
             MAP.ExportToPDF(mxd, tmp, resolution=dpi)
@@ -85,14 +100,35 @@ def main():
                 os.remove(tmp)
         except Exception:
             pass
-        _responder({"ok": False, "fase": fase, "error": _texto(ex),
-                    "traceback": traceback.format_exc().decode("utf-8", "replace"),
-                    "segundos": round(time.time() - inicio, 1)})
+        datos = {"ok": False, "fase": fase, "error": _texto(ex),
+                 "traceback": traceback.format_exc().decode("utf-8", "replace"),
+                 "segundos": round(time.time() - inicio, 1)}
+        datos.update(rotas or {})
+        _responder(datos)
         return 1
 
-    _responder({"ok": True, "salida": salida, "bytes": os.path.getsize(salida),
-                "sobrescrito": sobrescrito, "segundos": round(time.time() - inicio, 1)})
+    datos = {"ok": True, "salida": salida, "bytes": os.path.getsize(salida),
+             "sobrescrito": sobrescrito, "segundos": round(time.time() - inicio, 1)}
+    datos.update(rotas or {})
+    _responder(datos)
     return 0
+
+
+def _capas_rotas(mapping, mxd):
+    """Las capas rotas que SALEN en el plano, con el criterio de audit_folder (capa,
+    grupos y marco en la hoja). Visto el 2026-10-06: cuatro planos exportados con «ok»
+    y sin cantones, porque alguien había movido la capa minutos antes. Nunca lanza: si
+    no se puede averiguar, se dice y el export sigue, que es lo que hacía antes."""
+    try:
+        import auditor_mxd
+        capas, _marcos, _pagina = auditor_mxd.capas_y_marcos(mapping, mxd)
+        salen, sin_decidir = auditor_mxd.rotas_en_plano(capas)
+        datos = {"capas_rotas": salen}
+        if sin_decidir:
+            datos["capas_rotas_sin_decidir"] = sin_decidir
+        return datos
+    except Exception as ex:
+        return {"capas_rotas_error": _texto(ex)}
 
 
 if __name__ == "__main__":

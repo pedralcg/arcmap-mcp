@@ -24,12 +24,12 @@ namespace ArcmapMcp.AddIn
         private const string Catalogo = "https://github.com/pedralcg/arcmap-mcp/blob/main/docs/TOOLS.md";
         private const string Novedades = "https://github.com/pedralcg/arcmap-mcp/blob/main/CHANGELOG.md";
 
-        // Tools que el servidor MCP resuelve SIN el puente: describe_mxd, audit_folder y
-        // export_mxd_lote (2.13.0) trabajan con .mxd del disco y no tienen comando en
-        // McpServer. Son el +3 sobre los comandos del puente. Si se añade otra tool sin
-        // puente en el servidor, hay que subir este número: el test
-        // TestContratoDeTools.SIN_PUENTE de tests/test_client_protocol.py es la lista.
-        private const int ToolsSinPuente = 3;
+        // Tools que el servidor MCP resuelve SIN el puente: describe_mxd, audit_folder,
+        // export_mxd_lote (2.13.0), get_ole_tables, edit_mxd_lote y compare_mxd (2.17.0) trabajan con
+        // .mxd del disco y no tienen comando en McpServer. Son el +6 sobre los comandos del
+        // puente. Si se añade otra tool sin puente en el servidor, hay que subir este número:
+        // el test TestContratoDeTools.SIN_PUENTE de tests/test_client_protocol.py es la lista.
+        private const int ToolsSinPuente = 6;
 
         // Derivado y no escrito a mano: estaba en 48 cuando ya eran 57, porque un número
         // suelto en un literal no se actualiza al añadir una tool. La correspondencia es

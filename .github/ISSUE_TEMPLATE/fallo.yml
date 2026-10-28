@@ -24,7 +24,7 @@ body:
     attributes:
       label: Versión de arcmap-mcp
       description: Botón «Estado» de la barra, o la línea de arriba del CHANGELOG si no carga.
-      placeholder: "2.13.0"
+      placeholder: "2.17.0"
     validations:
       required: true
   - type: input

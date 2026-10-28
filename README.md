@@ -14,7 +14,7 @@ Cliente IA (Claude Code / Desktop / Gemini / Antigravity / OpenCode)
         │  protocolo MCP (stdio)
         ▼
 arcmap_mcp_server.py        ← servidor MCP externo (Python 3 + FastMCP): los schemas
-        │                      de las 66 herramientas y el contrato con el cliente
+        │                      de las 78 herramientas y el contrato con el cliente
         │  socket TCP local  127.0.0.1:27179
         ▼
 Add-in .NET (C#)            ← DENTRO de ArcMap: TcpListener + ArcObjects nativo
@@ -53,13 +53,15 @@ arcmap-mcp/
 ├── src/      arcmap_mcp_server.py   ← servidor MCP (regístralo en tu cliente IA)
 │             auditor_mxd.py · exportar_mxd.py ← procesos hijo Py2.7 de audit_folder y export_mxd_lote
 ├── addin/    ArcmapMcp.AddIn/       ← código C# del add-in (+ runner.py embebido)
-│             dist/arcmap-mcp.esriaddin  ← add-in listo para instalar
+│             ArcmapMcp.Disco/       ← arcmap-mcp-disco.exe: modo disco de edit_mxd_lote y compare_mxd
+│             dist/arcmap-mcp.esriaddin  ← add-in listo para instalar (lleva dentro el .exe)
 │             build.ps1              ← build sin Visual Studio (dotnet CLI)
 ├── docs/     INSTALL.md · TOOLS.md · ROADMAP.md · img/ (capturas)
 ├── tests/    test_client_protocol.py  ← tests automáticos (no necesitan ArcMap)
 │             test_runner_py27.py      ← el runner y el auditor bajo Python 2.7, sin arcpy
 │             regresion_sesion_viva.py ← barrido manual del catálogo (ArcMap vivo)
 │             regresion_ddp.py         ← barrido del atlas (Data Driven Pages, solo lectura)
+│             regresion_disco.py       ← edit_mxd_lote contra copias de un .mxd real (modo disco)
 │             sonda_puente.py          ← sonda manual de un comando suelto
 ├── INSTALAR.bat · ACTUALIZAR.bat · install.ps1 · LEEME.txt ← instalación de un clic
 ├── start-arcmap-mcp.ps1 · empaquetar.ps1 · requirements.txt · CHANGELOG.md · LICENSE · README.md
@@ -70,6 +72,7 @@ arcmap-mcp/
 | `addin/dist/arcmap-mcp.esriaddin` | **dentro de ArcMap** (.NET/CLR) | El add-in: socket + ArcObjects + subprocess arcpy |
 | `src/arcmap_mcp_server.py` | externo (Python 3) | Servidor MCP que registras en tu cliente IA |
 | `start-arcmap-mcp.ps1` | Windows | Lanzador: prepara venv, vigila el túnel, hace ping |
+| `arcmap-mcp-disco.exe` | externo, fuera de ArcMap | Modo disco: aplica (`edit_mxd_lote`) o lee (`compare_mxd`) un `.mxd` con los mismos handlers del add-in, sin abrirlo en ArcMap. **Viaja dentro del `.esriaddin`**: no hay que instalar nada aparte |
 
 > **arcmap-mcp se instala en `C:\mcp\arcmap-mcp`**, extraigas el ZIP donde lo extraigas:
 > el instalador copia ahí el paquete y registra esa ruta en tus clientes IA, así que la
@@ -79,20 +82,23 @@ arcmap-mcp/
 
 ## Herramientas MCP
 
-**66 herramientas** sobre ArcMap 10.5 (ver `docs/TOOLS.md` para el catálogo completo con
+**78 herramientas** sobre ArcMap 10.5 (ver `docs/TOOLS.md` para el catálogo completo con
 firmas, ejemplos y los matices de ejecución de cada grupo).
 
 Qué significa «probado», que conviene decirlo con precisión:
 
-- `tests/regresion_sesion_viva.py` hace **231 comprobaciones contra una sesión de ArcMap
-  real** y cubre unas **42 de las 66** tools, con sus casos de error. 🔴 **Modifica el
+- `tests/regresion_sesion_viva.py` hace **480 comprobaciones contra una sesión de ArcMap
+  real** y cubre **56 de las 78** tools, con sus casos de error. 🔴 **Modifica el
   documento abierto** (añade capas, cambia simbología, lanza geoprocesos): se lanza contra
   un mxd de pruebas, nunca contra un proyecto.
 - `tests/regresion_ddp.py` cubre las tres tools del atlas (Data Driven Pages) con **14
   comprobaciones**, y es **de solo lectura** sobre el documento: necesita un mxd con atlas
   habilitado, que en la práctica es siempre uno de producción. Exporta a `C:\temp`.
-- Otros **56 tests** corren sin ArcMap (protocolo, argumentos, runner Python 2.7 —con 38
-  casos propios—, instalador).
+- `tests/regresion_disco.py` prueba `edit_mxd_lote` contra copias de un .mxd real con **50
+  comprobaciones**, cada una con su control (lo guardado se lee con arcpy en otro proceso; una
+  ruta relativa que se pierde al guardar tiene que salir como no verificada).
+- Otros **199 tests** corren sin ArcMap (protocolo, argumentos, lectores de .mxd y de Word,
+  runner Python 2.7, instalador).
 - `export_mxd_lote` no pasa por el puente y no está en la regresión: se probó sobre planos
   reales, con salida idéntica byte a byte a la exportada a mano.
 - El resto de tools se ha ejercitado **a mano** en trabajo real a lo largo de las
@@ -109,7 +115,8 @@ próxima sorpresa: si usas una versión anterior a la 2.12.0, ese fallo está la
 - **Sin ArcMap abierto** (leen del disco, no pasan por el puente): `describe_mxd`
   (versión declarada de un .mxd sin abrirlo, milisegundos) · **`audit_folder`**
   (inventario de TODOS los .mxd de una carpeta: versión, capas, fuentes rotas y
-  definition queries, abriendo cada documento en un proceso aparte con timeout).
+  definition queries, abriendo cada documento en un proceso aparte con timeout) ·
+  `get_ole_tables` (las tablas de Word incrustadas en un .mxd, leídas del fichero).
 
 - **Esenciales:** `ping` · `get_arcmap_info` · `list_layers` · `zoom_to_layer` ·
   `export_pdf` · `refresh` · **`execute_arcpy`** (código arcpy arbitrario sobre un
@@ -119,16 +126,27 @@ próxima sorpresa: si usas una versión anterior a la 2.12.0, ese fallo está la
   `set_layer_visibility` · `export_view_png` · `export_jpg` · **`export_mxd_lote`**
   (exporta una lista de .mxd del disco, un proceso por documento: la vía para series).
 - **Capas y datos:** `select_by_attribute` · `clear_selection` · `get_unique_values` ·
-  `count_features` · `list_fields` · `get_layer_info` · `get_layer_features` · `add_layer` ·
-  `remove_layer` · `apply_symbology_from_layer` · `set_scale`.
+  `count_features` · `list_fields` · `get_layer_info` · `get_layer_features` · `add_layer`
+  (también **servicios WMS**, y capas que no entran en la leyenda) · `remove_layer` ·
+  `apply_symbology_from_layer` · `set_scale`.
+- **Tabla de contenidos y leyenda:** `add_group` (capa de grupo vacía) · `move_layer`
+  (recolocar una capa o grupo sin quitarla) · `rename_layer` (renombrarla sin
+  sustituirla) · `set_legend_item` (qué enseña la entrada de
+  leyenda de una capa, sin cambiarle el aspecto; quitarla o moverla) · `set_legend`
+  (tamaño de letra, columnas y encajar la leyenda en un recuadro sin escalarla).
 - **Simbología:** `set_graduated_symbology` (rangos, capas de entidades) ·
   **`set_unique_values_symbology`** (categorías por valores únicos) ·
   **`set_raster_symbology`** (ráster clasificado, estirado o **por valores únicos** —
   NDVI, FCC, P95, pendientes, y máscaras categóricas con valores transparentes) ·
+  `set_single_symbology` (un solo símbolo con los colores pedidos) · **`edit_symbol`**
+  (cambia solo lo pedido de la simbología que ya tiene la capa) · `list_style_symbols` /
+  `apply_style_symbol` (símbolos de tus estilos `.style` por nombre) ·
   `apply_symbology_from_layer` (.lyr plantilla).
+- **Etiquetas:** **`set_labels`** (expresión, tamaño, color y halo; devuelve cómo quedó
+  cada clase y si el mapa usa Maplex o el motor estándar).
 - **Marcadores espaciales:** `get_bookmarks` · `add_bookmark` · `remove_bookmark` ·
   `goto_bookmark`.
-- **Geoprocesamiento y mantenimiento:** `run_geoprocessing` · `save_mxd` · `save_mxd_as` ·
+- **Geoprocesamiento y mantenimiento:** `run_geoprocessing` · `save_mxd` · `save_mxd_as` · `open_mxd` ·
   `list_broken_data_sources` · `repair_data_source`.
 - **Visualización y catálogo:** **`get_canvas_screenshot`** (imagen INLINE, el agente
   ve el mapa; cancelable con ESC) · `describe_data` · `list_data_frames` / `set_active_df` ·
@@ -413,7 +431,7 @@ admite `1024`–`65535`; un valor inválido se ignora con aviso en el log y se v
   | `ARCMAP_BRIDGE_TIMEOUT` | 60 s | Tools rápidas: consultas, capas, simbología, navegación |
   | `ARCMAP_GP_TIMEOUT` | 1860 s | Lo que ocupa el hilo de ArcMap: `run_geoprocessing`, `calculate_geometry`, `export_pdf`, `export_jpg`, `export_view_png` |
   | `ARCMAP_FONDO_TIMEOUT` | 2760 s | Lo que va a un handler de fondo: las 3 de Data Driven Pages y las 5 ambientales |
-  | `ARCMAP_SAVE_TIMEOUT` | 630 s | `save_mxd` y `save_mxd_as` |
+  | `ARCMAP_SAVE_TIMEOUT` | 630 s | `save_mxd`, `save_mxd_as` y `open_mxd` |
   | `ARCMAP_EXEC_TIMEOUT_CLIENTE` | 930 s | **Solo `execute_arcpy`** |
   | `ARCMAP_EXEC_SESION_TIMEOUT_CLIENTE` | 1560 s | `execute_arcpy` con `serializar_sesion=True`: el add-in gasta hasta 600 s copiando la sesión **antes** de sus 900 s |
   | `ARCMAP_ESPERA_DIBUJO` | 120 s | Los tres export cuando llegan con el mapa **aún dibujando** (E_PENDING, típico justo después de cambiar la vista o las etiquetas): el servidor espera fuera de ArcMap y reintenta cada 3 s |
@@ -454,10 +472,10 @@ admite `1024`–`65535`; un valor inválido se ignora con aviso en el log y se v
 
 ## Estado
 - [x] Add-in .NET nativo (ArcObjects vía CLR, sin runtime Python embebido)
-- [x] 66 herramientas, incluido el análisis ambiental (índices espectrales, hidrología,
+- [x] 78 herramientas, incluido el análisis ambiental (índices espectrales, hidrología,
       curvas, perfiles 3D y ruta de mínimo coste) y series de planos reales de decenas
-      de páginas. Cobertura automática: 231 comprobaciones en sesión viva sobre ~42 de
-      ellas, más 102 tests sin ArcMap (ver «Herramientas MCP»)
+      de páginas. Cobertura automática: 480 comprobaciones en sesión viva sobre 56 de
+      ellas, 50 en modo disco y 199 tests sin ArcMap (ver «Herramientas MCP»)
 - [x] Geoprocesos arcpy fuera de proceso: la GUI de ArcMap no se congela
 - [x] Cancelación de render/exports con ESC (`ITrackCancel`)
 - [x] Registrable en 5 clientes (Claude Code/Desktop, Gemini CLI, Antigravity, OpenCode)
@@ -469,6 +487,13 @@ coste. Está pensado para organizaciones que siguen atadas a ArcMap 10.x y quier
 automatizar su trabajo cartográfico con agentes IA sin esperar a migrar a ArcGIS Pro.
 
 Las dudas, fallos y propuestas van por **Issues** del repositorio.
+
+## Recursos de la comunidad
+
+- [arcmap-mcp-skill](https://github.com/HeyElowen/arcmap-mcp-skill), de
+  [@HeyElowen](https://github.com/HeyElowen): una skill para agentes que trabajan con
+  arcmap-mcp (MIT, README en chino, inglés y español). Es un proyecto de su autor, no
+  parte de arcmap-mcp.
 
 ## Créditos
 

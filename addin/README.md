@@ -49,9 +49,16 @@ addin/
 │   ├── Handlers/             ← implementación de los comandos (ArcObjects + runner)
 │   ├── Python/runner.py      ← runner arcpy out-of-process (recurso embebido)
 │   └── Images/               ← iconos de la barra
+├── ArcmapMcp.Disco/          ← arcmap-mcp-disco.exe: el modo disco (ADR-010)
+│   └── Program.cs            ← aplica o lee un .mxd con los handlers de la DLL, sin ArcMap
 ├── build.ps1                 ← build + empaquetado sin Visual Studio
-└── dist/arcmap-mcp.esriaddin ← paquete instalable
+└── dist/arcmap-mcp.esriaddin ← paquete instalable (lleva dentro arcmap-mcp-disco.exe)
 ```
+
+`ArcmapMcp.Disco` es un ejecutable aparte que reutiliza los handlers de la DLL para
+trabajar sobre un `.mxd` del disco sin abrirlo en ArcMap: lo usan `edit_mxd_lote` y
+`compare_mxd`. `build.ps1` lo compila y lo mete en `Install\` del `.esriaddin`, así que
+se instala con el add-in y no hay que instalar nada aparte.
 
 ## Build (sin Visual Studio)
 

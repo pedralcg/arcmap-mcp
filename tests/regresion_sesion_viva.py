@@ -14,12 +14,23 @@ con ArcMap cerrado.
 
 Solo tools de LECTURA o de efecto acotado y reversible sobre un documento de
 pruebas: nada de exports masivos, nada de guardar el .mxd, nada de tocar datos.
+
+QUE DOCUMENTO ABRIR: una COPIA recien hecha de un .mxd de pruebas sin las capas de
+los fixtures (p. ej. C:\\temp\\2026-09-25_etiquetas\\maplex_ligero.mxd, que ademas
+usa Maplex). NO `copia_regresion.mxd`: es una SALIDA de este script (save_mxd_as),
+trae ya real_NUEVO.tif y el script la borra al final. Abrirla da una cascada de
+falsos fallos por capas duplicadas (2026-10-01).
 El objetivo es detectar si algo se rompio al reinstalar el add-in cinco veces.
 """
 import json
 import os
 import socket
 import sys
+
+# Con la salida redirigida a un fichero, Windows usa cp1252 y el primer «≤» de una
+# etiqueta tumbaba el barrido a medias, dejando el documento de pruebas tocado (2026-10-10).
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 # Mismas variables que el servidor y el add-in (ver README, "Cambiar el puerto").
 HOST = os.environ.get("ARCMAP_BRIDGE_HOST", "127.0.0.1")
@@ -466,6 +477,40 @@ if control.get("ok"):
       nota="(revertir)")
     t("remove_layer", {"capa": "regresion_grupo/regresion_sin_leyenda"})
     t("remove_layer", {"capa": "regresion_grupo"})
+
+    # 3.0: quitar y mover entradas. Con un add-in anterior los parametros se ignoran y
+    # la respuesta no trae 'orden': las comprobaciones de abajo fallan (control).
+    sys.stdout.write("--- leyenda: quitar y ordenar entradas (3.0) ---" + chr(10))
+    t("add_layer", {"fuente": VEC, "nombre": "regresion_orden"})
+    r = t("set_legend_item", {"capa": "regresion_orden", "posicion": 1}, nota="(posicion=1)")
+    orden = ((r or {}).get("result") or {}).get("orden") or []
+    comprobar("posicion=1: la entrada queda la primera, leido de la leyenda",
+              orden[:1] == ["regresion_orden"], "orden=%s" % orden)
+    r = t("set_legend_item", {"capa": "regresion_orden", "despues_de": NOMBRE_VEC}, nota="(despues_de)")
+    orden = ((r or {}).get("result") or {}).get("orden") or []
+    comprobar("despues_de: justo detras de la referencia",
+              NOMBRE_VEC in orden and "regresion_orden" in orden
+              and orden.index("regresion_orden") == orden.index(NOMBRE_VEC) + 1,
+              "orden=%s" % orden)
+    t("set_legend_item", {"capa": "regresion_orden", "posicion": 1, "despues_de": NOMBRE_VEC},
+      espera_ok=False, nota="(posicion y despues_de a la vez)")
+    t("set_legend_item", {"capa": "regresion_orden", "posicion": 0}, espera_ok=False,
+      nota="(posicion fuera de rango)")
+    t("set_legend_item", {"capa": "regresion_orden", "despues_de": "regresion_no_existe"},
+      espera_ok=False, nota="(despues_de inexistente)")
+    t("set_legend_item", {"capa": "regresion_orden", "quitar": True, "posicion": 1},
+      espera_ok=False, nota="(quitar va solo)")
+    r = t("set_legend_item", {"capa": "regresion_orden", "quitar": True}, nota="(quitar)")
+    orden = ((r or {}).get("result") or {}).get("orden")
+    comprobar("quitar: la entrada ya no esta en la leyenda",
+              orden is not None and "regresion_orden" not in orden, "orden=%s" % orden)
+    # Un cambio de contenido del mapa (ContentsChanged) no debe devolverla.
+    t("set_layer_visibility", {"capa": "regresion_orden", "visible": False})
+    t("set_layer_visibility", {"capa": "regresion_orden", "visible": True})
+    t("set_legend_item", {"capa": "regresion_orden"}, espera_ok=False,
+      nota="(sigue fuera tras cambiar el mapa)")
+    t("count_features", {"capa": "regresion_orden"}, nota="(la capa sigue en el mapa)")
+    t("remove_layer", {"capa": "regresion_orden"})
 else:
     sys.stdout.write("  [---] sin leyenda con AutoAdd en este layout: bloque saltado" + chr(10))
 
@@ -549,6 +594,88 @@ else:
                      % (NOMBRE_VEC, chr(10)))
     if not inicial.get("ok"):
         fallos.append(("set_labels", str(inicial.get("error"))[:110]))
+
+sys.stdout.write("--- set_labels: Maplex, copiar_de y por_valor (3.0) ---" + chr(10))
+# Con un add-in anterior los parametros nuevos se ignoran con ok=true y las lecturas de
+# 'maplex', 'copiado_de' y 'por_valor' no llegan (control). Lo aplicado se comprueba
+# LEIDO de la capa: un try/except escondio una vez que LabelLargestPolygon no se ponia.
+if texto_campo and inicial.get("ok") and inicial["result"].get("maplex"):
+    EXPR = "[" + texto_campo + "]"
+    t("add_layer", {"fuente": VEC, "nombre": "regresion_maplex"})
+    t("set_labels", {"capa": "regresion_maplex", "expresion": EXPR})
+    r = t("set_labels", {"capa": "regresion_maplex", "parte_mayor": True, "sin_duplicados_m": 500,
+                         "tamano_minimo_m": 50, "repetir_cada_mm": 60}, nota="(opciones Maplex)")
+    mx = ((((r or {}).get("result") or {}).get("clases") or [{}])[0]).get("maplex") or {}
+    comprobar("Maplex: lo aplicado se lee de la capa",
+              mx.get("parte_mayor") is True and mx.get("sin_duplicados") is True
+              and mx.get("distancia_duplicados") == 500 and mx.get("unidad_duplicados") == "Map"
+              and mx.get("tamano_minimo") == 50 and mx.get("repetir") is True
+              and mx.get("intervalo_repeticion") == 60 and mx.get("unidad_repeticion") == "MM",
+              json.dumps(mx)[:110])
+    r = t("set_labels", {"capa": "regresion_maplex", "sin_duplicados_m": 0, "repetir_cada_mm": 0},
+          nota="(0 apaga)")
+    mx = ((((r or {}).get("result") or {}).get("clases") or [{}])[0]).get("maplex") or {}
+    comprobar("Maplex: 0 apaga sin tocar lo demas",
+              mx.get("sin_duplicados") is False and mx.get("repetir") is False
+              and mx.get("parte_mayor") is True, json.dumps(mx)[:110])
+
+    t("add_layer", {"fuente": VEC, "nombre": "regresion_copia"})
+    r = t("set_labels", {"capa": "regresion_copia", "copiar_de": "regresion_maplex"}, nota="(copiar_de)")
+    res_c = (r or {}).get("result") or {}
+    c0 = (res_c.get("clases") or [{}])[0]
+    comprobar("copiar_de: expresion y colocacion copiadas, leidas de la capa",
+              res_c.get("copiado_de") == "regresion_maplex" and c0.get("expresion") == EXPR
+              and (c0.get("maplex") or {}).get("parte_mayor") is True and res_c.get("etiquetas_activas"),
+              json.dumps(c0)[:110])
+    t("set_labels", {"capa": "regresion_copia", "copiar_de": "regresion_no_existe"}, espera_ok=False,
+      nota="(copiar_de inexistente)")
+    t("remove_layer", {"capa": "regresion_copia"})
+
+    # por_valor: una clase por categoria, CLONADA. El riesgo es el silencioso de Maplex
+    # (clases nuevas = capa sin etiquetas), asi que el control es la imagen.
+    t("set_unique_values_symbology", {"capa": "regresion_maplex", "campo": texto_campo})
+    t("set_labels", {"capa": "regresion_maplex", "clase": "x", "por_valor": {"campo": texto_campo}},
+      espera_ok=False, nota="(por_valor con clase)")
+    t("set_labels", {"capa": "regresion_maplex", "por_valor": {"campo": "CampoQueNoExiste"}},
+      espera_ok=False, nota="(por_valor campo inexistente)")
+    t("set_labels", {"capa": "regresion_maplex", "por_valor": {"campo": "FID"}}, espera_ok=False,
+      nota="(por_valor sin colores en campo no simbolizado)")
+    r = t("set_labels", {"capa": "regresion_maplex", "por_valor": {"campo": texto_campo}}, nota="(por_valor)")
+    res_v = (r or {}).get("result") or {}
+    pv = res_v.get("por_valor") or []
+    clases_v = res_v.get("clases") or []
+    colores_v = set(c.get("color") for c in clases_v)
+    comprobar("por_valor: una clase por valor, con su filtro y colores distintos",
+              len(pv) > 1 and len(clases_v) == len(pv) and all(c.get("filtro") for c in clases_v)
+              and len(colores_v) > 1, "valores=%d clases=%d colores=%d" % (len(pv), len(clases_v), len(colores_v)))
+    on = ETQ_DIR + SEP + "por_valor_on.jpg"
+    off = ETQ_DIR + SEP + "por_valor_off.jpg"
+    t("set_layer_visibility", {"capa": NOMBRE_VEC, "visible": False})
+    t("export_jpg", {"salida": on, "dpi": 72}, nota="(por_valor encendidas)")
+    t("set_labels", {"capa": "regresion_maplex", "activar": False}, nota="(apagar)")
+    t("export_jpg", {"salida": off, "dpi": 72}, nota="(por_valor apagadas)")
+    try:
+        pinta = huella(on) != huella(off)
+    except OSError:
+        pinta = False
+    comprobar("por_valor: las etiquetas clonadas se dibujan con Maplex (JPG on != off)", pinta)
+    # por_valor + where: antes el where pisaba el «campo = valor» de cada clase y quedaban N
+    # etiquetas por entidad, con la respuesta diciendo el filtro viejo (revision 2026-10-25, medio 2).
+    # Ahora se compone con AND; y por_valor + color, que dejaba todas del mismo color, es error.
+    t("set_labels", {"capa": "regresion_maplex", "por_valor": {"campo": texto_campo}, "color": "#FF0000"},
+      espera_ok=False, nota="(por_valor con color)")
+    r = t("set_labels", {"capa": "regresion_maplex", "por_valor": {"campo": texto_campo}, "where": "FID >= 0"},
+          nota="(por_valor + where)")
+    clases_w = ((r or {}).get("result") or {}).get("clases") or []
+    filtros_w = [c.get("filtro") or "" for c in clases_w]
+    comprobar("por_valor + where: cada clase con su valor Y el where",
+              len(clases_w) == len(pv) and len(set(filtros_w)) == len(pv)
+              and all(f.startswith("(" + texto_campo) and f.endswith("AND (FID >= 0)") for f in filtros_w),
+              str(filtros_w)[:110])
+    t("set_layer_visibility", {"capa": NOMBRE_VEC, "visible": True})
+    t("remove_layer", {"capa": "regresion_maplex"})
+else:
+    sys.stdout.write("  [---] sin Maplex o sin campo de texto: bloque saltado" + chr(10))
 
 sys.stdout.write("--- simbolo unico y edit_symbol (2.15.0) ---" + chr(10))
 # El control de edit_symbol es lo que NO debe cambiar: al tocar el borde, el relleno
@@ -952,6 +1079,669 @@ r = t("execute_code", {"code": "x = 1" + chr(10) + "#" + "a" * (1100 * 1024)},
 comprobar("request grande: llega el motivo, no un 10054", "DEMASIADO GRANDE" in str((r or {}).get("error", "")),
           str(r)[:110])
 t("ping", nota="(el puente sigue atendiendo)")
+
+sys.stdout.write("--- capa homonima, rename_layer y clases de edit_symbol (2.17.0) ---" + chr(10))
+# Una capa de la raiz con una homonima dentro de un grupo era inalcanzable: su ruta es su
+# nombre pelado, y al repetirla casaba con las dos (expediente real, 2026-10-01).
+G17 = "Grupo_2170"
+t("add_group", {"nombre": G17})
+t("add_layer", {"fuente": VEC, "grupo": G17})
+DENTRO = G17 + "/" + NOMBRE_VEC
+
+
+def visible(ruta):
+    for c in (enviar("list_layers").get("result") or {}).get("capas", []):
+        if c.get("ruta") == ruta:
+            return c.get("visible")
+    return None
+
+
+t("set_layer_visibility", {"capa": NOMBRE_VEC, "visible": False}, nota="(nombre pelado = la de la raiz)")
+comprobar("homonima: se apaga la de la RAIZ, no la del grupo",
+          visible(NOMBRE_VEC) is False and visible(DENTRO) is True, "%s / %s" % (visible(NOMBRE_VEC), visible(DENTRO)))
+t("set_layer_visibility", {"capa": "/" + NOMBRE_VEC, "visible": True}, nota="('/' delante)")
+t("set_layer_visibility", {"capa": DENTRO, "visible": False}, nota="(ruta del grupo)")
+comprobar("homonima: la ruta del grupo apaga solo esa",
+          visible(NOMBRE_VEC) is True and visible(DENTRO) is False, "%s / %s" % (visible(NOMBRE_VEC), visible(DENTRO)))
+
+# Las destructivas no adivinan (opcion 2, decision de Pedro del 2026-10-10): con homonimas, el
+# nombre pelado es error aunque una este en la raiz, y se exige la ruta anclada con '/'.
+r = t("remove_layer", {"capa": NOMBRE_VEC}, espera_ok=False, nota="(destructiva: nombre pelado con homonima)")
+comprobar("remove_layer homonima: pide la ruta anclada y no borra nada",
+          ("/" + NOMBRE_VEC) in str((r or {}).get("error", "")) and visible(NOMBRE_VEC) is True
+          and visible(DENTRO) is False, str(r)[:110])
+r = t("repair_data_source", {"capa": NOMBRE_VEC, "ruta_antigua": "no_existe_2170", "ruta_nueva": "x"},
+      espera_ok=False, nota="(destructiva: nombre pelado con homonima)")
+t("remove_layer", {"capa": "/" + DENTRO}, nota="(ruta anclada del grupo)")
+comprobar("remove_layer anclada: se va la del grupo y la de la raiz sigue",
+          visible(DENTRO) is None and visible(NOMBRE_VEC) is True, "%s / %s" % (visible(NOMBRE_VEC), visible(DENTRO)))
+t("add_layer", {"fuente": VEC, "grupo": G17}, nota="(volver a ponerla)")
+t("set_layer_visibility", {"capa": DENTRO, "visible": False})
+
+# Prefijos de capa (2026-10-10): 'visible:' elige entre las que se dibujan (la del grupo esta
+# apagada), y 'fuente:' por el fichero, que comparten las dos (asi que es ambiguo).
+t("set_layer_visibility", {"capa": "visible:" + NOMBRE_VEC, "visible": False}, nota="(visible: con homonima apagada)")
+comprobar("visible: apaga la de la raiz, la unica que se dibujaba",
+          visible(NOMBRE_VEC) is False and visible(DENTRO) is False, "%s / %s" % (visible(NOMBRE_VEC), visible(DENTRO)))
+t("set_layer_visibility", {"capa": "/" + NOMBRE_VEC, "visible": True})
+r = t("count_features", {"capa": "fuente:Interés Turístico"}, espera_ok=False, nota="(fuente: compartida por dos)")
+comprobar("fuente: con dos candidatas da sus rutas", DENTRO in str((r or {}).get("error", "")), str(r)[:110])
+
+r = t("rename_layer", {"capa": DENTRO, "nombre_nuevo": "Renombrada 2170 ñ"})
+comprobar("rename_layer: la TOC lo lee de vuelta", visible(G17 + "/Renombrada 2170 ñ") is False, str(r)[:110])
+t("rename_layer", {"capa": G17 + "/Renombrada 2170 ñ", "nombre_nuevo": "a/b"}, espera_ok=False, nota="('/' en el nombre)")
+DENTRO = G17 + "/Renombrada 2170 ñ"
+
+t("set_unique_values_symbology", {"capa": DENTRO, "campo": "Municipio"})
+clases = ((enviar("edit_symbol", {"capa": DENTRO}).get("result") or {}).get("clases") or [])
+if len(clases) >= 3:
+    c1, c2 = clases[0]["categoria"], clases[1]["categoria"]
+    r = t("edit_symbol", {"capa": DENTRO, "categoria": c1, "etiqueta": c1 + " · 2170"}, nota="(etiqueta)")
+    etiq = [k["etiqueta"] for k in ((r or {}).get("result") or {}).get("clases", []) if k["categoria"] == c1]
+    comprobar("edit_symbol: etiqueta leida de vuelta", etiq == [c1 + " · 2170"], str(etiq))
+    t("edit_symbol", {"capa": DENTRO, "etiqueta": "X"}, espera_ok=False, nota="(etiqueta sin categoria)")
+    antes = {k["categoria"]: k.get("color_relleno") for k in clases}
+    r = t("edit_symbol", {"capa": DENTRO, "categoria": c2, "quitar": True}, nota="(quitar clase)")
+    despues = {k["categoria"]: k.get("color_relleno") for k in ((r or {}).get("result") or {}).get("clases", [])}
+    comprobar("quitar: la clase desaparece y las demas NO cambian de color",
+              c2 not in despues and len(despues) == len(antes) - 1
+              and all(despues[k] == antes[k] for k in despues), str(despues)[:110])
+else:
+    comprobar("valores unicos con al menos 3 clases", False, str(clases)[:110])
+
+t("set_text_element", {"buscar": "texto que no existe 2170"}, espera_ok=False, nota="(sin nada que cambiar)")
+# Un campo que la capa no tiene: ArcMap no dibujaba nada y set_labels decia «activas».
+r = t("set_labels", {"capa": DENTRO, "expresion": "[CampoQueNoExiste] & \" m\""}, espera_ok=False,
+      nota="(campo inexistente)")
+comprobar("set_labels: el error nombra el campo que falta", "CampoQueNoExiste" in str((r or {}).get("error", "")),
+          str(r)[:110])
+t("remove_layer", {"capa": G17})
+
+sys.stdout.write("--- valores unicos: varios campos, clases, resto; edit_symbol (3.0) ---" + chr(10))
+# Con un add-in anterior 'campos'/'clases'/'resto' se ignoraban (o fallaba sin 'campo'), y
+# 'valores_agrupados'/'encabezado' no llegaban: el bloque falla (control). Todo se comprueba
+# leido del RENDERER; arcpy da classValues vacio con varios campos.
+
+
+def uv(r):
+    return (r or {}).get("result") or {}
+
+
+t("add_layer", {"fuente": VEC, "nombre": "regresion_uv"})
+r = uv(t("set_unique_values_symbology", {"capa": "regresion_uv", "campos": ["Municipio", "Vocacion"]},
+         nota="(dos campos)"))
+cl = r.get("clases") or []
+comprobar("dos campos: cada clase es 'Municipio, Vocacion' y no queda nada sin clase",
+          len(cl) > 1 and all(", " in c.get("valor", "") for c in cl) and r.get("valores_sin_clase") == [],
+          "clases=%d sin_clase=%s" % (len(cl), r.get("valores_sin_clase")))
+e = uv(t("edit_symbol", {"capa": "regresion_uv"}, nota="(estado con dos campos)"))
+comprobar("edit_symbol ve las clases de dos campos", e.get("renderer") == "valores_unicos"
+          and len(e.get("clases") or []) == len(cl), "edit=%d set=%d" % (len(e.get("clases") or []), len(cl)))
+t("set_unique_values_symbology", {"capa": "regresion_uv", "campos": ["Municipio", "Vocacion", "Nombre", "Codigo"]},
+  espera_ok=False, nota="(mas de 3 campos)")
+t("set_unique_values_symbology", {"capa": "regresion_uv", "campo": "Municipio", "campos": ["Vocacion"]},
+  espera_ok=False, nota="(campo y campos a la vez)")
+t("set_unique_values_symbology", {"capa": "regresion_uv", "campo": "Municipio",
+                                  "clases": [{"valores": ["Aledo"]}, {"valores": ["Aledo", "Lorca"]}]},
+  espera_ok=False, nota="(un valor en dos clases)")
+CLASES = [{"valores": ["Aledo", "Lorca"], "etiqueta": "Sur", "color": "#AA0000"},
+          {"valores": ["Bullas"], "etiqueta": "Noroeste"}]
+r = uv(t("set_unique_values_symbology", {"capa": "regresion_uv", "campo": "Municipio", "clases": CLASES},
+         nota="(clases explicitas, sin resto)"))
+cl = r.get("clases") or []
+comprobar("clases: dos valores en una clase, leidos del renderer",
+          len(cl) == 2 and cl[0].get("etiqueta") == "Sur" and sorted(cl[0].get("valores") or []) == ["Aledo", "Lorca"],
+          json.dumps(cl, ensure_ascii=False)[:110])
+comprobar("sin resto: dice que hay valores sin clase y que no se dibujan",
+          len(r.get("valores_sin_clase") or []) == 10 and "NO se dibujan" in (r.get("aviso") or ""),
+          str(r.get("valores_sin_clase"))[:110])
+r = uv(t("set_unique_values_symbology", {"capa": "regresion_uv", "campo": "Municipio", "clases": CLASES,
+                                         "resto": "Otros municipios"}, nota="(con resto)"))
+comprobar("resto: leido del renderer", r.get("resto") == "Otros municipios", str(r.get("resto")))
+e = uv(t("edit_symbol", {"capa": "regresion_uv", "categoria": "Noroeste", "anadir_valores": ["Cehegín", "Moratalla"]},
+         nota="(anadir_valores)"))
+por_et = dict((c.get("etiqueta"), c) for c in e.get("clases") or [])
+comprobar("anadir_valores: entran en la clase y la otra no cambia de color",
+          sorted((por_et.get("Noroeste") or {}).get("valores_agrupados") or []) == ["Cehegín", "Moratalla"]
+          and (por_et.get("Sur") or {}).get("color_relleno") == "#AA0000",
+          json.dumps(e.get("clases"), ensure_ascii=False)[:110])
+t("edit_symbol", {"capa": "regresion_uv", "categoria": "Sur", "anadir_valores": ["Bullas"]}, espera_ok=False,
+  nota="(valor que ya tiene clase)")
+e = uv(t("edit_symbol", {"capa": "regresion_uv", "encabezado": "Comarca"}, nota="(encabezado)"))
+comprobar("encabezado: leido de la leyenda del renderer", e.get("encabezado") == "Comarca", str(e.get("encabezado")))
+e = uv(t("edit_symbol", {"capa": "regresion_uv", "categoria": "Noroeste", "quitar": True}, nota="(quitar con agrupados)"))
+comprobar("quitar una clase se lleva sus valores agrupados",
+          [c.get("etiqueta") for c in e.get("clases") or []] == ["Sur"], json.dumps(e.get("clases"), ensure_ascii=False)[:110])
+t("remove_layer", {"capa": "regresion_uv"})
+
+# Raster: encabezado, etiqueta y color de una clase por edit_symbol.
+if enviar("set_raster_symbology", {"capa": "real_NUEVO.tif", "modo": "clasificado", "num_clases": 3}).get("ok"):
+    e = uv(t("edit_symbol", {"capa": "real_NUEVO.tif", "encabezado": "Altura (m)"}, nota="(raster: encabezado)"))
+    comprobar("raster: encabezado leido de la leyenda", e.get("encabezado") == "Altura (m)", str(e.get("encabezado")))
+    e = uv(t("edit_symbol", {"capa": "real_NUEVO.tif", "categoria": "1", "etiqueta": "Bajo",
+                             "color_relleno": "#00FF00"}, nota="(raster: clase 1)"))
+    c1 = (e.get("clases") or [{}])[0]
+    comprobar("raster: etiqueta y color de la clase 1, leidos; la 2 no cambia",
+              c1.get("etiqueta") == "Bajo" and c1.get("color_relleno") == "#00FF00"
+              and ((e.get("clases") or [{}, {}])[1].get("color_relleno")
+                   == ((e.get("antes") or {}).get("clases") or [{}, {}])[1].get("color_relleno")),
+              json.dumps(e.get("clases"), ensure_ascii=False)[:110])
+    comprobar("raster: el encabezado sobrevive a editar una clase", e.get("encabezado") == "Altura (m)",
+              str(e.get("encabezado")))
+    t("edit_symbol", {"capa": "real_NUEVO.tif", "grosor_borde": 1}, espera_ok=False, nota="(raster: parametro de vector)")
+else:
+    comprobar("raster de prueba clasificado para edit_symbol", False, "set_raster_symbology fallo")
+
+# RGB (3.0): real_NUEVO.tif tiene 3 bandas de 8 bits. Con un add-in anterior 'rgb' no es un modo
+# valido y falla (control).
+r = uv(t("set_raster_symbology", {"capa": "real_NUEVO.tif", "modo": "rgb", "bandas": [3, 1, 2]}, nota="(rgb)"))
+comprobar("rgb: bandas leidas del renderer y sin estirar en 8 bits",
+          r.get("bandas") == [3, 1, 2] and r.get("estiramiento") == "NONE", json.dumps(r)[:110])
+t("set_raster_symbology", {"capa": "real_NUEVO.tif", "modo": "rgb", "bandas": [5, 1, 2]}, espera_ok=False,
+  nota="(rgb: banda inexistente)")
+t("set_raster_symbology", {"capa": "real_NUEVO.tif", "modo": "rgb", "bandas": [1, 2]}, espera_ok=False,
+  nota="(rgb: dos bandas)")
+
+sys.stdout.write("--- set_legend: tamano, columnas, recuadro (3.0) ---" + chr(10))
+# Con un add-in anterior el comando no existe y todo el bloque falla (control). Lo que se
+# comprueba es el CONTENIDO leido de la leyenda: los getters de ILegendItem devuelven
+# copias, y escribir sin reasignar daba ok y no cambiaba nada.
+# (No se usa res(): mas arriba el script reutiliza `res` como variable.)
+
+
+def resultado_de(r):
+    return (r or {}).get("result") or {}
+
+
+t("add_layer", {"fuente": VEC, "nombre": "regresion_leyenda"})
+e0 = resultado_de(t("set_legend", {}, nota="(estado)"))
+nat0 = e0.get("natural") if isinstance(e0.get("natural"), dict) else None
+comprobar("set_legend mide el tamano natural", nat0 is not None
+          and nat0["ancho"] > 0 and nat0["alto"] > 0, str(e0.get("natural"))[:110])
+r = resultado_de(t("set_legend", {"tamano": 8}, nota="(tamano=8)"))
+ahora = r.get("ahora") or {}
+comprobar("tamano=8: minimo y maximo leidos son 8",
+          ahora.get("tamano_min") == 8 and ahora.get("tamano_max") == 8,
+          "min=%s max=%s" % (ahora.get("tamano_min"), ahora.get("tamano_max")))
+# Con ajuste automatico ArcMap encoge la letra al dibujar: lo escrito no seria lo dibujado.
+comprobar("tamano: apaga el ajuste automatico", ahora.get("ajuste_automatico") is False,
+          str(ahora.get("ajuste_automatico")))
+nat8 =ahora.get("natural") if isinstance(ahora.get("natural"), dict) else None
+if nat8 and ahora.get("marco"):
+    x0 = ahora["marco"]["xmin"]
+    techo = ahora["marco"]["ymin"] + ahora["marco"]["alto"]
+    holgado = [x0, techo - nat8["alto"] - 5, x0 + nat8["ancho"] + 5, techo]
+    r = resultado_de(t("set_legend", {"recuadro": holgado}, nota="(recuadro holgado)"))
+    m = (r.get("ahora") or {}).get("marco") or {}
+    comprobar("recuadro: el marco queda al tamano natural, arriba a la izquierda",
+              (r.get("encaje") or {}).get("cabe") is True
+              and abs(m.get("ancho", 0) - nat8["ancho"]) < 0.05
+              and abs(m.get("alto", 0) - nat8["alto"]) < 0.05
+              and abs(m.get("xmin", 0) - x0) < 0.01
+              and abs(m.get("ymin", 0) + m.get("alto", 0) - techo) < 0.01,
+              "marco=%s natural=%s" % (m, nat8))
+    comprobar("recuadro: la letra NO se escala al encajar",
+              (r.get("ahora") or {}).get("tamano_max") == 8, str((r.get("ahora") or {}).get("tamano_max")))
+    comprobar("recuadro: el marco deja de ser fijo (sigue al contenido)",
+              (r.get("ahora") or {}).get("marco_fijo") is False, str((r.get("ahora") or {}).get("marco_fijo")))
+    estrecho = [x0, techo - 0.5, x0 + 0.5, techo]
+    r = resultado_de(t("set_legend", {"recuadro": estrecho}, nota="(recuadro estrecho)"))
+    enc = r.get("encaje") or {}
+    comprobar("recuadro estrecho: dice que no cabe y cuanto falta",
+              enc.get("cabe") is False and enc.get("sobra_alto", 0) < 0, str(enc)[:110])
+else:
+    comprobar("set_legend: hay medida para probar el recuadro", False, str(ahora)[:110])
+if (e0.get("entradas") or 0) >= 2:
+    r = resultado_de(t("set_legend", {"columnas": 2}, nota="(columnas=2)"))
+    comprobar("columnas=2: leidas de la leyenda", (r.get("ahora") or {}).get("columnas") == 2,
+              str((r.get("ahora") or {}).get("columnas")))
+t("set_legend", {"recuadro": [1, 2, 3]}, espera_ok=False, nota="(recuadro mal formado)")
+t("set_legend", {"leyenda": "regresion_no_existe"}, espera_ok=False, nota="(leyenda inexistente)")
+# La medida no puede depender de la vista activa: en vivo se usa la pantalla del layout
+# que ya tiene ArcMap, sin activar otra.
+dfs = resultado_de(enviar("list_data_frames"))
+activo = dfs.get("activo")
+if activo:
+    natc = resultado_de(enviar("set_legend", {})).get("natural")  # en la vista con que abrio el documento
+    t("set_active_df", {"nombre": activo}, nota="(pasar a vista de datos)")
+    e1 = resultado_de(t("set_legend", {}, nota="(estado en vista de datos)"))
+    nat1 = e1.get("natural") if isinstance(e1.get("natural"), dict) else None
+    comprobar("la medida es la misma en vista de datos",
+              nat1 is not None and isinstance(natc, dict)
+              and abs(nat1["ancho"] - natc["ancho"]) < 0.01 and abs(nat1["alto"] - natc["alto"]) < 0.01,
+              "datos=%s otra=%s" % (nat1, natc))
+t("remove_layer", {"capa": "regresion_leyenda"})
+
+sys.stdout.write("--- arreglos de la revision de la 2.17.0 (3.0) ---" + chr(10))
+# Cada caso falla con el add-in anterior (control).
+t("add_layer", {"fuente": VEC, "nombre": "regresion_rev"})
+t("rename_layer", {"capa": "regresion_rev", "nombre_nuevo": "a" + SEP + "b"}, espera_ok=False,
+  nota="(barra invertida en el nombre)")
+# Lo que va entre comillas es texto: antes pedia un campo `ha`.
+t("set_labels", {"capa": "regresion_rev", "expresion": "[Municipio] & \" [ha]\"", "activar": True},
+  nota="(corchetes dentro de un texto)")
+t("set_labels", {"capa": "regresion_rev", "activar": False})
+# Con una tabla unida, ArcMap solo dibuja el campo con su nombre COMPLETO (medido en dos PNG: con
+# el nombre corto salen idénticos a sin etiquetas). Antes la comprobación aceptaba la cola.
+CSV_UNION = "C:" + SEP + "temp" + SEP + "arcmap-mcp-regresion" + SEP + "union_regresion.csv"
+with open(CSV_UNION, "w") as fh:
+    fh.write("Municipio,Unico\nAledo,A\nTotana,T\n")
+t("add_layer", {"fuente": VEC, "nombre": "regresion_union"})
+if enviar("run_geoprocessing", {"tool": "management.AddJoin",
+                                "params": ["regresion_union", "Municipio", CSV_UNION, "Municipio"]}).get("ok"):
+    r = t("set_labels", {"capa": "regresion_union", "expresion": "[Unico]"}, espera_ok=False,
+          nota="(campo unido sin calificar)")
+    comprobar("union: el error da el nombre completo", "union_regresion.csv.Unico" in str((r or {}).get("error")),
+              str((r or {}).get("error"))[:110])
+    t("set_labels", {"capa": "regresion_union", "expresion": "[union_regresion.csv.Unico]"},
+      nota="(campo unido con su nombre completo)")
+    # where sobre el campo unido: se validaba contra la clase sin la union y se rechazaba un filtro
+    # que ArcMap si dibuja (revision 2026-10-25, hipotesis 7). Control: 'A' (Aledo) rotula y 'Z' no,
+    # asi que las dos imagenes difieren; y un campo que no existe sigue siendo error.
+    t("set_labels", {"capa": "regresion_union", "where": "union_regresion.csv.Unico = 'NoExiste_2170' AND x = 1"},
+      espera_ok=False, nota="(where con un campo que no hay)")
+    t("set_extent", {"capa": "regresion_union"})
+    png_a = "C:" + SEP + "temp" + SEP + "arcmap-mcp-regresion" + SEP + "where_union_A.png"
+    png_z = "C:" + SEP + "temp" + SEP + "arcmap-mcp-regresion" + SEP + "where_union_Z.png"
+    ok_a = t("set_labels", {"capa": "regresion_union", "where": "union_regresion.csv.Unico = 'A'", "tamano": 20},
+             nota="(where sobre el campo unido)")
+    t("export_view_png", {"salida": png_a, "dpi": 72})
+    t("set_labels", {"capa": "regresion_union", "where": "union_regresion.csv.Unico = 'Z'"}, nota="(no casa)")
+    t("export_view_png", {"salida": png_z, "dpi": 72})
+    try:
+        distintas = huella(png_a) != huella(png_z)
+    except OSError:
+        distintas = False
+    comprobar("where sobre campo unido: se acepta y ArcMap lo dibuja (PNG 'A' != 'Z')",
+              (ok_a or {}).get("ok") and distintas)
+else:
+    comprobar("AddJoin para la prueba de la union", False)
+t("remove_layer", {"capa": "regresion_union"})
+
+# Categoria por VALOR antes que por etiqueta: con la clase 1 etiquetada "2", la categoria "2"
+# casaba con dos clases y la 2 no se podia alcanzar.
+campos = (resultado_de(enviar("list_fields", {"capa": "regresion_rev"})).get("campos") or [])
+numerico = next((c.get("nombre") for c in campos if c.get("nombre") not in ("FID", "OBJECTID")
+                 and str(c.get("tipo", "")).lower() in ("double", "integer", "smallinteger", "single")), None)
+if numerico and enviar("set_graduated_symbology", {"capa": "regresion_rev", "campo": numerico,
+                                                   "num_clases": 3}).get("ok"):
+    t("edit_symbol", {"capa": "regresion_rev", "categoria": "1", "etiqueta": "2"}, nota="(clase 1 -> «2»)")
+    r = resultado_de(t("edit_symbol", {"capa": "regresion_rev", "categoria": "2", "etiqueta": "Dos"},
+                       nota="(categoria 2 = valor, no la etiqueta)"))
+    et = [c.get("etiqueta") for c in r.get("clases") or []]
+    comprobar("categoria ambigua: manda el valor", et[:2] == ["2", "Dos"], str(et))
+else:
+    comprobar("capa con campo numerico para graduar", False, str([c.get("tipo") for c in campos])[:110])
+t("remove_layer", {"capa": "regresion_rev"})
+
+# open_mxd del mismo documento: no se reabre (no habria forma de saber cuando termina).
+mxd_abierto = resultado_de(enviar("get_arcmap_info")).get("mxd")
+if mxd_abierto:
+    t("open_mxd", {"ruta": mxd_abierto, "cambios_sin_guardar": "descartar"}, espera_ok=False,
+      nota="(el documento ya abierto)")
+
+# Export sobre un plano viejo ABIERTO por otro programa: no se pierde ninguno de los dos.
+import ctypes
+import glob
+from ctypes import wintypes
+DIR_EXP = "C:" + SEP + "temp" + SEP + "arcmap-mcp-regresion"
+JPG = DIR_EXP + SEP + "regresion_sobrescribir.jpg"
+borrar_fichero(JPG)
+t("export_jpg", {"salida": JPG, "dpi": 30}, nota="(primer plano)")
+tam_viejo = os.path.getsize(JPG) if os.path.exists(JPG) else -1
+k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+k32.CreateFileW.restype = wintypes.HANDLE
+k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+for compartir, nombre in ((1 | 2, "visor que bloquea"), (1 | 2 | 4, "visor que deja borrar")):
+    h = k32.CreateFileW(JPG, 0x80000000, compartir, None, 3, 0x80, None)
+    try:
+        r = t("export_jpg", {"salida": JPG, "dpi": 40}, espera_ok=(compartir & 4) != 0, nota="(" + nombre + ")")
+    finally:
+        k32.CloseHandle(h)
+    restos = [f for f in glob.glob(DIR_EXP + SEP + "regresion_sobrescribir*") if f != JPG]
+    if compartir & 4:
+        comprobar("export (" + nombre + "): el nuevo en su sitio y sin restos",
+                  os.path.exists(JPG) and os.path.getsize(JPG) != tam_viejo and not restos,
+                  "existe=%s restos=%s" % (os.path.exists(JPG), restos))
+    else:
+        comprobar("export (" + nombre + "): el viejo intacto y sin restos",
+                  os.path.exists(JPG) and os.path.getsize(JPG) == tam_viejo and not restos,
+                  "tam=%s viejo=%s restos=%s" % (os.path.getsize(JPG) if os.path.exists(JPG) else None,
+                                                tam_viejo, restos))
+    for f in restos:
+        borrar_fichero(f)
+borrar_fichero(JPG)
+
+sys.stdout.write("--- herramientas nuevas: textos por patron, cortes, leyenda, duplicar, recorte (3.0) ---" + chr(10))
+# Con el add-in anterior: los parametros nuevos se ignoran o el comando no existe (control).
+import re as _re
+textos = [e for e in resultado_de(enviar("list_layout_elements", {"tipo": "TEXT_ELEMENT"})).get("elementos", [])
+          if len((e.get("texto") or "").strip()) >= 4]
+if len(textos) >= 2:
+    t("set_text_element", {"patron": "."}, espera_ok=False, nota="(patron que casa con varios, sin todos)")
+    r = resultado_de(t("set_text_element", {"patron": "^(.)", "reemplazo": "$1", "todos": True},
+                       nota="(todos, sin cambio real)"))
+    comprobar("patron + todos: cambia todos los que casan", r.get("cambiados", 0) >= 2
+              and all(c["antes"] == c["ahora"] for c in r.get("elementos", [])), str(r)[:110])
+    # todos=True con grupo: antes el grupo solo desempataba y con todos se ignoraba, asi que
+    # cambiaban los textos de todo el layout (revision 2026-10-25, alto 1). Con el add-in anterior,
+    # 'cambiados' son todos los que casan, no solo los del grupo.
+    # Se cuenta sobre TODOS los textos no vacios ('^(.)' casa con cualquiera), no sobre `textos`,
+    # que deja fuera los de menos de 4 caracteres (un numero de hoja dentro del cajetin).
+    no_vacios = [e for e in resultado_de(enviar("list_layout_elements", {"tipo": "TEXT_ELEMENT"}))
+                 .get("elementos", []) if (e.get("texto") or "") != ""]
+    en_grupo = [e for e in no_vacios if e.get("grupo")]
+    sueltos = [e for e in no_vacios if not e.get("grupo")]
+    if en_grupo and sueltos:
+        g = en_grupo[0]["grupo"]
+        del_grupo = [e for e in no_vacios if e.get("grupo") == g]
+        r = resultado_de(t("set_text_element", {"patron": "^(.)", "reemplazo": "$1", "todos": True, "grupo": g},
+                           nota="(todos + grupo, sin cambio real)"))
+        comprobar("patron + todos + grupo: solo los del grupo",
+                  r.get("cambiados") == len(del_grupo)
+                  and all(c.get("grupo") == g for c in r.get("elementos", [])), str(r)[:110])
+        r = resultado_de(t("set_text_element", {"patron": "^(.)", "reemplazo": "$1", "todos": True, "grupo": ""},
+                           nota="(todos + grupo=\"\": solo los sueltos)"))
+        comprobar("patron + todos + grupo=\"\": solo los sueltos",
+                  r.get("cambiados") == len(sueltos)
+                  and all(not c.get("grupo") for c in r.get("elementos", [])), str(r)[:110])
+    else:
+        sys.stdout.write("  [-- ] el layout no tiene textos en grupo Y sueltos: no se prueba todos + grupo" + chr(10))
+    unico = next((e for e in textos
+                  if sum(1 for o in textos if e["texto"][:4] in (o.get("texto") or "")) == 1), None)
+    if unico:
+        trozo = unico["texto"][:4]
+        r = resultado_de(t("set_text_element", {"patron": _re.escape(trozo), "reemplazo": trozo + "~R"},
+                           nota="(sustituye solo una parte)"))
+        comprobar("patron: solo cambia la parte que casa",
+                  r.get("texto_nuevo") == unico["texto"].replace(trozo, trozo + "~R", 1)
+                  or r.get("texto_nuevo") == _re.sub(_re.escape(trozo), trozo + "~R", unico["texto"]),
+                  str(r)[:110])
+        t("set_text_element", {"patron": "~R", "reemplazo": ""}, nota="(deshacer)")
+        t("set_text_element", {"buscar": unico["texto"][:4], "patron": "NO-CASA-2170", "reemplazo": "x"},
+          espera_ok=False, nota="(el patron no casa con el elegido)")
+    t("set_text_element", {"patron": "a", "texto": "x"}, espera_ok=False, nota="(patron y texto a la vez)")
+else:
+    comprobar("layout con al menos dos textos", False, str(textos)[:110])
+
+# Cortes explicitos y etiquetas automaticas.
+t("add_layer", {"fuente": VEC, "nombre": "regresion_cortes"})
+campos = resultado_de(enviar("list_fields", {"capa": "regresion_cortes"})).get("campos") or []
+numerico = next((c.get("nombre") for c in campos if c.get("nombre") not in ("FID", "OBJECTID")
+                 and str(c.get("tipo", "")).lower() in ("double", "integer", "smallinteger", "single")), None)
+valores = sorted(float(v) for v in resultado_de(enviar("get_unique_values", {"capa": "regresion_cortes",
+                                                                             "campo": numerico or "FID"}))
+                 .get("valores", []) if isinstance(v, (int, float)))
+if numerico and len(valores) >= 3:
+    c1, c2, c3 = valores[len(valores) // 3], valores[2 * len(valores) // 3], valores[-1]
+    if c1 < c2 < c3:
+        r = resultado_de(t("set_graduated_symbology", {"capa": "regresion_cortes", "campo": numerico,
+                                                       "cortes": [c1, c2, c3], "etiquetas": "auto"},
+                           nota="(cortes + etiquetas auto)"))
+        comprobar("cortes: leidos del renderer", [round(x, 6) for x in r.get("cortes", [])[1:]]
+                  == [round(c1, 6), round(c2, 6), round(c3, 6)], str(r.get("cortes")))
+        et = r.get("etiquetas") or []
+        comprobar("etiquetas auto: la primera con «≤» y la ultima con «>»",
+                  len(et) == 3 and et[0].startswith("≤") and et[2].startswith(">"), str(et))
+    t("set_graduated_symbology", {"capa": "regresion_cortes", "campo": numerico, "cortes": [c1, c3],
+                                  "num_clases": 4}, espera_ok=False, nota="(cortes y num_clases)")
+    t("set_graduated_symbology", {"capa": "regresion_cortes", "campo": numerico, "cortes": [c3, c1]},
+      espera_ok=False, nota="(cortes desordenados)")
+else:
+    comprobar("campo numerico con valores para los cortes", False, str(valores)[:110])
+r = resultado_de(t("set_raster_symbology", {"capa": "real_NUEVO.tif", "cortes": [64, 128, 255], "etiquetas": "auto"},
+                   nota="(raster: cortes)"))
+comprobar("raster: cortes leidos del renderer", r.get("cortes") == [64, 128, 255], str(r.get("cortes")))
+
+# duplicate_layer: la copia queda debajo, con simbologia PROPIA.
+r = resultado_de(t("duplicate_layer", {"capa": "regresion_cortes", "nombre_nuevo": "regresion_copia",
+                                       "etiquetas": False}, nota="(duplicar)"))
+orden = r.get("orden") or []
+comprobar("duplicar: la copia justo debajo y con simbologia propia",
+          "regresion_copia" in orden and orden.index("regresion_copia") == orden.index("regresion_cortes") + 1
+          and r.get("simbologia_propia") is True and r.get("etiquetas") is False, str(r)[:110])
+t("set_single_symbology", {"capa": "regresion_copia", "color_relleno": "#123456"})
+orig = resultado_de(enviar("edit_symbol", {"capa": "regresion_cortes"}))
+comprobar("duplicar: cambiar la copia no toca la original", orig.get("renderer") != "simple"
+          and "#123456" not in json.dumps(orig), str(orig.get("renderer")))
+t("duplicate_layer", {"capa": "regresion_cortes", "nombre_nuevo": "regresion_copia"}, espera_ok=False,
+  nota="(nombre que ya existe)")
+
+# move_layer(en_leyenda): la entrada sigue a la capa en la TOC.
+t("add_layer", {"fuente": VEC, "nombre": "regresion_ley_a"})
+t("add_layer", {"fuente": VEC, "nombre": "regresion_ley_b"})
+r = resultado_de(t("move_layer", {"capa": "regresion_ley_a", "referencia": "regresion_ley_b", "posicion": "BEFORE",
+                                  "en_leyenda": True}, nota="(en_leyenda)"))
+ley = (r.get("leyendas") or [{}])[0]
+o = ley.get("orden") or []
+comprobar("en_leyenda: la entrada queda justo encima de la de la capa de debajo",
+          "regresion_ley_a" in o and "regresion_ley_b" in o
+          and o.index("regresion_ley_a") == o.index("regresion_ley_b") - 1, str(ley)[:110])
+
+# set_frame_clip: recorte a la forma de una capa, con una capa fuera del recorte.
+JPG_CLIP = DIR_EXP + SEP + "regresion_recorte.jpg"
+e0 = resultado_de(t("set_frame_clip", {}, nota="(estado)"))
+t("set_frame_clip", {"capa": "real_NUEVO.tif"}, espera_ok=False, nota="(capa que no es de poligonos)")
+r = resultado_de(t("set_frame_clip", {"capa": "regresion_cortes", "where": "FID = 0",
+                                      "excluir": ["regresion_ley_b"]}, nota="(recortar)"))
+comprobar("recorte: Shape, con la forma y la excluida leidas", r.get("recorte") == "Shape"
+          and (r.get("area_forma") or 0) > 0 and r.get("excluidas") == ["regresion_ley_b"], str(r)[:110])
+t("export_jpg", {"salida": JPG_CLIP, "dpi": 40}, nota="(recortado)")
+tam_recortado = os.path.getsize(JPG_CLIP) if os.path.exists(JPG_CLIP) else -1
+r = resultado_de(t("set_frame_clip", {"quitar": True}, nota="(quitar)"))
+comprobar("quitar: sin recorte y sin excluidas", r.get("recorte") == "None" and r.get("excluidas") == [],
+          str(r)[:110])
+t("export_jpg", {"salida": JPG_CLIP, "dpi": 40}, nota="(sin recorte)")
+comprobar("el recorte se ve en el export (el JPG cambia)",
+          tam_recortado > 0 and os.path.getsize(JPG_CLIP) != tam_recortado,
+          "%s / %s" % (tam_recortado, os.path.getsize(JPG_CLIP) if os.path.exists(JPG_CLIP) else None))
+borrar_fichero(JPG_CLIP)
+for c in ("regresion_ley_a", "regresion_ley_b", "regresion_copia", "regresion_cortes"):
+    enviar("remove_layer", {"capa": c})
+
+sys.stdout.write("--- huecos 11-15 de la auditoria de scripts (2026-10-10) ---" + chr(10))
+# add_layer(si_existe): relanzar una receta no duplica la capa.
+t("add_layer", {"fuente": VEC, "nombre": "regresion_h"})
+r = resultado_de(t("add_layer", {"fuente": VEC, "nombre": "regresion_h", "si_existe": "omitir"}, nota="(omitir)"))
+comprobar("si_existe=omitir: no la anade y dice cual hay", r.get("omitida") is True
+          and len(r.get("existentes") or []) == 1, str(r)[:110])
+t("add_layer", {"fuente": VEC, "nombre": "regresion_h", "si_existe": "error"}, espera_ok=False, nota="(error)")
+# set_definition_query(anadir): AND con la que hay, sin repetirla.
+t("set_definition_query", {"capa": "regresion_h", "query": "FID >= 0"})
+r = resultado_de(t("set_definition_query", {"capa": "regresion_h", "query": "FID < 100000", "anadir": True},
+                   nota="(anadir)"))
+comprobar("anadir: (anterior) AND (nueva)", r.get("query_nueva") == "(FID >= 0) AND (FID < 100000)", str(r)[:110])
+r = resultado_de(t("set_definition_query", {"capa": "regresion_h", "query": "FID < 100000", "anadir": True},
+                   nota="(anadir otra vez)"))
+comprobar("anadir otra vez: ya_estaba, sin repetir", r.get("ya_estaba") is True
+          and r.get("query_nueva") == "(FID >= 0) AND (FID < 100000)", str(r)[:110])
+# Simbolos: trama y borde discontinuo, leidos de vuelta.
+r = resultado_de(t("set_single_symbology", {"capa": "regresion_h", "trama": {"angulo": 45, "separacion": 4,
+                                                                             "color": "#00AA00"},
+                                            "patron_linea": "discontinua"}, nota="(trama + discontinua)"))
+c0 = (r.get("clases") or [{}])[0]
+comprobar("trama y patron del borde leidos de vuelta", (c0.get("trama") or {}).get("color") == "#00AA00"
+          and c0.get("patron_borde") == [9.0, 4.5], str(c0)[:110])
+r = resultado_de(t("edit_symbol", {"capa": "regresion_h", "trama": False}, nota="(quitar trama)"))
+c0 = (r.get("clases") or [{}])[0]
+comprobar("sin trama: relleno liso con el color de la trama", c0.get("tipo_simbolo") == "relleno_simple"
+          and c0.get("color_relleno") == "#00AA00", str(c0)[:110])
+t("edit_symbol", {"capa": "regresion_h", "estilo_marcador": "rombo"}, espera_ok=False, nota="(estilo en poligonos)")
+# save_layer_as_lyr: se escribe y se reabre.
+LYR_H = "C:" + SEP + "temp" + SEP + "arcmap-mcp-regresion" + SEP + "regresion_h.lyr"
+borrar_fichero(LYR_H)
+r = resultado_de(t("save_layer_as_lyr", {"capa": "regresion_h", "ruta": LYR_H}, nota="(guardar .lyr)"))
+comprobar("save_layer_as_lyr: verificado, con la query dentro", r.get("verificado") is True and os.path.isfile(LYR_H)
+          and (r.get("leido") or {}).get("definition_query") == "(FID >= 0) AND (FID < 100000)", str(r)[:110])
+t("save_layer_as_lyr", {"capa": "regresion_h", "ruta": LYR_H}, espera_ok=False, nota="(ya existe)")
+borrar_fichero(LYR_H)
+# set_legend: formato.
+r = resultado_de(t("set_legend", {"parche": [20, 10], "separaciones": {"entre_entradas": 5},
+                                  "negrita_nombres": True}, nota="(formato)"))
+f = (r.get("ahora") or {}).get("formato") or {}
+comprobar("set_legend formato: parche, separacion y negrita leidos", "20x10" in (f.get("parches") or [])
+          and (f.get("separaciones") or {}).get("entre_entradas") == 5 and f.get("negrita_nombres") is True,
+          str(f)[:110])
+t("set_legend", {"separaciones": {"vertical": 3}}, espera_ok=False, nota="(separacion desconocida)")
+# Fuente y tamano juntos: el IFontDisp redondeaba el tamano a pixeles (8,5 -> 8,25, por debajo
+# de lo pedido) y una negrita sola movia el tamano. Prueba desde el cliente, 2026-10-10.
+r = resultado_de(t("set_legend", {"fuente": "Arial", "tamano": 8.5, "negrita_nombres": True},
+                   nota="(fuente + tamano 8,5)"))
+ahora = r.get("ahora") or {}
+comprobar("set_legend fuente + tamano 8,5: se lee 8,5", ahora.get("tamano_min") == 8.5
+          and ahora.get("tamano_max") == 8.5, "min=%s max=%s" % (ahora.get("tamano_min"), ahora.get("tamano_max")))
+r = resultado_de(t("set_legend", {"negrita_nombres": False}, nota="(solo negrita)"))
+ahora = r.get("ahora") or {}
+comprobar("set_legend solo negrita: el tamano no se mueve", ahora.get("tamano_min") == 8.5
+          and ahora.get("tamano_max") == 8.5, "min=%s max=%s" % (ahora.get("tamano_min"), ahora.get("tamano_max")))
+r = resultado_de(t("set_labels", {"capa": "regresion_h", "expresion": "[Municipio]", "fuente": "Arial",
+                                  "tamano": 8.5}, nota="(etiquetas fuente + tamano 8,5)"))
+tams = [k.get("tamano") for k in (r.get("clases") or [])]
+comprobar("set_labels fuente + tamano 8,5: se lee 8,5", bool(tams) and all(x == 8.5 for x in tams), tams)
+r = resultado_de(t("set_labels", {"capa": "regresion_h", "negrita": True}, nota="(etiquetas solo negrita)"))
+tams = [k.get("tamano") for k in (r.get("clases") or [])]
+comprobar("set_labels solo negrita: el tamano no se mueve", bool(tams) and all(x == 8.5 for x in tams), tams)
+t("set_labels", {"capa": "regresion_h", "activar": False}, nota="(apagar)")
+# Valores unicos SIN clases (en maplex_ligero.mxd): edit_symbol respondia ok sin cambiar nada.
+SIN_CLASES = ("Plano 02 - Emplazamiento General/Afección a figuras de protección/"
+              "Afección a figuras de protección")
+e = resultado_de(enviar("edit_symbol", {"capa": SIN_CLASES}))
+if e.get("renderer") == "valores_unicos" and e.get("clases") == []:
+    r = t("edit_symbol", {"capa": SIN_CLASES, "patron_linea": "punteada"}, espera_ok=False,
+          nota="(valores unicos sin clases)")
+    comprobar("sin clases: el error remite a set_single_symbology",
+              "set_single_symbology" in str((r or {}).get("error")), str(r)[:110])
+else:
+    sys.stdout.write("  [-- ] sin la capa de valores unicos sin clases en este documento: no se prueba" + chr(10))
+# Simbolos de varias capas: la lectura decia «relleno» a secas y luego trama fallaba (2026-10-10).
+# En maplex_ligero.mxd, ZEPA tiene relleno multicapa y LIC - ZEC el borde multicapa.
+clases_h = resultado_de(enviar("edit_symbol", {"capa": "regresion_h"})).get("clases") or [{}]
+comprobar("control: un simbolo simple no trae capas_simbolo ni capas_borde",
+          "capas_simbolo" not in clases_h[0] and "capas_borde" not in clases_h[0], str(clases_h[0])[:110])
+zepa = resultado_de(enviar("edit_symbol", {"capa": "ZEPA"}))
+lic = resultado_de(enviar("edit_symbol", {"capa": "LIC - ZEC"}))
+if zepa.get("clases") and lic.get("clases"):
+    comprobar("multicapa: ZEPA trae capas_simbolo", (zepa["clases"][0].get("capas_simbolo") or 0) >= 1,
+              str(zepa["clases"][0])[:110])
+    comprobar("multicapa: LIC - ZEC trae capas_borde", (lic["clases"][0].get("capas_borde") or 0) >= 1,
+              str(lic["clases"][0])[:110])
+else:
+    sys.stdout.write("  [-- ] sin ZEPA / LIC - ZEC en este documento: no se prueba el multicapa" + chr(10))
+# copy_layout_elements: el logo del cajetin de la plantilla.
+PLANTILLA = "C:" + SEP + "temp" + SEP + "2026-09-25_etiquetas" + SEP + "maplex_ligero.mxd"
+n0 = len(resultado_de(enviar("list_layout_elements", {"tipo": "PICTURE_ELEMENT"})).get("elementos") or [])
+r = resultado_de(t("copy_layout_elements", {"origen": PLANTILLA, "nombres": ["FEADER"]}, nota="(copiar logo)"))
+n1 = len(resultado_de(enviar("list_layout_elements", {"tipo": "PICTURE_ELEMENT"})).get("elementos") or [])
+comprobar("copy_layout_elements: una imagen mas en el layout", len(r.get("copiados") or []) == 1 and n1 == n0 + 1,
+          "%s -> %s" % (n0, n1))
+r = resultado_de(t("copy_layout_elements", {"origen": PLANTILLA, "nombres": ["FEADER"], "quitar": ["FEADER"]},
+                   nota="(reemplazar)"))
+n2 = len(resultado_de(enviar("list_layout_elements", {"tipo": "PICTURE_ELEMENT"})).get("elementos") or [])
+comprobar("copy_layout_elements con quitar: las mismas imagenes", r.get("quitados") == 1 and n2 == n1, "%s / %s" % (n2, n1))
+r = t("copy_layout_elements", {"origen": PLANTILLA, "nombres": ["no_existe_2170"]}, espera_ok=False,
+      nota="(nombre que no hay)")
+# Las cajas del error, con punto decimal: «[36,09, 26, 39,47, 27,2]» no se podia leer.
+import re  # noqa: E402
+cajas = re.findall(r"\[[^\]]*\]", str((r or {}).get("error")))
+comprobar("copy_layout_elements: las cajas del error con punto decimal", bool(cajas)
+          and not any(re.search(r"\d,\d", c) for c in cajas), cajas[:2])
+enviar("remove_layer", {"capa": "regresion_h"})
+
+sys.stdout.write("--- un error no deja la capa ni el texto cambiados (2026-10-28) ---" + chr(10))
+# Revision 2026-10-25, medio 4: set_text_element cambiaba el texto y luego CambiarAspecto lanzaba;
+# set_labels(copiar_de) sustituia las clases y luego la expresion copiada no valia. Con el add-in
+# anterior, el error llega igual pero el texto y la expresion quedan cambiados.
+# (El tercero, set_raster_symbology con cortes que ArcMap no respeta, no se sabe provocar.)
+textos_antes = [e.get("texto") for e in resultado_de(enviar("list_layout_elements", {"tipo": "TEXT_ELEMENT"}))
+                .get("elementos", [])]
+unicos = [x for x in textos_antes if x and textos_antes.count(x) == 1 and "<" not in x]
+if unicos:
+    t("set_text_element", {"buscar": unicos[0], "texto": "ZZ-2170", "encajar_en": [0, 0, 1, 1], "margen": 1},
+      espera_ok=False, nota="(encajar_en sin sitio, tras cambiar el texto)")
+    t("set_text_element", {"patron": "^(.)", "reemplazo": "ZZ$1", "todos": True, "encajar_en": [0, 0, 1, 1],
+                           "margen": 1}, espera_ok=False, nota="(patron + todos, idem)")
+    textos_despues = [e.get("texto") for e in resultado_de(enviar("list_layout_elements",
+                                                                  {"tipo": "TEXT_ELEMENT"})).get("elementos", [])]
+    comprobar("set_text_element: tras el error, los textos como estaban", textos_despues == textos_antes,
+              str([d for a, d in zip(textos_antes, textos_despues) if a != d])[:110])
+else:
+    sys.stdout.write("  [-- ] sin un texto unico en el layout: no se prueba set_text_element" + chr(10))
+PUNTOS_RDS = "C:" + SEP + "temp" + SEP + "arcmap-mcp-regresion" + SEP + "disco" + SEP + "puntos_rds.shp"
+etq0 = resultado_de(enviar("set_labels", {"capa": NOMBRE_VEC}))
+if os.path.exists(PUNTOS_RDS) and etq0.get("clases"):
+    # La capa de origen rotula [Id], que la de destino no tiene. puntos_rds.shp lo crea regresion_disco.py.
+    t("add_layer", {"fuente": PUNTOS_RDS, "nombre": "regresion_origen_id"})
+    t("set_labels", {"capa": "regresion_origen_id", "expresion": "[Id]"})
+    t("set_labels", {"capa": NOMBRE_VEC, "copiar_de": "regresion_origen_id"}, espera_ok=False,
+      nota="(copiar_de con un campo que no hay)")
+    etq1 = resultado_de(enviar("set_labels", {"capa": NOMBRE_VEC}))
+    comprobar("set_labels(copiar_de): tras el error, las clases como estaban",
+              [c.get("expresion") for c in etq1.get("clases", [])] == [c.get("expresion") for c in etq0["clases"]]
+              and etq1.get("etiquetas_activas") == etq0.get("etiquetas_activas"),
+              str([c.get("expresion") for c in etq1.get("clases", [])])[:110])
+    t("remove_layer", {"capa": "regresion_origen_id"})
+else:
+    sys.stdout.write("  [-- ] sin puntos_rds.shp (lo crea regresion_disco.py) o sin clases: no se prueba copiar_de"
+                     + chr(10))
+
+sys.stdout.write("--- issue #8: extension tras add/remove_layer y lectura de sin_relleno ---" + chr(10))
+# 1.1 (la extension tras add/remove_layer): con el add-in 2.16.0 y un documento vacio, quitar y
+# volver a anadir la capa movio la escala x1,10 (356.873 -> 392.560, 2026-10-28). Prueba el arreglo.
+t("add_layer", {"fuente": VEC, "nombre": "regresion_ext"})
+t("set_extent", {"capa": "regresion_ext"})
+escala0 = (resultado_de(enviar("get_arcmap_info")) or {}).get("escala_activa")
+t("remove_layer", {"capa": "regresion_ext"})
+r_add = t("add_layer", {"fuente": VEC, "nombre": "regresion_ext"})
+escala1 = (resultado_de(enviar("get_arcmap_info")) or {}).get("escala_activa")
+comprobar("add/remove_layer: la escala no se mueve",
+          escala0 and escala1 and abs(escala1 - escala0) <= 0.005 * escala0,
+          "%s -> %s (add_layer: extension_restaurada=%s)" % (escala0, escala1,
+                                                                (resultado_de(r_add) or {}).get("extension_restaurada")))
+# 1.2 (el relleno hueco): el Hollow de ESRI.style NO sirve, trae Color.NullColor = true y la
+# lectura sale bien sin el arreglo (aviso de HeyElowen en el issue). El caso real es
+# Style = esriSFSNull con un Color negro VIVO, que ninguna tool deja: viene de un .lyr hecho con
+# ArcObjects (tests/generar_fixture_hueco.py). Con 2.16.0 este bloque debe FALLAR en las dos.
+# El simetrico NO se puede juzgar con edit_symbol: con 2.16.0 responde #FF0000 solido y debajo
+# Style sigue en esriSFSNull (no se dibuja). Se lee aparte, por arcpy + ArcObjects sobre la sesion.
+LEER_ESTILO = (
+    "import os, tempfile\n"
+    "import comtypes.client as cc\n"
+    "lyr = [l for l in MAP.ListLayers(mxd) if l.name == 'regresion_ext'][0]\n"
+    "dest = os.path.join(tempfile.mkdtemp(), 'estilo.lyr')\n"
+    "lyr.saveACopy(dest)\n"
+    "COM = r'C:\\Program Files (x86)\\ArcGIS\\Desktop10.5\\com'\n"
+    "m = lambda n: cc.GetModule(os.path.join(COM, n + '.olb'))\n"
+    "sysm = m('esriSystem'); carto = m('esriCarto'); disp = m('esriDisplay')\n"
+    "cc.CreateObject(sysm.AoInitialize, interface=sysm.IAoInitialize).Initialize(60)\n"
+    "lf = cc.CreateObject(carto.LayerFile, interface=carto.ILayerFile)\n"
+    "lf.Open(dest)\n"
+    "s = lf.Layer.QueryInterface(carto.IGeoFeatureLayer).Renderer.QueryInterface("
+    "carto.ISimpleRenderer).Symbol.QueryInterface(disp.ISimpleFillSymbol)\n"
+    "c = s.Color; rgb = c.QueryInterface(disp.IRgbColor)\n"
+    "RESULT = {'style': s.Style, 'null_color': bool(c.NullColor), "
+    "'rgb': [rgb.Red, rgb.Green, rgb.Blue]}\n"
+    "lf.Close()\n")
+LYR_HUECO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures",
+                         "relleno_hueco_color_negro.lyr")
+t("apply_symbology_from_layer", {"capa": "regresion_ext", "lyr_file": LYR_HUECO},
+  nota="(esriSFSNull con Color negro no nulo)")
+leido = resultado_de(enviar("edit_symbol", {"capa": "regresion_ext"})) or {}
+clase = (leido.get("clases") or [{}])[0]
+comprobar("edit_symbol lee el esriSFSNull de color vivo como sin_relleno",
+          clase.get("sin_relleno") is True and clase.get("color_relleno") is None, str(clase))
+r = resultado_de(t("edit_symbol", {"capa": "regresion_ext", "color_relleno": "#FF0000"},
+                   nota="(color sobre el hueco: pasa a solido)")) or {}
+clase = (r.get("clases") or [{}])[0]
+comprobar("edit_symbol: un color sobre el hueco responde solido",
+          clase.get("sin_relleno") is False and clase.get("color_relleno") == "#FF0000", str(clase))
+real = resultado_de(enviar("execute_code", {"code": LEER_ESTILO, "serializar_sesion": True},
+                           timeout=300))
+real = real.get("result") if isinstance(real.get("result"), dict) else real
+comprobar("edit_symbol: un color sobre el hueco se dibuja (Style solido leido por ArcObjects)",
+          real.get("style") == 0 and real.get("null_color") is False and real.get("rgb") == [255, 0, 0],
+          str(real))
+t("remove_layer", {"capa": "regresion_ext"})
 
 sys.stdout.write("--- limpieza ---" + chr(10))
 t("remove_layer", {"capa": "real_NUEVO.tif"})

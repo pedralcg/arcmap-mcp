@@ -102,7 +102,7 @@ def marco_en_pagina(df, ancho_pagina, alto_pagina):
 
     Un "Nuevo marco de datos" arrastrado fuera de la hoja sigue en el documento
     con sus capas y sus filtros, pero no sale en el plano. En el bloque 03 de
-    ID2018 hubo 77 asi, y un auditor que no lo mire los reporta como errores.
+    una serie de montes hubo 77 asi, y un auditor que no lo mire los reporta como errores.
     `en_pagina` es None si falta algun dato para decidirlo: no se adivina.
     """
     info = {"x": _numero(getattr(df, "elementPositionX", None)),
@@ -189,7 +189,7 @@ def capas_del_marco(capas_arcpy, marco, se_ve_marco):
 
 def resumir(capas):
     """Dos numeros de cada cosa, y el que importa para el plano es el `_en_plano`:
-    en el bloque 02 de ID2018 habia 2.335 capas rotas y solo 87 se dibujaban.
+    en el bloque 02 de una serie de montes habia 2.335 capas rotas y solo 87 se dibujaban.
     Los grupos no cuentan (ni se rompen ni llevan filtro)."""
     datos = [c for c in capas if not c.get("grupo")]
     return {
@@ -204,11 +204,10 @@ def resumir(capas):
     }
 
 
-def auditar(ruta):
-    salida = {"ruta": ruta, "ok": False}
-    import arcpy  # dentro, para que el fallo de import tambien salga en JSON
-
-    mxd = arcpy.mapping.MapDocument(ruta)
+def capas_y_marcos(mapping, mxd):
+    """(capas, marcos, pagina) de un MapDocument ya abierto. `mapping` es
+    `arcpy.mapping`; se pasa para que este modulo no importe arcpy al cargarse
+    (lo usa tambien exportar_mxd.py, con el documento ya abierto)."""
     try:
         ancho_pagina = _numero(mxd.pageSize.width)
         alto_pagina = _numero(mxd.pageSize.height)
@@ -220,21 +219,43 @@ def auditar(ruta):
     # Capa a capa POR MARCO: `ListLayers(mxd)` a secas las mezcla todas y no dice
     # de que marco es cada una. Los marcos se identifican por nombre: comparar con
     # `is` falla siempre en arcpy (cada llamada devuelve un objeto nuevo).
-    for df in arcpy.mapping.ListDataFrames(mxd):
+    for df in mapping.ListDataFrames(mxd):
         info_df = {"nombre": texto(df.name)}
         info_df.update(marco_en_pagina(df, ancho_pagina, alto_pagina))
         en_pagina = info_df["en_pagina"]
         se_ve_marco = None if en_pagina is None else en_pagina != "fuera"
-        capas_df = capas_del_marco(arcpy.mapping.ListLayers(mxd, "", df),
+        capas_df = capas_del_marco(mapping.ListLayers(mxd, "", df),
                                    info_df["nombre"], se_ve_marco)
         info_df["num_capas"] = len(capas_df)
         marcos.append(info_df)
         capas.extend(capas_df)
+    return capas, marcos, {"ancho": ancho_pagina, "alto": alto_pagina}
+
+
+def rotas_en_plano(capas):
+    """([capa rota que sale en el plano], cuantas rotas no se pudo decidir si salen).
+
+    El mismo criterio que `num_rotas_en_plano`: la capa, sus grupos y su marco en la
+    hoja. Una rota dentro de un grupo apagado o de un marco fuera de la hoja no
+    estropea el plano y no se cuenta. Las de visibilidad ilegible van aparte: ni se
+    dan por buenas ni hacen fallar un export."""
+    rotas = [c for c in capas if c.get("rota") and not c.get("grupo")]
+    salen = [{"nombre": c.get("nombre_largo"), "data_frame": c.get("data_frame"),
+              "fuente": c.get("fuente")} for c in rotas if c.get("en_plano")]
+    return salen, len([c for c in rotas if c.get("en_plano") is None])
+
+
+def auditar(ruta):
+    salida = {"ruta": ruta, "ok": False}
+    import arcpy  # dentro, para que el fallo de import tambien salga en JSON
+
+    mxd = arcpy.mapping.MapDocument(ruta)
+    capas, marcos, pagina = capas_y_marcos(arcpy.mapping, mxd)
 
     salida["capas"] = capas
     salida["marcos"] = marcos
     salida["data_frames"] = [m["nombre"] for m in marcos]
-    salida["pagina"] = {"ancho": ancho_pagina, "alto": alto_pagina}
+    salida["pagina"] = pagina
     salida.update(resumir(capas))
     salida["ok"] = True
     del mxd
