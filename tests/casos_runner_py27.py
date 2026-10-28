@@ -737,7 +737,7 @@ def rotas_nombran_el_documento_si_se_usa_la_copia():
 
 # --------------------------------------------------------------------------- #
 # Auditor: lo que sale en el plano frente a lo que solo esta en el documento.
-# En el bloque 02 de ID2018 habia 2.335 capas rotas y solo 87 se dibujaban; en el
+# En el bloque 02 de una serie de montes habia 2.335 capas rotas y solo 87 se dibujaban; en el
 # 03, 77 marcos fuera de la hoja arrastraban filtros de otros montes.
 # --------------------------------------------------------------------------- #
 
@@ -890,6 +890,91 @@ def auditor_sin_tamano_de_pagina_no_adivina():
     assert salida["marcos"][0]["en_pagina"] is None, salida
     assert salida["capas"][0]["en_plano"] is None, salida
     assert salida["capas"][0]["visible_efectivo"] is True, salida
+
+
+# --------------------------------------------------------------------------- #
+# export_mxd_lote -> exportar_mxd.py: capas rotas que salen en el plano (2026-10-06:
+# cuatro planos exportados con «ok» y sin cantones).
+# --------------------------------------------------------------------------- #
+
+_TOC_CON_ROTAS = [(("PLANO", 1, 1), [
+    _CapaTOC(u"Cantones", rota=True),
+    _CapaTOC(u"Otros montes", visible=False, grupo=True),
+    _CapaTOC(u"Otros montes\\Rodales", rota=True),
+    _CapaTOC(u"Ilegible", visible=None, grupo=True),
+    _CapaTOC(u"Ilegible\\Rios", rota=True),
+]), (("Fuera", 60, 5), [_CapaTOC(u"Rota en marco fuera", rota=True)])]
+
+
+@caso
+def rotas_en_plano_solo_cuenta_las_que_se_ven():
+    salida = _auditar(_TOC_CON_ROTAS)
+    salen, sin_decidir = auditor.rotas_en_plano(salida["capas"])
+    assert [c["nombre"] for c in salen] == [u"Cantones"], salen
+    assert salen[0]["fuente"] == u"C:\\datos\\Cantones.shp", salen
+    assert sin_decidir == 1, sin_decidir
+
+
+_COPIA_EXPORTADOR = os.path.join(_TMP, "exportador_bajo_prueba.py")
+shutil.copyfile(os.path.join(RAIZ, "src", "exportar_mxd.py"), _COPIA_EXPORTADOR)
+exportador = imp.load_source("exportador_bajo_prueba", _COPIA_EXPORTADOR)
+sys.modules["auditor_mxd"] = auditor     # el `import auditor_mxd` del exportador
+
+
+def _exportar(toc, si_rotas):
+    """Lanza main() del exportador sobre un documento de mentira. Devuelve
+    (respuesta, contenido final del destino). El destino ya tiene un plano viejo."""
+    _auditar(toc)                         # monta ListDataFrames/ListLayers/MapDocument
+
+    def _jpeg(mxd, ruta, resolution=None):
+        with open(ruta, "wb") as f:
+            f.write(b"nuevo")
+    ARCPY.mapping.ExportToJPEG = _jpeg
+    carpeta = tempfile.mkdtemp(dir=_TMP)
+    destino = os.path.join(carpeta, "plano.jpg")
+    with open(destino, "wb") as f:
+        f.write(b"viejo")
+    trabajo = os.path.join(carpeta, "trabajo.json")
+    with open(trabajo, "wb") as f:
+        f.write(json.dumps({"mxd": u"C:\\x\\plano.mxd", "salida": destino, "formato": "jpg",
+                            "dpi": 100, "si_capas_rotas": si_rotas}))
+    respuestas = []
+    exportador._responder = respuestas.append
+    argv = sys.argv
+    sys.argv = ["exportar_mxd.py", trabajo]
+    try:
+        exportador.main()
+    finally:
+        sys.argv = argv
+    with open(destino, "rb") as f:
+        return respuestas[0], f.read()
+
+
+@caso
+def exportador_avisa_de_rotas_y_exporta_por_defecto():
+    datos, contenido = _exportar(_TOC_CON_ROTAS, "exportar")
+    assert datos["ok"] is True, datos
+    assert [c["nombre"] for c in datos["capas_rotas"]] == [u"Cantones"], datos
+    assert datos["capas_rotas_sin_decidir"] == 1, datos
+    assert contenido == b"nuevo", contenido
+
+
+@caso
+def exportador_con_fallar_no_toca_el_plano_anterior():
+    datos, contenido = _exportar(_TOC_CON_ROTAS, "fallar")
+    assert datos["ok"] is False and datos["fase"] == u"comprobando capas", datos
+    assert len(datos["capas_rotas"]) == 1, datos
+    assert contenido == b"viejo", contenido
+
+
+@caso
+def exportador_con_fallar_exporta_si_la_rota_no_se_ve():
+    """La rota solo en un grupo apagado NO debe impedir el export."""
+    toc = [(("PLANO", 1, 1), [_CapaTOC(u"G", visible=False, grupo=True),
+                              _CapaTOC(u"G\\Rota", rota=True), _CapaTOC(u"Buena")])]
+    datos, contenido = _exportar(toc, "fallar")
+    assert datos["ok"] is True and datos["capas_rotas"] == [], datos
+    assert contenido == b"nuevo", contenido
 
 
 # --------------------------------------------------------------------------- #

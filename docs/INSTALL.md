@@ -161,6 +161,10 @@ el `.esriaddin` es un ZIP — extráelo a
 `%USERPROFILE%\Documents\ArcGIS\AddIns\Desktop10.5\{51f4ce63-6bcf-49b2-ae3a-ba2c79ea3e1a}\`
 (la carpeta debe contener `Config.xml` e `Install\`) y reabre ArcMap.
 
+> **El modo disco no se instala aparte.** `arcmap-mcp-disco.exe`, el ejecutable que usan
+> `edit_mxd_lote` y `compare_mxd` para trabajar sobre un `.mxd` sin abrirlo en ArcMap,
+> viaja dentro del `.esriaddin` (en `Install\`): al instalar el add-in queda instalado.
+
 4. Pulsa **Iniciar** → MessageBox «Puente iniciado». O pon el desplegable
    **Autoarranque** en **Sí** y el puente se levantará solo en cada sesión de ArcMap
    (la preferencia se guarda por usuario en `HKCU\Software\pedralcg\arcmap-mcp`).
@@ -220,8 +224,17 @@ Añade dentro del objeto `mcpServers` existente:
 bloque que Gemini CLI pero con `"disabled": false` al estilo del fichero. También
 desde la app: **Manage MCP Servers ▸ View raw config**.
 
-### Claude Desktop  → `C:\Users\<USUARIO>\AppData\Roaming\Claude\claude_desktop_config.json`
-Mismo bloque `arcmap` dentro de `mcpServers`. Reinicia Claude Desktop tras editar.
+### Claude Desktop  → depende de cómo se instaló
+- Instalador clásico (.exe): `C:\Users\<USUARIO>\AppData\Roaming\Claude\claude_desktop_config.json`
+- Paquete MSIX (instalador nuevo o Microsoft Store):
+  `C:\Users\<USUARIO>\AppData\Local\Packages\Claude_<id>\LocalCache\Roaming\Claude\claude_desktop_config.json`
+
+El MSIX virtualiza `AppData\Roaming`: la app lee **su** copia y no ve lo que se
+escriba en la ruta clásica. Si editas a mano y no aparece el servidor, es casi
+seguro que estás en la ruta equivocada; lo más fiable es abrirla desde la app
+(**Settings ▸ Developer ▸ Edit Config**). El instalador escribe en todas las que
+encuentra. Mismo bloque `arcmap` dentro de `mcpServers`. Reinicia Claude Desktop
+por completo (también desde la bandeja del sistema) tras editar.
 
 ### OpenCode  → `C:\Users\<USUARIO>\.config\opencode\opencode.json`
 Formato propio (clave `mcp`, `type: "local"`, `command` como **array**):
@@ -269,7 +282,7 @@ nº de capas. Luego `list_layers` → devuelve tus capas. Para feedback visual,
 | Script del servidor MCP | `C:\mcp\arcmap-mcp\src\arcmap_mcp_server.py` |
 | Python 2.7 del runner arcpy | `C:\Python27\ArcGIS10.5\python.exe` (override: `ARCMAP_PYTHON27`) |
 | Config Claude Code | `C:\Users\<USUARIO>\.claude.json` (global, clave `mcpServers`) |
-| Config Claude Desktop | `C:\Users\<USUARIO>\AppData\Roaming\Claude\claude_desktop_config.json` |
+| Config Claude Desktop | `C:\Users\<USUARIO>\AppData\Roaming\Claude\claude_desktop_config.json` (MSIX: `…\AppData\Local\Packages\Claude_<id>\LocalCache\Roaming\Claude\`) |
 | Config Gemini CLI | `C:\Users\<USUARIO>\.gemini\settings.json` |
 | Config Antigravity | `C:\Users\<USUARIO>\.gemini\antigravity\mcp_config.json` |
 | Config OpenCode | `C:\Users\<USUARIO>\.config\opencode\opencode.json` (clave `mcp`) |

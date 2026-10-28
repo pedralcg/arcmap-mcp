@@ -45,8 +45,9 @@ namespace ArcmapMcp.AddIn.Handlers
             if (referencia != null && grupo != null)
                 throw new ArgumentException("'referencia' y 'grupo' se excluyen: con referencia, la capa va al"
                     + " grupo de la referencia.");
+            bool enLeyenda = Parametros.LeerBool(parameters["en_leyenda"], "en_leyenda", false);
 
-            IMxDocument doc;
+            Documento doc;
             IMap map = MapHandlers.FocusMap(out doc);
             ILayer lyr = MapHandlers.FindLayer(map, capa);
             IGroupLayer desde = LayerHandlers.BuscarGrupoPadre(map, lyr);
@@ -103,7 +104,7 @@ namespace ArcmapMcp.AddIn.Handlers
             if (final != k)
                 throw new InvalidOperationException("La capa no quedó donde se pedía (posición " + final + ", se"
                     + " pedía " + k + "). Orden actual: " + string.Join(" | ", ToStrings(orden)));
-            return Protocol.Result(new JObject
+            var r = new JObject
             {
                 ["capa"] = lyr.Name,
                 ["grupo"] = hacia == null ? null : ((ILayer)hacia).Name,
@@ -112,11 +113,15 @@ namespace ArcmapMcp.AddIn.Handlers
                 ["referencia"] = referencia,
                 ["indice"] = final,
                 ["orden"] = orden
-            });
+            };
+            // La leyenda no sigue a la TOC: con en_leyenda, sus entradas se recolocan igual.
+            if (enLeyenda)
+                r["leyendas"] = LayoutHandlers.ColocarEntradasSegunToc(doc, map, lyr);
+            return Protocol.Result(r);
         }
 
         /// <summary>Capas hijas directas de un grupo, o de la raíz si grupo es null.</summary>
-        private static List<ILayer> Hijos(IMap map, IGroupLayer grupo)
+        internal static List<ILayer> Hijos(IMap map, IGroupLayer grupo)
         {
             var salida = new List<ILayer>();
             if (grupo == null)

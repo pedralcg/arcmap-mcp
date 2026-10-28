@@ -13,6 +13,10 @@ addin/tools/
 # Artefactos de build .NET (el .esriaddin empaquetado sí se versiona en addin/dist/).
 addin/ArcmapMcp.AddIn/bin/
 addin/ArcmapMcp.AddIn/obj/
+addin/ArcmapMcp.Disco/bin/
+addin/ArcmapMcp.Disco/obj/
+# Carpeta de montaje temporal de build.ps1 al empaquetar el .esriaddin.
+addin/dist/_stage
 
 # ZIP de distribución que genera empaquetar.ps1 para pruebas (se regenera solo).
 /dist/

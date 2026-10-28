@@ -508,8 +508,7 @@ function Remove-RestosLocales {
         Write-Info  "  $log"
     }
 
-    $configs = @(
-        (Join-Path $env:APPDATA 'Claude\claude_desktop_config.json'),
+    $configs = @(Get-RutasClaudeDesktop) + @(
         (Join-Path $env:USERPROFILE '.gemini\settings.json'),
         (Join-Path $env:USERPROFILE '.gemini\antigravity\mcp_config.json'),
         (Join-Path $env:USERPROFILE '.config\opencode\opencode.json')
@@ -787,13 +786,37 @@ function Register-ClienteJson {
     Write-Ok "${Nombre}: servidor arcmap registrado en $Ruta"
 }
 
+<# Claude Desktop tiene DOS sitios posibles para su config, segun como se instalo:
+     - Instalador clasico (.exe):   %APPDATA%\Claude
+     - Paquete MSIX (instalador nuevo o Microsoft Store):
+         %LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\Claude
+   El MSIX virtualiza AppData\Roaming: la app lee SU copia y no ve lo que se
+   escriba en %APPDATA%\Claude desde fuera. Escribir solo en la ruta clasica deja
+   el servidor registrado en un fichero que nadie lee, sin error ninguno.
+   Se devuelven todas las que existan; si no existe ninguna, la clasica. #>
+function Get-RutasClaudeDesktop {
+    $rutas = @()
+    $paquetes = Join-Path $env:LOCALAPPDATA 'Packages'
+    if (Test-Path $paquetes) {
+        Get-ChildItem $paquetes -Directory -Filter 'Claude_*' -ErrorAction SilentlyContinue | ForEach-Object {
+            $dir = Join-Path $_.FullName 'LocalCache\Roaming\Claude'
+            if (Test-Path $dir) { $rutas += (Join-Path $dir 'claude_desktop_config.json') }
+        }
+    }
+    $clasica = Join-Path $env:APPDATA 'Claude'
+    if ((Test-Path $clasica) -or -not $rutas) {
+        $rutas += (Join-Path $clasica 'claude_desktop_config.json')
+    }
+    return $rutas
+}
+
 <# Detecta que clientes IA hay en el equipo por su fichero de configuracion (o su
    CLI). Es lo que hace 'auto': quien instala no tiene por que saber donde guarda
    cada cliente su configuracion, ni recordar como se llama en este script. #>
 function Find-ClientesInstalados {
     $encontrados = @()
     if (Get-Command claude -ErrorAction SilentlyContinue) { $encontrados += 'claude-code' }
-    if (Test-Path (Join-Path $env:APPDATA 'Claude')) { $encontrados += 'claude-desktop' }
+    if (Get-RutasClaudeDesktop | Where-Object { Test-Path (Split-Path $_ -Parent) }) { $encontrados += 'claude-desktop' }
     if (Test-Path (Join-Path $env:USERPROFILE '.gemini\settings.json')) { $encontrados += 'gemini' }
     if (Test-Path (Join-Path $env:USERPROFILE '.gemini\antigravity')) { $encontrados += 'antigravity' }
     if (Test-Path (Join-Path $env:USERPROFILE '.config\opencode')) { $encontrados += 'opencode' }
@@ -827,8 +850,9 @@ function Register-Clientes {
             switch ($c) {
                 'claude-code' { Register-ClaudeCode -Quitar:$Quitar }
                 'claude-desktop' {
-                    Register-ClienteJson -Nombre 'Claude Desktop' -Quitar:$Quitar `
-                        -Ruta (Join-Path $env:APPDATA 'Claude\claude_desktop_config.json')
+                    foreach ($ruta in Get-RutasClaudeDesktop) {
+                        Register-ClienteJson -Nombre 'Claude Desktop' -Quitar:$Quitar -Ruta $ruta
+                    }
                 }
                 'gemini' {
                     Register-ClienteJson -Nombre 'Gemini CLI' -Quitar:$Quitar `

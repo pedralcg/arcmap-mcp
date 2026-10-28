@@ -5,8 +5,8 @@
 > lista existen solo para lo **repetitivo y de alto valor** —sobre todo las series de
 > planos (Data Driven Pages)—, no para replicar toda la API.
 
-**66 herramientas** sobre ArcMap 10.5. Unas **42 están cubiertas por la regresión en sesión
-viva** (`tests/regresion_sesion_viva.py`, 231 comprobaciones); el resto se ha ejercitado a
+**78 herramientas** sobre ArcMap 10.5. **56 están cubiertas por la regresión en sesión
+viva** (`tests/regresion_sesion_viva.py`, 480 comprobaciones); el resto se ha ejercitado a
 mano en trabajo real, pero **no automáticamente**. El README, en «Herramientas MCP», explica
 por qué la distinción importa.
 
@@ -20,19 +20,22 @@ tres primeros son del add-in .NET; el cuarto no pasa por el puente siquiera:
 | **Nativo en sesión viva** (ArcObjects, hilo STA) | capas, selección, layout, exports, navegación, `run_geoprocessing`, `calculate_geometry` | Opera sobre el documento **vivo**: los cambios se ven al instante. Ocupa la interfaz mientras dura (exports cancelables con **ESC**). |
 | **Out-of-process sobre snapshot** (arcpy en Python 2.7 aparte) | `execute_arcpy`, `list_ddp`, `export_ddp`, `goto_ddp_page`, `raster_index`, `hydrology`, `contours`, `topographic_profile`, `least_cost_path` | Trabaja sobre una **copia temporal del .mxd** con el estado actual: lee el documento real, pero **sus cambios al documento no afectan a la sesión viva**. Las salidas a disco sí son reales, y los resultados de análisis se añaden al mapa al terminar. **No congela la interfaz.** Coste fijo de unos segundos por llamada (snapshot + arranque de Python). |
 | **Solo lectura de datos** (cursores/Describe) | consultas, listados de workspace | Sin efectos secundarios. |
-| **Sin ArcMap, leyendo del disco** | `describe_mxd`, `audit_folder`, `export_mxd_lote` | **No pasan por el puente**: funcionan con ArcMap cerrado (y `export_mxd_lote` también con ArcMap abierto) y sobre documentos que no son el abierto. |
+| **Sin ArcMap, leyendo del disco** | `describe_mxd`, `get_ole_tables`, `audit_folder`, `export_mxd_lote`, `edit_mxd_lote`, `compare_mxd` | **No pasan por el puente**: funcionan con ArcMap cerrado (y `export_mxd_lote` también con ArcMap abierto) y sobre documentos que no son el abierto. |
 
 ---
 
 ## Sin ArcMap abierto (inspección de ficheros)
 
-Estas dos no hablan con el puente: leen del disco. Sirven precisamente cuando el camino
-normal falla, que es cuando más falta hace saber algo.
+Estas no hablan con el puente: trabajan sobre el disco (`edit_mxd_lote` además escribe).
+Sirven precisamente cuando el camino normal falla, que es cuando más falta hace saber algo.
 
 | Tool | Qué hace |
 |---|---|
 | `describe_mxd` | Versión declarada de un `.mxd` **sin abrirlo**, más un veredicto frente a la versión de ArcMap. Milisegundos, sin arcpy y sin licencia |
+| `get_ole_tables` | Tablas de los objetos OLE incrustados en un `.mxd` (Word 97-2003 y 2007+) leídas **del fichero**: sin ArcMap ni Word. Solo los objetos que usan los marcos del layout (un `.mxd` acumula copias viejas). Las filas salen de la estructura del documento, con las celdas vacías en su sitio; si un objeto trae `aviso`, se dedujeron del texto y pueden salir desalineadas. Solo lectura: editarlas desde el puente no es viable |
 | `audit_folder` | Inventario de TODOS los `.mxd` de una carpeta: versión, capas, fuentes rotas y definition queries, **separando lo que sale en el plano** (capa y grupos encendidos, marco dentro de la hoja) de lo que solo está en el documento |
+| `edit_mxd_lote` | **Modo disco:** la misma lista de operaciones (herramientas vivas con sus parámetros: leyenda, etiquetas, simbología, textos, TOC, recorte) aplicada a varios `.mxd` y guardada, con los mismos handlers del add-in y sin abrirlos en ArcMap. Todo o nada por documento, `.bak`, y **verificado reabriendo**. Se niega con marcos OLE y con el documento abierto en ArcMap. No exporta: después, `export_mxd_lote` |
+| `compare_mxd` | Compara un `.mxd` con su **plantilla** (u otro plano de la serie) y dice en qué se separa, por ámbitos: `general` (df activo y escala), `capas` (de más, de menos, orden, visibilidad, fuente, def. query, etiquetas, rotas), `simbologia` (clase a clase), `etiquetado`, `textos` (también los agrupados del cajetín) y `leyendas`. Los textos se emparejan por nombre o, sin él, por posición (`tolerancia_posicion`); los que cambian a propósito en una serie (título, nº de plano) salen en `textos.cambiados`. Los lee `arcmap-mcp-disco.exe` con los mismos handlers que la sesión viva, sin tocar ninguno de los dos. Un `.mxd` con marcos OLE y ArcMap abierto no se lee. Devuelve `iguales`, `num_diferencias` y `diferencias` (`[plano, referencia]`) |
 
 **`describe_mxd` descarta tanto como acusa.** `arcpy.mapping.MapDocument()` falla con un
 mensaje genérico ("no puede abrir documento de mapa") que vale igual para una ruta mala, un
@@ -128,13 +131,16 @@ tras **dos timeouts seguidos** corta la pasada de capas para lo que queda, marc�
 | `export_ddp` | Exporta el atlas a PDF: todas (`modo="ALL"`) / activa (`modo="CURRENT"`) / `rango` de IDs / lista de `valores`; multipágina o 1 PDF por página | snapshot |
 | `goto_ddp_page` | Encuadra la vista al extent de una página (por nº o valor de índice) | snapshot + nativo |
 | `list_layout_elements` | Lista elementos del layout (texto, leyenda, imagen) con nombre/tipo, **incluidos los de dentro de un grupo** (el cajetín agrupado), con su `grupo` | nativo |
-| `set_legend_item` | Qué muestra la entrada de una capa en la leyenda (nombre de capa, encabezado, etiquetas) **sin cambiar las fuentes**; devuelve las fuentes leídas como prueba. Si la capa está en varias leyendas no elige: desempate con `leyenda` o `indice` | nativo |
-| `set_text_element` | Cambia el texto de un elemento (título, fecha, nº plano), también dentro de un grupo. Si el selector casa con varios no elige: los lista numerados y se desempata con `grupo` o, en último caso, `indice` | nativo |
+| `set_legend_item` | Qué muestra la entrada de una capa en la leyenda (nombre de capa, encabezado, etiquetas, «colocar en columna nueva») **sin cambiar las fuentes**; devuelve las fuentes leídas como prueba. También la **quita** de la leyenda dejando la capa en el mapa (`quitar`) o la **mueve** (`posicion`, `despues_de`), y devuelve el `orden` de la leyenda. Si la capa está en varias leyendas no elige: desempate con `leyenda` o `indice` | nativo |
+| `set_legend` | Lo que es de la leyenda entera: `tamano` de letra de todas las entradas (apaga el ajuste automático, que encoge la letra al dibujar), `columnas` y `recuadro` (mide el tamaño natural y pone el marco a esa medida, anclado arriba a la izquierda, **sin escalar la letra**; dice si cabe y cuánto sobra o falta). Sin parámetros, devuelve el estado leído | nativo |
+| `set_text_element` | Cambia el texto de un elemento (título, fecha, nº plano), también dentro de un grupo, y/o su posición (`x`, `y`, unidades de página) y tamaño de letra (`tamano`); lo que no se pasa no cambia. `patron` + `reemplazo` cambia solo la parte que casa (regex de .NET, grupos como `$1`), en uno o, con `todos=True`, en todos los que casan. Si el selector casa con varios no elige: los lista numerados y se desempata con `grupo` o, en último caso, `indice` | nativo |
+| `replace_text` | Buscar y reemplazar **por diccionario** (`{"Area": "Área"}`) en todo el plano a la vez: textos del layout (también dentro de un grupo), nombres de capa, etiquetas de clase de la simbología y encabezados (`ambitos`). Sin distinguir mayúsculas al buscar; `palabra_completa` (True) y `conservar_mayusculas` (True: «AREA» → «ÁREA», sin bajar nunca las mayúsculas propias del reemplazo). No toca las etiquetas de formato (`<BOL>`…). `simular=True` dice qué cambiaría sin tocar nada. Devuelve `cambiados`, `por_ambito` y la lista `cambios` con antes y ahora. También es operación de `edit_mxd_lote` | nativo |
+| `copy_layout_elements` | Copia elementos del layout de **otro .mxd** (`origen`, ruta absoluta, solo lectura) a este, en la misma posición: los logos del cajetín de un plano bueno al resto de la serie. Se eligen por `nombres` y/o por `region` de página (para el logo sin nombre), también dentro de grupos; `tipos`: `imagen` (por defecto), `texto`, `grafico`. La imagen incrustada viaja con sus bytes. `quitar` borra antes elementos sueltos de este documento (si alguno no está, error sin tocar nada). Un origen con marcos OLE se rechaza; si la página mide distinto, se pega y se avisa. Devuelve `copiados` (con la `caja` leída ya pegada) y `quitados`. También es operación de `edit_mxd_lote` | nativo |
 | `set_definition_query` | Fija/limpia la def. query de una capa (planos temáticos por filtro) | nativo |
 | `set_layer_visibility` | Enciende/apaga capa o grupo (la leyenda del layout se actualiza) | nativo |
 | `export_view_png` | Exporta la vista activa (o el layout con `modo="layout"`) a PNG | nativo |
 | `export_jpg` | Exporta el layout a JPG (dpi 230 por defecto — series de planos ligeras). Vale `.jpg` o `.jpeg` | nativo |
-| `export_mxd_lote` | Exporta a JPG o PDF una **lista de .mxd del disco**, un proceso `python.exe` por documento. Por defecto, cada fichero junto a su .mxd. Devuelve bytes y `sobrescrito` por documento | sin puente |
+| `export_mxd_lote` | Exporta a JPG o PDF una **lista de .mxd del disco**, un proceso `python.exe` por documento. Por defecto, cada fichero junto a su .mxd. Devuelve bytes, `sobrescrito` y `capas_rotas` por documento. `corte_sin_cpu` (120 s) corta un documento cuyo proceso no consume CPU, sin esperar al timeout; `si_capas_rotas="fallar"` no exporta los que tienen capas rotas en el plano | sin puente |
 
 > **Los tres export** (`export_pdf`, `export_jpg`, `export_view_png`) comparten reglas:
 > `salida` **absoluta** en una carpeta que exista, `dpi` entre 24 y 600, y
@@ -169,8 +175,10 @@ tras **dos timeouts seguidos** corta la pasada de capas para lo que queda, marc�
 > `valores` o con `rango`, que
 > además da feedback lote a lote.
 >
-> **Truco QA de `set_text_element`:** llamar con `buscar=""` devuelve en el error la
-> lista de todos los textos del layout — útil para localizar el elemento a tocar.
+> **Localizar un texto:** `list_layout_elements(tipo="TEXT_ELEMENT")` lista todos los textos
+> del layout con su `texto` y su `grupo`. (Desde la 2.17.0 `texto` es opcional, así que el
+> viejo truco de llamar a `set_text_element(buscar="")` ya no devuelve la lista: responde
+> «No hay nada que cambiar».)
 
 ---
 
@@ -191,8 +199,11 @@ respetan definition query y selección, igual que la tabla de atributos).
 | `add_layer` | Añade capa desde shp/fgdb/ráster/`.lyr` o **URL WMS** al df. `en_leyenda=False`: no entra en la leyenda del plano (las leyendas de ArcMap añaden solas cada capa nueva). `visible=False`: entra apagada. En un WMS, `subcapas` elige qué encender (sin ella, todas) |
 | `add_group` | Crea una capa de **grupo** vacía (en la raíz o dentro de otro grupo), encendida o apagada y, si se quiere, fuera de la leyenda |
 | `remove_layer` | Quita capa por nombre |
-| `move_layer` | Recoloca una capa o grupo **sin quitarla**: `BEFORE`/`AFTER` de una `referencia` (cambiando de grupo si hace falta) o `TOP`/`BOTTOM` de un `grupo` (`"/"` = raíz). Devuelve el orden del grupo leído de vuelta |
+| `move_layer` | Recoloca una capa o grupo **sin quitarla**: `BEFORE`/`AFTER` de una `referencia` (cambiando de grupo si hace falta) o `TOP`/`BOTTOM` de un `grupo` (`"/"` = raíz). Devuelve el orden del grupo leído de vuelta. La leyenda no sigue a la TOC: con `en_leyenda=True` sus entradas se recolocan también |
+| `duplicate_layer` | Copia una capa dentro del mapa (misma fuente, simbología, etiquetas, def. query y transparencia **propias**) con `nombre_nuevo`, junto a la original o a una `referencia`. `etiquetas=False` la deja sin rótulos; por defecto no entra en la leyenda |
+| `rename_layer` | Cambia el nombre de una capa o grupo (TOC y leyenda) **sin sustituirla**: su entrada de leyenda conserva posición y opciones. Refresca las leyendas del mapa |
 | `apply_symbology_from_layer` | Aplica un `.lyr` (estilos canónicos) a una capa |
+| `save_layer_as_lyr` | Guarda una capa (o un **grupo** con todo su árbol) como `.lyr`, con simbología, etiquetas, def. query y transparencia: el «Guardar como archivo de capa» de ArcMap, para llevar la simbología buena al resto de la serie. `ruta` absoluta; si existe, error salvo `sobrescribir=True`. Se escribe a un temporal y se **reabre** antes de dejarlo en `ruta`: si lo leído no coincide con la capa, error y no se deja nada (la respuesta trae `leido`). Las rutas de los datos se guardan absolutas. También es operación de `edit_mxd_lote` |
 | `set_scale` | Fija la escala del df activo |
 
 **Servicios WMS.** `add_layer` con una URL conecta el servicio (`WMSConnectionName`) y
@@ -219,15 +230,15 @@ respuesta lo avisa y te manda aquí.
 
 | Tool | Qué hace |
 |---|---|
-| `set_graduated_symbology` | Rangos sobre un campo numérico (capas de ENTIDADES) |
-| `set_unique_values_symbology` | Categorías por valores únicos de un campo (capas de ENTIDADES) |
-| `set_raster_symbology` | RÁSTER: `modo="clasificado"` (2-32 clases), `"estirado"` (rampa continua) o `"unico"` (un color por valor de píxel) |
+| `set_graduated_symbology` | Rangos sobre un campo numérico (capas de ENTIDADES), por método o con `cortes` fijos (límites superiores de cada clase). `etiquetas` por clase o `"auto"` (desde los cortes, con coma decimal). Devuelve cortes y etiquetas leídos del renderer |
+| `set_unique_values_symbology` | Categorías por valores únicos de un campo o de **hasta 3** (`campos`), en capas de ENTIDADES. `clases` explícitas con varios valores por clase, etiqueta y color; `resto` para «todos los demás valores». Devuelve las clases leídas del renderer y los valores que se quedan sin clase |
+| `set_raster_symbology` | RÁSTER: `modo="clasificado"` (2-32 clases, o `cortes` fijos; `etiquetas="auto"`), `"estirado"` (rampa continua), `"unico"` (un color por valor de píxel) o `"rgb"` (composición de color de un multibanda, `bandas=[r, g, b]`; sin estirar en 8 bits) |
 | `apply_symbology_from_layer` | Aplica un `.lyr` plantilla ya preparado |
 | `set_single_symbology` | **Un solo símbolo** (sin clasificar) con los colores pedidos: relleno, borde y grosor, hueco, tamaño en puntos, transparencia. Sin colores sale gris neutro, siempre el mismo |
-| `edit_symbol` | Cambia **solo lo pedido** de la simbología que ya tiene la capa (símbolo único, valores únicos o rangos), sin rehacerla; `categoria` elige la clase. Sin nada que cambiar, la lee |
+| `edit_symbol` | Cambia **solo lo pedido** de la simbología que ya tiene la capa (símbolo único, valores únicos o rangos), sin rehacerla; `categoria` elige la clase. `etiqueta` cambia el texto de una clase en la leyenda; `quitar=True` quita una clase de valores únicos sin recolorear las demás; `anadir_valores` mete valores en una clase que ya existe; `encabezado` cambia el texto de encima de las clases. En RÁSTER clasificado o por valores únicos: `encabezado`, y `etiqueta` y `color_relleno` de una clase. Sin nada que cambiar, la lee |
 | `list_style_symbols` | Sin `estilo`, los estilos `.style` **cargados** en ArcMap; con él (nombre o ruta), sus símbolos de relleno, línea o marcador con nombre y categoría, filtrables por `patron` |
 | `apply_style_symbol` | Pone a una capa, como símbolo único, un símbolo de un `.style` por su nombre. La clase sale de la geometría de la capa |
-| `set_labels` | Etiquetas de una capa de ENTIDADES: expresión, tamaño, color y halo; enciende o apaga. Devuelve cómo quedó cada clase **leída de la capa** y el motor del mapa (Maplex o estándar) |
+| `set_labels` | Etiquetas de una capa de ENTIDADES: expresión, tamaño, color y halo; enciende o apaga. Con Maplex, colocación: `parte_mayor`, `sin_duplicados_m`, `tamano_minimo_m`, `repetir_cada_mm`. `copiar_de` clona las clases de otra capa; `por_valor` hace una clase por valor con el color de su categoría. Devuelve cómo quedó cada clase **leída de la capa** y el motor del mapa (Maplex o estándar) |
 
 **Un color, sin rehacer la leyenda.** Antes de `set_single_symbology` no había forma de dejar
 una capa con un solo color: forzar la graduada o los valores únicos a un color pinta bien el
@@ -343,8 +354,10 @@ el menú de marcadores no se distinguen. La búsqueda por nombre ignora mayúscu
 | `run_geoprocessing` | Geoproceso por nombre punteado (`analysis.Buffer`, `management.GetCount`, `sa.Slope`…) + params, sin escribir código. Resuelve nombres de capa de la TOC (honra def. query/selección). Una tool inexistente o con parámetros de más da error **antes** de ejecutar | **nativo** — ocupa la interfaz mientras dura. Con `fuera_de_arcmap=True`, **out-of-process**: ArcMap libre, las capas viajan por la ruta de su fuente (con def. query o selección se niega), `anadir_al_mapa` y `sobrescribir` |
 | `save_mxd` | Guarda el .mxd en su ruta actual. Predice las capas que perderán la ruta relativa (`capas_perderan_ruta`) y, con `verificar` o si predice alguna, **reabre** lo guardado y lista las rotas nuevas | nativo; la verificación, arcpy standalone |
 | `save_mxd_as` | Guarda una copia en otra ruta (absoluta). **`sobrescribir=False` por defecto**: si el destino existe, falla sin tocarlo. Al regenerar una serie de .mxd, pasa `sobrescribir=True`. Predice y verifica las rutas relativas como `save_mxd`, contra la carpeta de destino | nativo |
+| `open_mxd` | Abre otro .mxd en la misma sesión **sin cerrar ArcMap**. Nunca deja que ArcMap pregunte: los cambios pendientes del actual se guardan, se descartan o no se abre (`cambios_sin_guardar`); un .mxd de versión posterior no se abre | nativo |
 | `list_broken_data_sources` | Capas y tablas standalone con ruta rota (muy común en ArcMap), de **todos** los data frames, con `data_frame` y `ruta` | nativo |
 | `repair_data_source` | Reapunta la fuente de una capa (verifica releyendo la fuente). Busca en todos los data frames; `data_frame` acota. Avisa (`aviso_ruta_relativa`) si la ruta nueva se va a perder al guardar | nativo |
+| `replace_data_source` | Apunta una capa del df activo a **otro dataset** (cambia el fichero, no solo la carpeta: para eso, `repair_data_source`) conservando simbología, etiquetas y def. query, como el `replaceDataSource` de arcpy. La `fuente` nueva se abre antes de tocar nada; ráster con ráster y entidades con entidades de la misma geometría. En un ráster clasificado conserva cortes, etiquetas, colores y encabezado (y avisa si el rango del dato nuevo es otro); avisa si la def. query usa campos que el dataset nuevo no tiene. Devuelve `fuente_anterior`, `fuente_nueva` (leída de vuelta) y si la capa estaba o queda rota. También es operación de `edit_mxd_lote` | nativo |
 
 > **Reparada en memoria no es reparada en disco.** Con *Store relative pathnames*, ArcMap
 > 10.5 concatena sin normalizar la carpeta del .mxd y la ruta relativa del workspace de cada
@@ -371,6 +384,7 @@ el menú de marcadores no se distinguen. La búsqueda por nombre ignora mayúscu
 |---|---|
 | `get_canvas_screenshot` | Captura la vista/layout y la devuelve como **IMAGEN INLINE** — el agente la ve al instante; cancelable con ESC |
 | `list_data_frames` / `set_active_df` | Lista/cambia el data frame activo |
+| `set_frame_clip` | Recorta un data frame a la forma (unión de entidades) de una capa de polígonos, con `where` opcional y capas que se libran del recorte (`excluir`); `quitar=True` lo deja sin recorte. Sin parámetros, el estado. El recorte solo se ve en el export |
 | `set_extent` | Encuadra a coords o al extent de una capa/selección |
 | `describe_data` | Describe un dataset en disco (CRS, tipo, campos) |
 | `get_workspace` / `set_workspace` | Lee/fija el workspace por defecto de los listados (estado del add-in; se restablece al reiniciar ArcMap) |

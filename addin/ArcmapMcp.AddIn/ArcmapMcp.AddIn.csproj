@@ -15,7 +15,7 @@
          2026-08-27 se subió solo Config.xml y `ping` siguió diciendo 2.8.3 con la
          DLL nueva ya cargada, o sea el "binario desfasado" al revés: la versión
          mentía sobre código que sí estaba actualizado. Tocar siempre las dos. -->
-    <Version>2.16.0</Version>
+    <Version>2.17.0</Version>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <!-- Newtonsoft.Json.dll debe caer en bin\ para empaquetarlo en Install\ -->
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
@@ -105,6 +105,11 @@
     </Reference>
     <Reference Include="ESRI.ArcGIS.DataSourcesRaster">
       <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.DataSourcesRaster\v4.0_10.5.0.0__8fc3cc631e44ad86\ESRI.ArcGIS.DataSourcesRaster.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- open_mxd: saber si hay una sesión de edición abierta (IEditor.EditState) -->
+    <Reference Include="ESRI.ArcGIS.Editor">
+      <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.Editor\v4.0_10.5.0.0__8fc3cc631e44ad86\ESRI.ArcGIS.Editor.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>

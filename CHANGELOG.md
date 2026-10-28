@@ -3,6 +3,204 @@
 Formato inspirado en [Keep a Changelog](https://keepachangelog.com/es/); versionado
 [SemVer](https://semver.org/lang/es/).
 
+## [2.17.0] - 2026-10-28
+
+La versión de las series de planos. `edit_mxd_lote` edita varios .mxd del disco sin abrirlos en
+ArcMap, con los mismos handlers del add-in, y crea planos desde una plantilla con variaciones por
+hoja. Llegan doce herramientas nuevas (78), entre ellas `replace_data_source`, `replace_text`,
+`compare_mxd`, `open_mxd` y `set_legend`, y mucho más control sobre leyendas, etiquetas Maplex,
+símbolos y textos del layout. Se corrigen los dos fallos del
+[issue #8](https://github.com/pedralcg/arcmap-mcp/issues/8) (gracias a @HeyElowen por el informe
+y por reproducirlo con control de variables) y los de una revisión completa previa a publicar.
+
+Verificado en sesión viva: **480/0** en `regresion_sesion_viva.py`, **50/0** en
+`regresion_disco.py` (modo disco, leyendo lo guardado desde otro proceso) y `regresion_ddp.py`
+**14/0**; **199 tests** sin ArcMap. Cada bloque nuevo lleva control: con la 2.16.0 falla en los
+mismos puntos. Probada además desde el cliente MCP sobre copias de planos reales, mirando el plano
+exportado.
+
+### Añadido
+
+**Modo disco (ADR-010)**
+- **`edit_mxd_lote`** (nueva): aplica una lista de operaciones (las herramientas vivas con sus
+  parámetros: leyendas, etiquetas, simbología, textos, TOC, `set_frame_clip`...) a varios .mxd y
+  los guarda sin abrirlos en ArcMap. Lo ejecuta `arcmap-mcp-disco.exe`, que viaja dentro del
+  `.esriaddin` y usa los mismos handlers del add-in. Todo o nada por documento, `.bak` previo, y
+  verificado reabriendo: las mismas lecturas antes de guardar y al reabrir. Se niega a tocar los
+  .mxd con marcos OLE y el documento abierto en ArcMap. `en_paralelo` (1-4) lanza varios
+  documentos a la vez; en planos pesados es lo que lo hace rentable frente a la vía en vivo.
+- **Variaciones por plano**: `variables_por_mxd` (un `{MUP}` en cualquier texto de las
+  operaciones toma el valor de cada plano) y `operaciones_por_mxd` (propias de cada plano, detrás
+  de las comunes). Todo se valida antes de lanzar nada.
+- **Planos desde una plantilla** (`plantilla` o `plantilla_por_mxd`, `sobrescribir`): abre la
+  plantilla, aplica las operaciones y guarda con «Guardar como», que reescribe las rutas
+  relativas. Una copia a mano del mismo plano rompe capas; la del lote no.
+- **`set_extent` y `set_scale` en el lote**, comprobadas al reabrir.
+- **Verificación honesta**: compara también la fuente de cada capa, y una lectura que falla (antes
+  y después, igual) deja el documento guardado pero **no verificado**
+  (`verificacion.lecturas_fallidas`), en vez de darlo por bueno. La respuesta va resumida y lo
+  completo se escribe en un JSON (`detalle_completo`; `detalle=True` lo devuelve también).
+- **`compare_mxd`** (nueva, sin puente): compara un plano con su plantilla u otra hoja de la serie
+  (capas, simbología clase a clase, etiquetado, textos del layout y leyendas con su formato) y da
+  cada diferencia como `[plano, referencia]`. Lee los dos con `arcmap-mcp-disco.exe` en modo solo
+  lectura.
+
+**Herramientas nuevas**
+- **`replace_data_source`**: apunta una capa a otro dataset conservando simbología, etiquetas y
+  definition query; en un ráster clasificado restaura cortes, etiquetas, colores y encabezado.
+  Antes de reapuntar comprueba la geometría (deducida del símbolo si la capa está rota) y los
+  campos del renderer: si no casan, es error. También en el lote.
+- **`replace_text`**: buscar y reemplazar por diccionario en textos, nombres de capa, etiquetas de
+  clase y encabezados, por palabra completa; `simular`. `conservar_mayusculas` adapta la mayúscula
+  inicial del original sin bajar las siglas ni los nombres propios que traiga el reemplazo.
+- **`set_legend`**: lo que es de la leyenda entera. `tamano` fija la letra de todas las entradas y
+  apaga el «ajuste automático» de 10.1+, que encogía la letra al dibujar; `recuadro` ajusta el
+  marco al tamaño natural y dice si cabe; `columnas`; y formato: `fuente`, `negrita_nombres`,
+  `negrita_etiquetas`, `parche` y `separaciones`. Con varias leyendas, `indice` (sin él se elige la
+  del data frame activo; si no hay una sola, el error las lista).
+- **`rename_layer`**: cambia el nombre de una capa o grupo en la TOC y la leyenda sin sustituirla;
+  la entrada conserva su posición y sus opciones.
+- **`duplicate_layer`**: copia una capa con simbología, etiquetas y definition query propias.
+- **`set_frame_clip`**: recorta un data frame a la forma de una capa de polígonos, con capas
+  excluidas, o quita el recorte.
+- **`save_layer_as_lyr`**: guarda una capa o un grupo como `.lyr`, escrito a un temporal y reabierto
+  antes de dejarlo en su sitio. También en el lote.
+- **`copy_layout_elements`**: copia elementos del layout de otro .mxd (los logos del cajetín),
+  también desde dentro de grupos, por `nombres` o `region`, en la misma posición; `quitar` borra
+  antes los viejos. Una imagen incrustada viaja con sus bytes. También en el lote.
+- **`open_mxd`**: abre otro .mxd en la misma sesión sin cerrar ArcMap (3-6 s frente a ~45 s de
+  relanzarlo). `cambios_sin_guardar` (`guardar` | `descartar`) es obligatorio, porque ArcMap
+  pregunta con un diálogo que dejaría el puente colgado. Se niega con una sesión de edición abierta
+  y con el documento que ya está abierto.
+- **`get_ole_tables`**: lee las tablas de los objetos incrustados de un .mxd (Word 97-2003 y 2007+)
+  desde el fichero, sin ArcMap ni Word, y solo las de los objetos que usan los marcos del layout.
+  Solo lectura: editarlas desde el puente bloquearía ArcMap.
+
+**Parámetros nuevos**
+- **`set_labels`**: `where` (filtro SQL de la clase, comprobado contra la tabla con sus uniones),
+  `fuente`, `negrita`, `cursiva`; en Maplex, `nunca_quitar`, `sobrepasar_entidad`, `buffer`,
+  `colocacion_linea`, `parte_mayor` (rotular solo la parte mayor de un multiparte),
+  `sin_duplicados_m`, `tamano_minimo_m` y `repetir_cada_mm`. `copiar_de` clona las clases de
+  otra capa.
+- **`set_labels(por_valor={"campo": ...})`**: una clase de etiquetas por valor, cada una del color
+  de su categoría (o de `colores`), con un tono oscuro si viene de un relleno para que se lea. Con
+  `where`, el filtro se compone con AND en cada clase. Con `color` es error: el color de cada valor
+  va en `por_valor.colores`.
+- **`set_text_element`**: `x`, `y` y `tamano` con `antes`/`ahora` leídos; `texto` pasa a ser
+  opcional. `mayusculas`, `region` (elegir por la posición del texto), `centrar_en` y `encajar_en`
+  + `margen` + `tamano_min` (baja la letra hasta que quepa). `patron`, `reemplazo` y `todos`
+  cambian solo la parte que casa con una expresión regular, acotada por `grupo` si se pasa.
+- **`set_legend_item`**: `columna_nueva`, `quitar` (deja la capa en el mapa), `posicion` y
+  `despues_de`; la respuesta trae el `orden` leído de la leyenda.
+- **`edit_symbol`**: `etiqueta` de una clase, `quitar=True` (quita una clase de valores únicos sin
+  tocar los colores de las demás), `anadir_valores`, `encabezado`, y rásteres clasificados o por
+  valores únicos.
+- **Símbolos** en `set_single_symbology` y `edit_symbol`: `patron_linea` (discontinua, punteada,
+  guion-punto o la lista en puntos), `trama` (relleno de líneas) y `estilo_marcador`.
+- **`set_unique_values_symbology`**: `campos` (hasta 3, con `delimitador`), `clases` explícitas
+  con varios valores, su etiqueta y su color, y `resto` para «todos los demás valores».
+- **`set_raster_symbology`**: `cortes` explícitos, `etiquetas="auto"` y `"auto<"`,
+  `conservar_colores=True` (cambia los cortes sin tocar la paleta) y `modo="rgb"` con `bandas`
+  para la composición de color de un ráster multibanda. `set_graduated_symbology` admite también
+  `cortes`.
+- **`set_definition_query(anadir=True)`**: añade la condición con AND a la que ya hay y no la
+  repite si ya estaba (`ya_estaba`).
+- **`add_layer(si_existe="omitir"|"error")`**: no duplica una capa con el mismo nombre.
+- **`move_layer(en_leyenda=True)`**: la entrada de leyenda sigue a la capa.
+- **Prefijos `visible:` y `fuente:`** para elegir capa en cualquier herramienta y en el lote.
+- **`audit_folder`**: `detalle=True` da el inventario completo de cada plano, y `exportacion`
+  dice si cada uno está `al_dia`, `desfasada` o `sin_exportar` según las fechas del .mxd y su
+  JPG/PDF.
+- **`export_mxd_lote`**: devuelve `capas_rotas` (las que salen en el plano) con un `aviso`, y
+  `si_capas_rotas="fallar"` no exporta ese documento. `corte_sin_cpu` corta un proceso que no
+  consume CPU en vez de esperar el timeout entero.
+- **README, «Recursos de la comunidad»**: enlaza la skill de HeyElowen para usar este MCP,
+  [arcmap-mcp-skill](https://github.com/HeyElowen/arcmap-mcp-skill).
+
+### Corregido
+- **`add_layer` y `remove_layer` movían la extensión del data frame** (issue #8). ArcMap reencuadra
+  a veces al quitar o añadir una capa y un plano ya encuadrado se exportaba recortado; con la
+  2.16.0, quitar y volver a añadir una capa movía la escala ×1,10. Ahora las dos guardan la
+  extensión antes de tocar la TOC y, si se movió, la devuelven a su sitio
+  (`extension_restaurada: true`). Si cambió el CRS del data frame no se restaura a ciegas:
+  `crs_cambiado`, y la extensión se fija con `set_extent`.
+- **`edit_symbol` leía como sólido negro un relleno hueco** (issue #8). Un relleno «Hollow»
+  (`esriSFSNull`) con un color vivo no pinta nada, pero la lectura miraba solo el color. Ahora el
+  estilo manda: `sin_relleno: true`, `color_relleno: null`. Y el simétrico: pedir un
+  `color_relleno` sobre un hueco respondía sólido y no se dibujaba; ahora pasa el estilo a sólido.
+- **Un error en `set_labels`, `set_text_element` o `set_raster_symbology` dejaba la capa a medio
+  cambiar.** Ahora se guarda el estado antes de tocar nada y se restaura si algo falla.
+- **`set_labels` aceptaba una expresión con un campo que la capa no tiene**, o un campo sin
+  calificar con una tabla unida (`[Nombre]` en vez de `[tabla.Nombre]`): ArcMap no dibujaba nada
+  y la respuesta decía «activas». Ahora es error, con los campos válidos. Y ya no rechaza
+  expresiones con corchetes dentro de un texto entre comillas (`[SUP] & " [ha]"`).
+- **`set_labels` con `por_valor` dos veces sobre la misma capa daba `E_FAIL`**: las clases se
+  buscaban por ID y no por posición.
+- **`set_legend` y `set_labels` dejaban la letra por debajo de lo pedido al cambiar también la
+  fuente** (8 → 8,25, 8,5 → 8,25), y una negrita sola movía el tamaño. El tamaño se pone ahora
+  después de la fuente.
+- **`edit_symbol`**: no leía la simbología de una capa rota (ahora lee y edita, y avisa); sobre
+  unos valores únicos sin ninguna clase respondía `ok` sin cambiar nada (ahora es error); y no
+  alcanzaba una clase cuyo valor era la etiqueta de otra (ahora manda el valor).
+- **Una capa de la raíz con homónimas dentro de grupos era inalcanzable.** Ahora la ruta completa
+  exacta manda en todas las herramientas que buscan capa.
+- **`rename_layer` aceptaba `\`**, que deja la capa inalcanzable.
+- **Los subprocesos del servidor se colgaban al arrancar** (`export_mxd_lote`, `audit_folder`,
+  `describe_mxd`): heredaban el stdin del servidor, que es el pipe JSON-RPC del cliente. Ahora se
+  lanzan con `stdin=DEVNULL`.
+- **Los subprocesos del servidor abrían una ventana de consola cada uno** cuando el cliente arranca
+  el servidor sin consola, y cada ventana robaba el foco. Ahora van con `CREATE_NO_WINDOW`, y un
+  test lo vigila.
+- **`export_mxd_lote` lanzaba los .mxd con marcos OLE con ArcMap abierto**, y el arcpy de fuera se
+  colgaba arrastrando a los demás procesos. Ahora salen como fallidos con `marcos_ole`; con ArcMap
+  cerrado se exportan como siempre. `execute_arcpy` tampoco lanza código que abra uno de esos
+  documentos con `MapDocument`.
+- **El vigilante de `export_mxd_lote` esperaba siempre 5 s** aunque el plano acabara en 1. Si
+  `ARCMAP_PYTHON27` es un lanzador, el corte por CPU se desactiva y se avisa.
+- **Los export borraban el plano viejo antes de tener el nuevo en su sitio**, y con el destino
+  bloqueado por un visor o una carpeta sincronizada se podían perder los dos o quedar un temporal
+  `.mcp-xxxx`. Ahora el viejo se aparta, entra el nuevo y solo entonces se borra; el movimiento se
+  reintenta y, si algo queda, se da su ruta.
+- **`describe_data` dejaba bloqueado el shapefile** (`.sr.lock`) hasta que pasaba el recolector de
+  .NET. Ahora suelta el dataset al terminar.
+- **La verificación de `save_mxd` esperaba 180 s** y parecía que el guardado había fallado. Ahora
+  espera 60 s y el mensaje dice que el documento sí se guardó.
+- **`save_mxd` podía sobrescribir la plantilla** de un documento nuevo nunca guardado.
+- **El instalador registraba el servidor en una config que Claude Desktop no leía** cuando la app
+  está instalada como paquete MSIX (instalador nuevo o Microsoft Store). Ahora se escribe en todas
+  las rutas que existen, y la detección y la desinstalación también las tienen en cuenta.
+- **Con el servidor nuevo y el add-in anterior, lo nuevo se ignoraba y respondía `ok`**
+  (`set_text_element(x=5)` llegaba a borrar el título). El servidor pregunta la versión del add-in
+  con `ping` y, si es anterior a la que exige el comando o el parámetro, responde
+  `estado: addin_antiguo` con lo que hay que instalar.
+- **`get_ole_tables`** desalineaba las tablas de Word 97 con celdas vacías (ahora las filas salen
+  de las propiedades de párrafo del documento) y contaba los objetos anidados como copias
+  antiguas. El lector de compound files ya no puede gastar gigas con un .mxd corrupto.
+- **`copy_layout_elements`** daba las cajas del error con coma decimal; ahora, con punto.
+- **`get_canvas_screenshot` se cortaba a 60 s** dentro del add-in aunque el servidor esperara más:
+  ahora tiene el timeout largo de los export.
+- **La ficha «Acerca de» contaba una herramienta de más** (un comando interno del puente).
+
+### Cambiado
+- **`remove_layer` y `repair_data_source` ya no adivinan entre capas homónimas**: con una igual en
+  la raíz y otra en un grupo, piden la ruta anclada con `/` delante (`"/Límite"`,
+  `"/Grupo/Límite"`), y sin ancla el error lista las rutas. Las demás herramientas siguen igual.
+- **`audit_folder(detalle=True)`**: la lista `capas` de cada documento va al fichero de
+  `detalle_completo`; en la respuesta quedan los recuentos y `capas_en_detalle`.
+- **La lectura de simbología marca los símbolos de varias capas** con `capas_simbolo` (y
+  `capas_borde`), en `edit_symbol`, en el inventario y en `compare_mxd`.
+- **Los handlers trabajan sobre un `Documento`**, que puede ser el abierto en ArcMap o un .mxd
+  abierto desde disco: es la base del modo disco. En vivo, sin cambio de comportamiento.
+- **La descripción de `execute_arcpy` dice qué no hace**: lo hecho sobre `mxd` o `df` no se ve en
+  ArcMap, y remite a la herramienta que encuadra, añade capas, simboliza o filtra.
+
+### Conocido, sin arreglar
+- **Una entrada de leyenda propia para un grupo de capas no se puede crear desde ArcObjects** en
+  ArcMap 10.5 (cinco vías probadas). Lo que sí se puede: mostrar el nombre de la capa hija con
+  `set_legend_item(mostrar_nombre=True)`.
+- **La verificación de `save_mxd` puede no terminar** en algún plano sin marcos OLE, con causa sin
+  identificar. El documento sí queda guardado y el mensaje lo dice.
+
 ## [2.16.0] - 2026-09-26
 
 La tanda de los fallos que esperaban un repro. En vez de esperar a que volvieran a pasar en
@@ -54,7 +252,7 @@ la 2.15.0 falla en los mismos puntos.
 
 ## [2.15.0] - 2026-09-25
 
-La tanda de mejoras que pedían las series de planos de ID2018 y el montaje de un MXD real:
+La tanda de mejoras que pedían las series de planos de montes y el montaje de un MXD real:
 auditar lo que **sale en el plano**, etiquetas y símbolos sin rehacer la simbología, los
 estilos `.style` del usuario, reordenar la TOC, servicios WMS, y avisar de las rutas
 relativas que ArcMap **pierde al guardar** sin decir nada. Siete herramientas nuevas (66).

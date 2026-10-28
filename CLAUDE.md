@@ -22,7 +22,8 @@ propios PR.
      (`%LOCALAPPDATA%\arcmap-mcp\venv`). Es lo mismo que corre el CI.
    - Si se toca el add-in: `addin\build.ps1`, instalar el `.esriaddin`, **reiniciar
      ArcMap** y pasar `tests/regresion_sesion_viva.py` (y `regresion_ddp.py` si toca
-     exports o Data Driven Pages) contra ese ArcMap. Pegar el resumen en el PR.
+     exports o Data Driven Pages, y `regresion_disco.py` si toca `edit_mxd_lote`,
+     `compare_mxd` o `ArcmapMcp.Disco`) contra ese ArcMap. Pegar el resumen en el PR.
      El CI **no** compila el C#: enlaza ArcObjects de Desktop 10.5, que no existe en
      un runner de GitHub.
 4. `git push -u origin <rama>` y `gh pr create`. Merge desde GitHub cuando el CI

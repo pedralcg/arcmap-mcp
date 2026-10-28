@@ -18,6 +18,7 @@ import re
 import base64
 import socket
 import struct
+import subprocess
 import uuid
 
 from mcp.server.fastmcp import FastMCP, Image
@@ -34,6 +35,25 @@ HOST = os.environ.get("ARCMAP_BRIDGE_HOST", "127.0.0.1")
 # los dos extremos. Es además la vía de escape cuando un ArcMap zombi deja cogido el
 # 27179 y ningún ArcMap nuevo puede levantar el puente.
 PORT = int(os.environ.get("ARCMAP_BRIDGE_PORT", "27179"))
+
+# Todo subproceso que lance el servidor va SIN VENTANA. Claude Desktop y Cowork lo
+# arrancan sin consola, y entonces cada python.exe o tasklist hijo abre la suya: en
+# un export_mxd_lote de 80 MXD son 80 ventanas robando el foco a quien esté
+# trabajando en el equipo. CREATE_NO_WINDOW, nunca DETACHED_PROCESS: este deja al
+# hijo sin consola y es cada nieto el que abre una ventana nueva.
+#
+# Y SIN HEREDAR EL STDIN. El stdin de este servidor es el pipe JSON-RPC del cliente, y
+# FastMCP lo tiene SIEMPRE con una lectura pendiente esperando el siguiente mensaje. En
+# Windows un pipe síncrono serializa las operaciones sobre el mismo objeto de fichero:
+# el hijo que lo hereda se bloquea en su arranque (el CRT consulta los handles
+# estándar) hasta que esa lectura termina, o sea hasta que el cliente manda otra cosa.
+# Medido el 2026-10-06: export_mxd_lote cortaba 13 de 16 planos con 0,0 s de CPU (el
+# hijo no llegaba ni a `import arcpy`) mientras el mismo export, lanzado a mano,
+# tardaba 8 s. Era también el «cuelgue del arcpy de fuera» que no se reproducía: se
+# probaba siempre fuera del MCP, donde nadie lee el stdin.
+SIN_VENTANA = {"stdin": subprocess.DEVNULL}
+if os.name == "nt":
+    SIN_VENTANA["creationflags"] = 0x08000000
 
 # --------------------------------------------------------------------------- #
 # Presupuestos de espera.
@@ -106,6 +126,81 @@ _PAUSA_DIBUJO = 3
 # 1,1 MB; era el «crash del puente» del informe de uso de agosto).
 MAX_REQUEST_BYTES = 1024 * 1024
 
+# --------------------------------------------------------------------------- #
+# Versión mínima del add-in para cada comando o parámetro nuevo.
+#
+# El servidor corre desde el repo, pero el add-in nuevo solo entra al instalarlo y
+# reiniciar ArcMap. Con servidor nuevo y add-in viejo, un parámetro que el add-in no
+# conoce se IGNORA y la respuesta es `ok: true`: set_text_element(x=5) BORRABA el título
+# (el add-in 2.16 hacía Text = texto ?? "" y el servidor nuevo ya no manda texto), y
+# media docena más no hacían nada sin decirlo (revisión del 2026-10-01 y controles del
+# 2026-10-06). Aquí, en un solo sitio, lo que exige cada versión: el comando entero
+# (clave None), un parámetro (su nombre, si va en el mensaje) o un valor de un parámetro.
+# Se sacó comparando las firmas de las tools entre v2.16.0 y la rama.
+# --------------------------------------------------------------------------- #
+_MINIMOS_ADDIN = {
+    "rename_layer": {None: "2.17.0"},
+    "open_mxd": {None: "2.17.0"},
+    "set_legend": {None: "2.17.0", "indice": "2.17.0", "fuente": "2.17.0", "negrita_nombres": "2.17.0",
+                   "negrita_etiquetas": "2.17.0", "parche": "2.17.0", "separaciones": "2.17.0"},
+    "set_text_element": {"x": "2.17.0", "y": "2.17.0", "tamano": "2.17.0", "patron": "2.17.0",
+                         "reemplazo": "2.17.0", "todos": "2.17.0", "mayusculas": "2.17.0",
+                         "region": "2.17.0", "centrar_en": "2.17.0", "encajar_en": "2.17.0",
+                         "margen": "2.17.0", "tamano_min": "2.17.0"},
+    "set_legend_item": {"columna_nueva": "2.17.0", "quitar": "2.17.0", "posicion": "2.17.0",
+                        "despues_de": "2.17.0"},
+    "edit_symbol": {"etiqueta": "2.17.0", "quitar": "2.17.0", "anadir_valores": "2.17.0",
+                    "encabezado": "2.17.0", "patron_linea": "2.17.0", "trama": "2.17.0",
+                    "estilo_marcador": "2.17.0"},
+    "set_single_symbology": {"patron_linea": "2.17.0", "trama": "2.17.0", "estilo_marcador": "2.17.0"},
+    "set_labels": {"parte_mayor": "2.17.0", "sin_duplicados_m": "2.17.0", "tamano_minimo_m": "2.17.0",
+                   "repetir_cada_mm": "2.17.0", "copiar_de": "2.17.0", "por_valor": "2.17.0",
+                   "where": "2.17.0", "fuente": "2.17.0", "negrita": "2.17.0", "cursiva": "2.17.0",
+                   "nunca_quitar": "2.17.0", "sobrepasar_entidad": "2.17.0", "buffer": "2.17.0",
+                   "colocacion_linea": "2.17.0"},
+    "set_unique_values_symbology": {"campos": "2.17.0", "delimitador": "2.17.0", "clases": "2.17.0",
+                                    "resto": "2.17.0"},
+    "set_raster_symbology": {("modo", "rgb"): "2.17.0", "bandas": "2.17.0", "cortes": "2.17.0",
+                             ("etiquetas", "auto"): "2.17.0", ("etiquetas", "auto<"): "2.17.0",
+                             "conservar_colores": "2.17.0"},
+    "set_graduated_symbology": {"cortes": "2.17.0", "etiquetas": "2.17.0"},
+    "move_layer": {"en_leyenda": "2.17.0"},
+    "set_frame_clip": {None: "2.17.0"},
+    "duplicate_layer": {None: "2.17.0"},
+    "replace_data_source": {None: "2.17.0"},
+    "replace_text": {None: "2.17.0"},
+    "set_definition_query": {"anadir": "2.17.0"},
+    "add_layer": {"si_existe": "2.17.0"},
+    "save_layer_as_lyr": {None: "2.17.0"},
+    "copy_layout_elements": {None: "2.17.0"},
+}
+
+
+def _version_addin(texto):
+    """'arcmap-mcp 2.16.0 (.NET)' -> (2, 16, 0); None si no trae versión."""
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", texto or "")
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def _minimo_addin(ctype, params):
+    """(versión mínima como tupla, qué la exige) para este envío; (None, None) si no hay."""
+    exige, que = None, None
+    for clave, version in _MINIMOS_ADDIN.get(ctype, {}).items():
+        if clave is None:
+            motivo = "el comando %s" % ctype
+        elif isinstance(clave, tuple):
+            if (params or {}).get(clave[0]) != clave[1]:
+                continue
+            motivo = "%s(%s=%r)" % (ctype, clave[0], clave[1])
+        elif (params or {}).get(clave) is not None:
+            motivo = "el parámetro '%s' de %s" % (clave, ctype)
+        else:
+            continue
+        v = _version_addin(version)
+        if exige is None or v > exige:
+            exige, que = v, motivo
+    return exige, que
+
 
 class ArcMapClient:
     """Cliente socket hacia el puente dentro de ArcMap. Reconecta por comando."""
@@ -114,11 +209,49 @@ class ArcMapClient:
         self.host = host
         self.port = port
         self.timeout = timeout
+        self._version = None          # del add-in, leída con ping; se olvida si el puente cae
+
+    def _version_del_addin(self, refrescar=False):
+        """Versión del add-in que escucha, como tupla; None si no se sabe (puente caído u
+        ocupado: entonces el comando sigue y falla con su propio error, que ya es claro)."""
+        if self._version is None or refrescar:
+            r = self._enviar("ping", {}, self.timeout)
+            self._version = _version_addin((r.get("result") or {}).get("addin")) if r.get("ok") else None
+        return self._version
+
+    def _comprobar_version(self, ctype, params):
+        """Error con forma de respuesta si el add-in es anterior a lo que exige el envío."""
+        minimo, motivo = _minimo_addin(ctype, params)
+        if minimo is None:
+            return None
+        tiene = self._version_del_addin()
+        if tiene is not None and tiene < minimo:
+            # La versión guardada puede ser de antes de reinstalar y reiniciar ArcMap:
+            # antes de negarse, se pregunta otra vez.
+            tiene = self._version_del_addin(refrescar=True)
+        if tiene is None or tiene >= minimo:
+            return None
+        return {"ok": False, "estado": "addin_antiguo", "error": (
+            "ADD-IN ANTIGUO: %s necesita el add-in %s y el que tiene ArcMap es el %s. No se ha "
+            "enviado, porque el add-in viejo ignoraría lo nuevo y respondería ok sin hacerlo. "
+            "Instala el .esriaddin de esta versión y REINICIA ArcMap (el add-in se carga al "
+            "arrancar)." % (motivo, ".".join(map(str, minimo)), ".".join(map(str, tiene))))}
 
     def send(self, ctype, params=None, timeout=None):
         """Envía un comando al puente. `timeout` (s) sobrescribe el del cliente para
         esta llamada: cada tool pasa el presupuesto (`_Espera`) que le corresponde
         según el tope que el add-in aplique a ESE comando."""
+        error = self._comprobar_version(ctype, params)
+        if error:
+            return error
+        r = self._enviar(ctype, params, timeout)
+        if r.get("estado") == "puente_caido":
+            self._version = None      # al volver puede ser otro ArcMap con otro add-in
+        elif ctype == "ping" and r.get("ok") and (r.get("result") or {}).get("addin"):
+            self._version = _version_addin(r["result"]["addin"])
+        return r
+
+    def _enviar(self, ctype, params=None, timeout=None):
         eff = timeout or self.timeout
         msg = json.dumps({"type": ctype, "params": params or {}}).encode("utf-8")
         if len(msg) > MAX_REQUEST_BYTES:
@@ -296,6 +429,45 @@ def _mxd_marcos_ole(ruta):
     return capa.count(_CLSID_MARCO_OLE), None
 
 
+def _cfb_cadena(inicio, tabla, tope):
+    """Sectores de la cadena que empieza en `inicio`, como mucho `tope`. Se corta al repetir un
+    sector: un compound file corrupto (o fabricado) puede tener una cadena que se apunta a sí
+    misma, y sin este corte un .mxd de 2,5 KB llegó a 2,1 GB de memoria (revisión 2026-10-01)."""
+    out, vistos, s = [], set(), inicio
+    while s < _MARCA and s not in vistos and len(out) < tope:
+        vistos.add(s)
+        out.append(s)
+        s = tabla[s] if s < len(tabla) else 0xFFFFFFFE
+    return out
+
+
+def _cfb_fat(datos, ssz):
+    """(fat, n_sec) de un compound file: la FAT completa (DIFAT de la cabecera más su cadena)
+    y el número de sectores que caben en el fichero, que acota todo lo demás.
+
+    La DIFAT trae 109 entradas en la cabecera; un documento de más de ~7 MB (sectores de
+    512 B) necesita más y esas cuelgan de una CADENA de sectores. Saltársela no da error: deja
+    la FAT corta, las cadenas se truncan y los streams salen VACÍOS, o sea un fichero sano que
+    parece ilegible. Pasó con 92 de 400 .mxd al validar esto."""
+    n_sec = max((len(datos) - 512) // ssz, 0)
+    difat0, n_difat = struct.unpack_from("<II", datos, 68)
+    difat = list(struct.unpack_from("<109I", datos, 76))
+    sec, vistos = difat0, set()
+    while sec < _MARCA and sec not in vistos and len(vistos) <= min(n_difat, n_sec):
+        # la cadena de la DIFAT no está en la FAT: cada bloque trae el siguiente al final
+        vistos.add(sec)
+        bloque = struct.unpack_from("<%dI" % (ssz // 4), datos, 512 + sec * ssz)
+        difat.extend(bloque[:-1])
+        sec = bloque[-1]
+    fat = []
+    for s in difat:
+        if len(fat) >= n_sec:
+            break                                 # entradas de sectores que no existen
+        if s < _MARCA:
+            fat.extend(struct.unpack_from("<%dI" % (ssz // 4), datos, 512 + s * ssz))
+    return fat, n_sec
+
+
 def _mxd_streams(ruta, nombres):
     """Devuelve ({nombre: bytes}, error) con los streams de primer nivel pedidos que existan."""
     try:
@@ -312,37 +484,13 @@ def _mxd_streams(ruta, nombres):
         mssz = 1 << struct.unpack_from("<H", datos, 32)[0]
         dir0 = struct.unpack_from("<I", datos, 48)[0]
         mfat0 = struct.unpack_from("<I", datos, 60)[0]
-        difat0 = struct.unpack_from("<I", datos, 68)[0]
-        n_difat = struct.unpack_from("<I", datos, 72)[0]
+        fat, n_sec = _cfb_fat(datos, ssz)
 
-        # La DIFAT trae 109 entradas en la cabecera; un documento de más de ~7 MB
-        # (sectores de 512 B) necesita más y esas cuelgan de una CADENA de
-        # sectores. Saltársela no da error: deja la FAT corta, las cadenas se
-        # truncan y los streams salen VACÍOS, o sea un fichero sano que parece
-        # ilegible. Pasó con 92 de 400 .mxd al validar esto.
-        difat = list(struct.unpack_from("<109I", datos, 76))
-        sec, vueltas = difat0, 0
-        while sec < _MARCA and vueltas <= n_difat + 1:
-            bloque = struct.unpack_from("<%dI" % (ssz // 4), datos, 512 + sec * ssz)
-            difat.extend(bloque[:-1])
-            sec = bloque[-1]
-            vueltas += 1
-
-        fat = []
-        for s in difat:
-            if s < _MARCA:
-                fat.extend(struct.unpack_from("<%dI" % (ssz // 4), datos, 512 + s * ssz))
-
-        def cadena(inicio):
-            out, s, n = [], inicio, 0
-            while s < _MARCA and n < 2000000:
-                out.append(s)
-                s = fat[s] if s < len(fat) else 0xFFFFFFFE
-                n += 1
-            return out
+        def cadena(inicio, tope=n_sec):
+            return _cfb_cadena(inicio, fat, tope)
 
         def leer_sectores(inicio, size):
-            trozos = (datos[512 + s * ssz:512 + (s + 1) * ssz] for s in cadena(inicio))
+            trozos = (datos[512 + s * ssz:512 + (s + 1) * ssz] for s in cadena(inicio, -(-size // ssz)))
             return b"".join(trozos)[:size]
 
         entradas = []
@@ -368,12 +516,8 @@ def _mxd_streams(ruta, nombres):
             mfat.extend(struct.unpack_from("<%dI" % (ssz // 4), datos, 512 + s * ssz))
 
         def leer_mini(inicio, size):
-            out, s, n = [], inicio, 0
-            while s < _MARCA and n < 2000000:
-                out.append(mini[s * mssz:(s + 1) * mssz])
-                s = mfat[s] if s < len(mfat) else 0xFFFFFFFE
-                n += 1
-            return b"".join(out)[:size]
+            trozos = (mini[s * mssz:(s + 1) * mssz] for s in _cfb_cadena(inicio, mfat, -(-size // mssz)))
+            return b"".join(trozos)[:size]
 
         salida = {}
         for nombre, tipo, inicio, size in entradas:
@@ -383,6 +527,379 @@ def _mxd_streams(ruta, nombres):
         return salida, None
     except (struct.error, IndexError, ValueError) as exc:
         return None, "estructura del .mxd ilegible: %s" % exc
+
+
+def _cfb_streams_anidados(ruta, quiere):
+    """{"Embedding 1/WordDocument": bytes, ...} de los streams del compound file cuya ruta
+    completa cumple `quiere(ruta)`; (None, error) si no se puede leer.
+
+    A diferencia de _mxd_streams (solo primer nivel, validado contra 400 .mxd y que no se
+    toca), recorre el árbol rojo-negro del directorio: las entradas se enlazan por ÍNDICE
+    (izquierdo, derecho, hijo), así que se guardan todas, también las vacías."""
+    try:
+        with open(ruta, "rb") as fh:
+            datos = fh.read()
+    except OSError as exc:
+        return None, "no se pudo leer el fichero: %s" % exc
+    if datos[:8] != _FIRMA_CFB:
+        return None, "no es un compound document (.mxd)"
+    try:
+        ssz = 1 << struct.unpack_from("<H", datos, 30)[0]
+        mssz = 1 << struct.unpack_from("<H", datos, 32)[0]
+        dir0, = struct.unpack_from("<I", datos, 48)
+        mfat0, = struct.unpack_from("<I", datos, 60)
+        fat, n_sec = _cfb_fat(datos, ssz)
+
+        entradas = []
+        for s in _cfb_cadena(dir0, fat, n_sec):
+            for i in range(ssz // 128):
+                e = 512 + s * ssz + i * 128
+                nlen, = struct.unpack_from("<H", datos, e + 64)
+                entradas.append((datos[e:e + max(nlen - 2, 0)].decode("utf-16-le", "replace"),
+                                 datos[e + 66], struct.unpack_from("<III", datos, e + 68),
+                                 struct.unpack_from("<I", datos, e + 116)[0],
+                                 struct.unpack_from("<I", datos, e + 120)[0]))
+
+        def sectores(inicio, size, tabla, tam, fuente, base):
+            """Los `size` bytes del stream, sin leer más sectores de los que hacen falta."""
+            trozos = (fuente[base + s * tam:base + (s + 1) * tam]
+                      for s in _cfb_cadena(inicio, tabla, -(-size // tam)))
+            return b"".join(trozos)[:size]
+
+        raiz = entradas[0]
+        mini = sectores(raiz[3], raiz[4], fat, ssz, datos, 512)
+        mfat = []
+        for s in _cfb_cadena(mfat0, fat, n_sec):
+            mfat.extend(struct.unpack_from("<%dI" % (ssz // 4), datos, 512 + s * ssz))
+
+        def leer(inicio, size):
+            if size < 4096:
+                return sectores(inicio, size, mfat, mssz, mini, 0)
+            return sectores(inicio, size, fat, ssz, datos, 512)
+
+        salida = {}
+        pendientes = [(raiz[2][2], "")]          # (índice, prefijo): hijos de la raíz
+        vistos = set()
+        while pendientes:
+            idx, prefijo = pendientes.pop()
+            if idx >= len(entradas) or idx in vistos or idx == 0xFFFFFFFF:
+                continue
+            vistos.add(idx)
+            nombre, tipo, (izq, der, hijo), inicio, size = entradas[idx]
+            pendientes += [(izq, prefijo), (der, prefijo)]
+            camino = prefijo + nombre
+            if tipo == 1:                         # storage: bajar
+                pendientes.append((hijo, camino + "/"))
+            elif tipo == 2 and quiere(camino):
+                salida[camino] = leer(inicio, size)
+        return salida, None
+    except (struct.error, IndexError, ValueError) as exc:
+        return None, "estructura ilegible: %s" % exc
+
+
+def _almacenes_vivos(ruta):
+    """Números N de los "Embedding N" a los que apuntan los marcos OLE del layout, en orden.
+
+    Un .mxd ACUMULA copias antiguas de los objetos incrustados (el Plano 04 de un expediente real
+    llevaba 17 para 2 marcos, con tres versiones distintas del contenido). El marco guarda el
+    número de su almacén en el cuarto entero de 32 bits tras el CLSID de la clase OleFrame.
+    Validado el 2026-10-01 contra los 8 planos con OLE de un expediente real (ver la nota del pendiente)."""
+    streams, error = _mxd_streams(ruta, ("Mx Document", "PageLayout"))
+    if error:
+        return None
+    capa = streams.get("Mx Document") if "Mx Document" in streams else streams.get("PageLayout")
+    if capa is None:
+        return None
+    numeros, i = [], 0
+    while True:
+        i = capa.find(_CLSID_MARCO_OLE, i)
+        if i < 0 or i + 32 > len(capa):
+            return numeros
+        numeros.append(struct.unpack_from("<I", capa, i + 16 + 12)[0])
+        i += 16
+
+
+def _leer_tablas_ole(ruta, incluir_antiguos=False):
+    """Lo que hace get_ole_tables, sin el decorador (para poder probarlo)."""
+    nombres = ("WordDocument", "1Table", "0Table", "Data", "\x01CompObj", "Package")
+    streams, error = _cfb_streams_anidados(ruta, lambda p: p.rsplit("/", 1)[-1] in nombres)
+    if error:
+        return {"ok": False, "error": error}
+    almacenes = {}
+    for camino, contenido in streams.items():
+        if "/" not in camino:
+            continue
+        carpeta, hoja = camino.rsplit("/", 1)
+        almacenes.setdefault(carpeta, {})[hoja] = contenido
+    vivos = _almacenes_vivos(ruta)
+    nombres_vivos = None if vivos is None else ["Embedding %d" % n for n in vivos]
+
+    def numero(carpeta):
+        try:
+            return int(carpeta.rsplit(" ", 1)[-1])
+        except ValueError:
+            return 0
+
+    objetos, antiguos = [], 0
+    for carpeta in sorted(almacenes, key=numero):
+        en_layout = None if nombres_vivos is None else carpeta in nombres_vivos
+        if en_layout is False and not incluir_antiguos:
+            # Un objeto dentro de otro (Embedding N/ObjectPool/...) no es una copia vieja:
+            # contarlo inflaba el número.
+            antiguos += "/" not in carpeta
+            continue
+        partes = almacenes[carpeta]
+        compobj = partes.get("\x01CompObj", b"")
+        tipo = next((t for t in compobj.decode("latin-1").split("\x00") if len(t) > 6 and t.isprintable()),
+                    "(desconocido)")
+        obj = {"almacen": carpeta, "tipo": tipo, "en_el_layout": en_layout}
+        try:
+            if "Package" in partes:
+                filas, texto = _filas_docx(partes["Package"])
+                if filas:
+                    obj["filas"] = filas
+                else:
+                    obj["texto"] = texto
+            elif "WordDocument" in partes:
+                wd = partes["WordDocument"]
+                flags, = struct.unpack_from("<H", wd, 0x0A)
+                tabla = partes.get("1Table" if flags & 0x0200 else "0Table")
+                if tabla is None:
+                    raise ValueError("falta el stream de tabla del documento")
+                texto = _texto_word97(wd, tabla)
+                try:
+                    filas = _filas_word97(wd, tabla, partes.get("Data", b""))
+                except (struct.error, IndexError, ValueError):
+                    filas = None
+                if filas is None and "\x07" in texto:
+                    # sin las propiedades de párrafo no se distingue una celda vacía de un fin
+                    # de fila: el resultado puede salir con filas de menos o desalineadas
+                    filas = _filas_de_tabla_word(texto)
+                    obj["aviso"] = ("filas deducidas solo del texto: si la tabla tiene celdas vacías"
+                                    " pueden salir filas de menos o desalineadas")
+                if filas:
+                    obj["filas"] = filas
+                else:
+                    obj["texto"] = texto.replace("\r", "\n").strip()
+            else:
+                obj["error"] = "no es un documento de Word: no se sabe leer este tipo de objeto"
+        except Exception as exc:  # zip/xml/struct: un objeto ilegible no tumba los demás
+            obj["error"] = "no se pudo leer el documento: %s" % exc
+        objetos.append(obj)
+    res = {"ruta": ruta, "num_objetos": len(objetos), "objetos": objetos}
+    if nombres_vivos is None:
+        res["aviso"] = ("no se pudo leer el layout para saber qué objetos usan los marcos: se listan"
+                        " TODOS los almacenes, y puede haber copias antiguas")
+    elif antiguos:
+        res["copias_antiguas_omitidas"] = antiguos
+    return {"ok": True, "result": res}
+
+
+@mcp.tool()
+def get_ole_tables(ruta: str, incluir_antiguos: bool = False) -> dict:
+    """
+    Lee las tablas de los objetos OLE incrustados en un .mxd (en planos reales, tablas
+    de Word 97-2003 en el layout), **desde el fichero**: sin ArcMap, sin Word, sin abrir el
+    documento y sin modificar nada. Sirve para verificar una entrega: una errata en una de
+    esas tablas solo se veía mirando el JPG.
+
+    - `ruta`: .mxd en disco (absoluta). Puede estar abierto en ArcMap: se lee lo GUARDADO.
+    - `incluir_antiguos`: un .mxd acumula copias viejas de sus objetos incrustados (17 para
+      2 tablas en un plano real, con versiones distintas). Por defecto solo salen los que usan
+      los marcos del layout; con True salen todos, marcados con `en_el_layout`.
+
+    Devuelve cada objeto (`almacen`, `tipo`, `en_el_layout`) con sus `filas` (lista de
+    celdas) o su `texto` si no es una tabla. Lee Word 97-2003 y Word 2007+, con las celdas
+    vacías en su sitio. Si un objeto trae `aviso`, sus filas se dedujeron solo del texto y
+    pueden salir desalineadas: no lo des por verificado. Lee los DATOS del objeto; lo que
+    ArcMap dibuja es una imagen cacheada que normalmente coincide.
+
+    **Solo lectura, a propósito.** Editar estas tablas no es viable: activar el objeto desde el
+    puente bloquea ArcMap con un diálogo, abre Word en la pantalla y lo editado no vuelve al
+    plano (probado el 2026-10-01). Una corrección se hace a mano en ArcMap (doble clic en la
+    tabla) y se comprueba después con esta herramienta.
+    """
+    if not ruta or not os.path.isabs(ruta) or not ruta.lower().endswith(".mxd"):
+        return {"ok": False, "error": "'ruta' debe ser la ruta ABSOLUTA de un .mxd. Recibido: %r" % ruta}
+    if not os.path.isfile(ruta):
+        return {"ok": False, "error": "No existe el fichero: %s" % ruta}
+    return _leer_tablas_ole(ruta, incluir_antiguos)
+
+
+def _filas_docx(paquete):
+    """(filas, texto) de un Word 2007+ incrustado (stream "Package": un .docx en zip): las
+    filas de sus tablas y, para el caso sin tablas, el texto de sus párrafos."""
+    import io
+    import zipfile
+    import xml.etree.ElementTree as ET
+    w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    with zipfile.ZipFile(io.BytesIO(paquete)) as z:
+        raiz = ET.fromstring(z.read("word/document.xml"))
+    filas = []
+    for tr in raiz.iter(w + "tr"):
+        celdas = []
+        for tc in tr.findall(w + "tc"):
+            parrafos = ["".join(t.text or "" for t in p.iter(w + "t")) for p in tc.iter(w + "p")]
+            celdas.append(" ".join(x for x in parrafos if x).strip())
+        if any(celdas):
+            filas.append(celdas)
+    texto = "\n".join("".join(t.text or "" for t in p.iter(w + "t")) for p in raiz.iter(w + "p")).strip()
+    return filas, texto
+
+
+def _piezas_word97(word_document, tabla):
+    """[(carácter, posición en el stream WordDocument)] del texto principal de un Word
+    97-2003, leído por la tabla de piezas (CLX). La posición es la que usan las propiedades
+    de párrafo para decir a qué párrafo pertenece cada carácter."""
+    ccp, = struct.unpack_from("<i", word_document, 0x4C)
+    fc_clx, lcb_clx = struct.unpack_from("<II", word_document, 0x01A2)
+    clx = tabla[fc_clx:fc_clx + lcb_clx]
+    i = 0
+    while clx[i] == 0x01:                         # Prc: propiedades, se saltan
+        i += 3 + struct.unpack_from("<H", clx, i + 1)[0]
+    if clx[i] != 0x02:
+        raise ValueError("CLX sin tabla de piezas")
+    lcb, = struct.unpack_from("<I", clx, i + 1)
+    plc = clx[i + 5:i + 5 + lcb]
+    n = (lcb - 4) // 12
+    cps = struct.unpack_from("<%di" % (n + 1), plc, 0)
+    salida = []
+    for k in range(n):
+        fc, = struct.unpack_from("<I", plc, 4 * (n + 1) + 8 * k + 2)
+        largo = cps[k + 1] - cps[k]
+        if fc & 0x40000000:                       # pieza en cp1252, un byte por carácter
+            fc = (fc & 0x3FFFFFFF) // 2
+            texto = word_document[fc:fc + largo].decode("cp1252", "replace")
+            salida += [(c, fc + j) for j, c in enumerate(texto)]
+        else:
+            texto = word_document[fc:fc + 2 * largo].decode("utf-16-le", "replace")
+            salida += [(c, fc + 2 * j) for j, c in enumerate(texto)]
+    return salida[:ccp]
+
+
+def _texto_word97(word_document, tabla):
+    """Texto principal de un documento Word 97-2003 (streams WordDocument y 1Table/0Table).
+    Sin Word y sin dependencias."""
+    return "".join(c for c, _ in _piezas_word97(word_document, tabla))
+
+
+_SPRM_P_EN_TABLA, _SPRM_P_FIN_DE_FILA = 0x2416, 0x2417     # sprmPFInTable, sprmPFTtp
+_SPRM_P_HUGE_PAPX = 0x6646                                  # propiedades en el stream Data
+
+
+def _parrafos_word97(word_document, tabla, data=b""):
+    """[(fc_inicio, fc_fin, en_tabla, fin_de_fila)] de los párrafos, ordenados, leídos de las
+    propiedades de párrafo (PlcBtePapx del stream de tabla → páginas PapxFkp de 512 bytes).
+
+    En el texto, una celda vacía y un fin de fila son los dos un \\x07: solo esta propiedad
+    (sprmPFTtp) dice cuál es cuál. Sin ella, «A | (vacía)» seguido de «C | D» salía como una
+    sola fila ['', 'C', 'D'] (revisión del 2026-10-01), y el TOTAL del Plano 09 de un expediente real
+    salía partido en dos filas.
+
+    Cuando las propiedades no caben en la página (el fin de fila lleva la definición de la
+    tabla entera), el párrafo solo trae sprmPHugePapx: un puntero al stream `Data`. Pasa en
+    tablas anchas de documentos Word 97 (nFib 0xC1): sin seguirlo no aparece ningún fin de fila."""
+    fc, lcb = struct.unpack_from("<II", word_document, 0x0102)       # fcPlcfBtePapx
+    plc = tabla[fc:fc + lcb]
+    n = (lcb - 4) // 8
+    if n <= 0 or len(plc) < lcb:
+        raise ValueError("el documento no trae propiedades de párrafo")
+    parrafos = []
+    for k in range(n):
+        pn = struct.unpack_from("<I", plc, 4 * (n + 1) + 4 * k)[0] & 0x3FFFFF
+        pagina = word_document[pn * 512:(pn + 1) * 512]
+        crun = pagina[511]
+        rgfc = struct.unpack_from("<%dI" % (crun + 1), pagina, 0)
+        for j in range(crun):
+            off = pagina[4 * (crun + 1) + 13 * j] * 2
+            if off == 0:                          # párrafo sin propiedades propias
+                parrafos.append((rgfc[j], rgfc[j + 1], False, False))
+                continue
+            cb = pagina[off]
+            grp = (pagina[off + 2:off + 2 + 2 * pagina[off + 1]] if cb == 0
+                   else pagina[off + 1:off + 2 * cb])
+            props = _sprms_de_parrafo(grp[2:])  # los 2 primeros bytes son el estilo (istd)
+            if _SPRM_P_HUGE_PAPX in props:
+                pos, = struct.unpack_from("<I", props[_SPRM_P_HUGE_PAPX])
+                largo, = struct.unpack_from("<H", data, pos)
+                props.update(_sprms_de_parrafo(data[pos + 2:pos + 2 + largo]))
+            parrafos.append((rgfc[j], rgfc[j + 1], props.get(_SPRM_P_EN_TABLA, b"\0")[0] != 0,
+                             props.get(_SPRM_P_FIN_DE_FILA, b"\0")[0] != 0))
+    parrafos.sort()
+    return parrafos
+
+
+def _sprms_de_parrafo(grpprl):
+    """{sprm: operando} de una lista de propiedades de Word 97."""
+    props, i = {}, 0
+    while i + 2 < len(grpprl):
+        sprm, = struct.unpack_from("<H", grpprl, i)
+        spra = sprm >> 13                         # tamaño del operando según el tipo
+        if spra in (0, 1):
+            largo = 1
+        elif spra in (2, 4, 5):
+            largo = 2
+        elif spra == 3:
+            largo = 4
+        elif spra == 7:
+            largo = 3
+        elif sprm in (0xD606, 0xD608):            # sprmTDefTable: longitud en 2 bytes
+            largo = 1 + struct.unpack_from("<H", grpprl, i + 2)[0]
+        else:
+            largo = 1 + grpprl[i + 2]
+        props[sprm] = grpprl[i + 2:i + 2 + largo]
+        i += 2 + largo
+    return props
+
+
+def _filas_word97(word_document, tabla, data=b""):
+    """Filas de las tablas de un Word 97-2003 por su ESTRUCTURA: una celda acaba en un \\x07
+    de un párrafo normal y la fila en el \\x07 del párrafo marcado como fin de fila. Las celdas
+    vacías y las filas vacías se conservan, y el texto fuera de las tablas no entra.
+
+    None si el documento no trae las propiedades que hacen falta (el que llama decide)."""
+    import bisect
+    parrafos = _parrafos_word97(word_document, tabla, data)
+    inicios = [p[0] for p in parrafos]
+    piezas = _piezas_word97(word_document, tabla)
+    filas, fila, celda, hubo_fin_de_fila = [], [], [], False
+    for c, fc in piezas:
+        k = bisect.bisect_right(inicios, fc) - 1
+        en_tabla, fin_de_fila = (parrafos[k][2], parrafos[k][3]) if k >= 0 and fc < parrafos[k][1] \
+            else (False, False)
+        if c == "\x07" and fin_de_fila:
+            filas.append(fila)
+            fila, celda, hubo_fin_de_fila = [], [], True
+        elif c == "\x07" and en_tabla:
+            fila.append("".join(celda).replace("\r", " ").replace("\x0b", " ").strip())
+            celda = []
+        elif en_tabla:
+            celda.append(c)
+    if not hubo_fin_de_fila:
+        return None if any(c == "\x07" for c, _ in piezas) else []
+    return filas
+
+
+def _filas_de_tabla_word(texto):
+    """Filas y celdas de las tablas de un texto de Word: cada celda acaba en \\x07 y cada fila
+    en una marca de fin de fila (otro \\x07 suelto). Solo como RESERVA de _filas_word97,
+    cuando el documento no trae propiedades de párrafo: una celda vacía también deja \\x07\\x07
+    y se toma por fin de fila, así que con huecos las filas salen mal (el que llama avisa).
+
+    Otro límite conocido: el texto plano no dice dónde empieza la tabla. Si hay párrafos ANTES de
+    ella, acaban pegados a la primera celda; se separan por el último salto de párrafo del
+    primer trozo, lo que solo falla si esa primera celda tiene varios párrafos. En los planos
+    reales el documento empieza por la tabla."""
+    filas = []
+    for bruta in texto.split("\x07\x07"):
+        if "\x07" not in bruta and not filas:
+            continue                              # texto sin tabla antes de la primera
+        if not filas and "\r" in bruta.split("\x07", 1)[0]:
+            bruta = bruta[bruta.split("\x07", 1)[0].rfind("\r") + 1:]
+        celdas = [c.replace("\r", " ").replace("\x0b", " ").strip() for c in bruta.split("\x07")]
+        if any(celdas):
+            filas.append(celdas)
+    return filas
 
 
 def _a_tupla(version):
@@ -457,6 +974,14 @@ def list_layers() -> dict:
     Dos capas homónimas dentro del MISMO grupo (el mismo shapefile añadido dos veces)
     tendrían la misma ruta, así que se numeran en orden de TOC: `Parcelas#1`,
     `Parcelas#2`. Usa la ruta tal cual la devuelve este listado.
+
+    Dos prefijos más, válidos en cualquier tool que pida una capa (y en `edit_mxd_lote`,
+    donde una ruta fija no vale para todos los planos de una serie):
+      - `visible:Parcelas`: solo entre las capas que se DIBUJAN (ella y sus grupos
+        encendidos). Las homónimas de grupos apagados dejan de estorbar.
+      - `fuente:Rodales_V1`: la capa cuya fuente (carpeta\\dataset) contiene ese texto, se
+        llame como se llame en la TOC. Combinables: `visible:fuente:Rodales_V1`.
+    Con varias candidatas, el mismo error con sus rutas.
     Un data frame vacío devuelve `num: 0`, no un error.
     """
     return _client.send("list_layers")
@@ -538,6 +1063,22 @@ def execute_arcpy(code: str, usar_documento: bool | None = None,
     que ArcMap serialice la sesión tal cual está — cuidado, eso ocupa ArcMap durante
     la operación y en documentos muy pesados puede llegar a tumbarlo.
 
+    NADA de lo que hagas sobre `mxd` o `df` se ve en ArcMap: es la copia, y se tira
+    al terminar. No sirve para encuadrar, añadir capas ni simbolizar el mapa que ve
+    el usuario. Para eso hay herramientas: encuadrar → `zoom_to_layer`, `set_extent`
+    o `set_scale`; añadir capas → `add_layer`; simbolizar → `set_single_symbology`,
+    `set_unique_values_symbology`, `set_graduated_symbology` o
+    `set_raster_symbology`; filtrar → `set_definition_query`.
+
+    Si el código abre con `MapDocument` un .mxd (por ruta escrita en el código) que tiene
+    marcos OLE, NO se lanza: con ArcMap abierto se colgaría al cargarlo, y guardarlo con
+    arcpy de fuera lo corrompe. Para esos planos, las herramientas del puente y `save_mxd`.
+
+    Si tu código lanza subprocesos, hazlo con
+    `creationflags=0x08000000` (CREATE_NO_WINDOW): sin él, cada uno abre una ventana
+    de consola que roba el foco a quien esté usando el equipo. Nunca con
+    DETACHED_PROCESS (0x8): deja al hijo sin consola y cada nieto abre una nueva.
+
     Solo se copia el documento cuando hace falta: se decide mirando si el código
     menciona `mxd` o `df` como variable (`MAP`/`mapping` ya no cuentan: existen
     siempre, con o sin copia). `usar_documento` fuerza esa decisión: `False`
@@ -599,6 +1140,20 @@ def execute_arcpy(code: str, usar_documento: bool | None = None,
                                "0 12 1;12 24 2;24 48 3", r"C:\\slope_rec.tif")
         RESULT = "hecho"                                      # no lo copia
     """
+    con_ole = _mxd_con_ole_en_codigo(code)
+    if con_ole:
+        return {"ok": False, "error": (
+            "marcos_ole: no se ha lanzado. El código abre con MapDocument %s, que tiene marcos OLE"
+            " (objetos incrustados, p. ej. tablas de Excel). Con ArcMap abierto, el arcpy de fuera se"
+            " queda colgado al cargarlos; y con ArcMap cerrado, guardarlo con save()/saveACopy() lo"
+            " corrompe (el 2026-10-01, uno de 8 planos tumbaba ArcMap al abrirlo). Este freno vale"
+            " también para solo LEER: execute_arcpy corre siempre con ArcMap abierto, que es justo"
+            " cuando se cuelga. Para LEER sus capas, fuentes y filtros: ábrelo en ArcMap con"
+            " open_mxd y usa list_layers / get_layer_info / list_broken_data_sources; o, con ArcMap"
+            " CERRADO, audit_folder sobre su carpeta (no necesita el puente). Para CAMBIARLO,"
+            " ábrelo en ArcMap y usa las herramientas del puente (rename_layer, edit_symbol,"
+            " set_text_element, set_legend_item...) y save_mxd." % ", ".join(
+                "'%s' (%d)" % (ruta, n) for ruta, n in con_ole))}
     params: dict = {"code": code}
     if usar_documento is not None:
         params["usar_documento"] = usar_documento
@@ -606,6 +1161,31 @@ def execute_arcpy(code: str, usar_documento: bool | None = None,
         params["serializar_sesion"] = True
     return _client.send("execute_code", params,
                         timeout=EXEC_SESION_TIMEOUT if serializar_sesion else EXEC_TIMEOUT)
+
+
+_RE_RUTA_MXD = re.compile(r"""([rRuU]{0,2})(["'])((?:(?!\2).)+?\.mxd)\2""", re.IGNORECASE)
+
+
+def _mxd_con_ole_en_codigo(code):
+    """[(ruta, n_marcos)] de los .mxd con marcos OLE que el código abre por ruta literal.
+
+    Solo mira si hay `MapDocument`: una ruta .mxd en un texto o un print no abre nada. Se
+    lee el fichero sin abrirlo (`_mxd_marcos_ole`, milisegundos), así que no cuesta lanzar
+    el freno. Las rutas construidas en tiempo de ejecución no se ven: es un freno para el
+    caso habitual (una ruta escrita en el código), no una garantía."""
+    if not code or "MapDocument" not in code:
+        return []
+    salida = []
+    for m in _RE_RUTA_MXD.finditer(code):
+        ruta = m.group(3)
+        if "r" not in m.group(1).lower():
+            ruta = ruta.replace("\\\\", "\\")
+        if not os.path.isfile(ruta):
+            continue
+        n, _err = _mxd_marcos_ole(ruta)
+        if n:
+            salida.append((ruta, n))
+    return salida
 
 
 # --------------------------------------------------------------------------- #
@@ -676,18 +1256,32 @@ def list_layout_elements(tipo: str = None, patron: str = None) -> dict:
 @mcp.tool()
 def set_legend_item(capa: str, mostrar_nombre: bool = None,
                     mostrar_encabezado: bool = None, mostrar_etiquetas: bool = None,
-                    leyenda: str = None, indice: int = None) -> dict:
+                    leyenda: str = None, indice: int = None, columna_nueva: bool = None,
+                    quitar: bool = None, posicion: int = None, despues_de: str = None) -> dict:
     """
     Cambia QUÉ muestra la entrada de una capa en la leyenda del layout: el nombre de
-    la capa, el encabezado y las etiquetas de sus clases. **No cambia CÓMO se ve**:
-    las fuentes y tamaños se quedan como estaban, y la respuesta los devuelve leídos
-    (`fuentes`) para comprobarlo. Solo se toca lo que se pase; None = no cambiar.
+    la capa, el encabezado y las etiquetas de sus clases; y DÓNDE está la entrada, o la
+    quita. **No cambia CÓMO se ve**: las fuentes y tamaños se quedan como estaban, y la
+    respuesta los devuelve leídos (`fuentes`) para comprobarlo, junto con el `orden`
+    de las entradas de esa leyenda. Solo se toca lo que se pase; None = no cambiar.
     Sin ningún interruptor, devuelve el estado actual sin tocar nada.
+
+    - `quitar=True`: quita la entrada de la leyenda y deja la capa en el mapa (para que
+      una leyenda quepa sin las capas que no salen en esa hoja). Va sola: no se combina
+      con nada más.
+    - `posicion`: el puesto de la entrada en la leyenda, de 1 al número de entradas.
+    - `despues_de`: el nombre de otra entrada de la MISMA leyenda; esta queda justo
+      detrás. Hace falta porque la leyenda no sigue la TOC: tras `move_layer`, la
+      entrada se queda donde estaba. `posicion` y `despues_de` son excluyentes.
 
     `capa` es el nombre con que la capa aparece en la leyenda. Si está en varias
     leyendas (o dos veces en una), no se elige por ti: el error las lista; se
     desempata con `leyenda` (nombre del elemento, ver `list_layout_elements`) o con
     `indice` (el número de esa lista).
+
+    `columna_nueva`: el «Colocar en columna nueva» de ArcMap, que hace que esta entrada
+    abra columna. Una capa sustituida (quitar y añadir) nace sin él, y la leyenda pasa
+    de dos columnas a una: con esto se recupera sin tocarla a mano.
 
     Es la alternativa a aplicar un estilo de leyenda de ESRI.style (lo que haría
     arcpy con `updateItem`), que cambia también las fuentes del elemento.
@@ -696,17 +1290,83 @@ def set_legend_item(capa: str, mostrar_nombre: bool = None,
     for clave, valor in (("mostrar_nombre", mostrar_nombre),
                          ("mostrar_encabezado", mostrar_encabezado),
                          ("mostrar_etiquetas", mostrar_etiquetas),
-                         ("indice", indice)):
+                         ("columna_nueva", columna_nueva),
+                         ("indice", indice),
+                         ("quitar", quitar),
+                         ("posicion", posicion),
+                         ("despues_de", despues_de)):
         if valor is not None:
             params[clave] = valor
     return _client.send("set_legend_item", params)
 
 
 @mcp.tool()
+def set_legend(leyenda: str = None, tamano: float = None, columnas: int = None,
+               recuadro: list = None, indice: int = None, fuente: str = None,
+               negrita_nombres: bool = None, negrita_etiquetas: bool = None,
+               parche: list = None, separaciones: dict = None) -> dict:
+    """
+    Lo que es de la LEYENDA ENTERA, no de una entrada (para eso, `set_legend_item`):
+    tamaño de letra, número de columnas y encajar su marco en un recuadro del layout
+    **sin escalar la letra**. Solo se toca lo que se pase; sin nada, devuelve el estado.
+
+    - `tamano`: puntos, para el nombre de capa, el encabezado, las etiquetas y las
+      descripciones de TODAS las entradas. La fuente, la negrita y el color se quedan. El
+      título de la leyenda no se toca.
+    - `columnas`: reparte las entradas en ese número de columnas. Reescribe el «colocar
+      en columna nueva» de cada entrada.
+    - `recuadro`: `[xmin, ymin, xmax, ymax]` en unidades de página (las de «Tamaño y
+      posición»; la respuesta trae `unidades_pagina`). Mide lo que ocupa la leyenda a su
+      tamaño real, pone el marco a esa medida anclado arriba a la izquierda del recuadro y
+      dice si cabe (`encaje.cabe`, y cuánto sobra o falta en `sobra_ancho`/`sobra_alto`).
+      Si no cabe, el marco se coloca igual: se arregla bajando `tamano`, subiendo
+      `columnas` o quitando entradas con `set_legend_item(quitar=True)`.
+
+    Formato (lo de la serie del Estudio Ambiental: Arial 8, nombres en negrita, parches de
+    16×9 y separaciones compactas):
+    - `fuente`: el nombre de la fuente de todas las entradas (`"Arial"`). Una que no esté
+      instalada es error.
+    - `negrita_nombres`: nombre de capa y encabezado; `negrita_etiquetas`: las etiquetas y
+      descripciones de las clases. Cada uno por separado.
+    - `parche`: `[ancho, alto]` del parche de cada clase, en puntos (`[16, 9]`); también
+      el de las entradas que se añadan después.
+    - `separaciones`, en puntos, con los nombres del «Espaciado entre» de ArcMap:
+      `titulo`, `entre_entradas`, `entre_columnas`, `entre_clases`, `encabezado`,
+      `nombre_capa`, `grupos` y `parche_texto` (`{"entre_entradas": 3, "entre_clases": 2}`).
+    Con `recuadro` en la misma llamada, se encaja ya con el formato nuevo. La respuesta trae
+    `formato` en `antes` y `ahora` (fuentes, negritas, parches y separaciones leídos).
+
+    Por qué existe: ajustar la altura del marco (lo que hace arcpy con
+    `elementHeight`) **escala la letra**, y una leyenda de 9,75 pt acaba a 6 pt. La
+    respuesta trae `antes` y `ahora` leídos de la leyenda: tamaños mínimo y máximo,
+    columnas, marco y tamaño natural.
+
+    Con varias leyendas en el layout: `leyenda` (el nombre del elemento, ver
+    `list_layout_elements`); si no se indica, la del data frame activo, si es una (la
+    respuesta lo dice en `elegida`). Si aun así quedan varias (dos «Legend» del mismo data
+    frame), el error las lista numeradas y se elige con `indice`.
+    """
+    params: dict = {}
+    for clave, valor in (("leyenda", leyenda), ("tamano", tamano), ("columnas", columnas),
+                         ("recuadro", recuadro), ("indice", indice), ("fuente", fuente),
+                         ("negrita_nombres", negrita_nombres), ("negrita_etiquetas", negrita_etiquetas),
+                         ("parche", parche), ("separaciones", separaciones)):
+        if valor is not None:
+            params[clave] = valor
+    return _client.send("set_legend", params)
+
+
+@mcp.tool()
 def set_labels(capa: str, expresion: str = None, tamano: float = None,
                color: str | list = None, halo: float = None,
                color_halo: str | list = None, activar: bool = None,
-               clase: str = None) -> dict:
+               clase: str = None, parte_mayor: bool = None,
+               sin_duplicados_m: float = None, tamano_minimo_m: float = None,
+               repetir_cada_mm: float = None, copiar_de: str = None,
+               por_valor: dict = None, where: str = None, fuente: str = None,
+               negrita: bool = None, cursiva: bool = None, nunca_quitar: bool = None,
+               sobrepasar_entidad: bool = None, buffer: int = None,
+               colocacion_linea: str = None) -> dict:
     """
     Etiquetas de una capa de entidades: expresión, tamaño, color y halo.
 
@@ -721,7 +1381,36 @@ def set_labels(capa: str, expresion: str = None, tamano: float = None,
       pasas `color_halo` (blanco si la capa no tenía ninguno).
     - `clase`: aplica solo a esa clase de etiquetas. Sin ella, a todas.
 
-    **Modifica las clases que ya tiene la capa; no las borra ni las crea.** Es lo que
+    Colocación con **Maplex** (con el motor estándar son error). `0` apaga la opción:
+    - `parte_mayor=True`: rotula solo la parte mayor de un polígono multiparte (una
+      zonificación troceada salía rotulada 30 veces en una hoja).
+    - `sin_duplicados_m`: quita rótulos repetidos a menos de esa distancia, en metros.
+    - `tamano_minimo_m`: no rotula entidades menores que eso, en metros. Los dos
+      parámetros en metros exigen un mapa en metros.
+    - `repetir_cada_mm`: repite el rótulo a lo largo de una línea cada tantos mm de papel.
+
+    - `copiar_de`: copia las clases de etiquetas de otra capa (fuente, halo, colocación,
+      expresión) y sobre ellas aplica lo demás que se pase. Es la vía segura para dar
+      etiquetas Maplex a una capa nueva. La expresión copiada se comprueba contra los
+      campos de esta capa.
+    - `por_valor`: `{"campo": "ZONA"}` hace **una clase por valor**, cada una con el color
+      de su categoría en la simbología por valores únicos de ese campo (de un relleno se
+      toma un tono OSCURO: una etiqueta del color del polígono no se ve), o con
+      `"colores": {valor: color}`. Se clonan de la primera clase de la capa y sustituyen a
+      todas. No se combina con `clase` ni con `color`; con `where`, cada clase rotula su
+      valor Y lo que case con el `where` (se componen con AND).
+    - `where`: el filtro SQL de la clase de etiquetas: solo se rotula lo que casa
+      (`"\\"ID_MONTE\\" = 'M0001'"`); `""` lo quita. Se prueba contra la capa antes de
+      ponerlo: un campo mal escrito dejaría la clase sin rotular y sin error.
+    - `fuente`, `negrita`, `cursiva`: la fuente y su estilo. Una fuente que no está
+      instalada es error.
+    - Más Maplex: `nunca_quitar` (no quitar nunca la etiqueta aunque se solape),
+      `sobrepasar_entidad` (puede salirse de la entidad), `buffer` (separación alrededor,
+      en % del tamaño) y `colocacion_linea` para líneas: `horizontal`, `recta`, `curva`,
+      `perpendicular` (desplazadas de la línea) o con `_centrada` (sobre ella).
+
+    **Modifica las clases que ya tiene la capa; no las borra ni las crea** (salvo
+    `copiar_de` y `por_valor`, que las sustituyen por clones). Es lo que
     funciona con los dos motores de etiquetado: en un mapa con **Maplex**, sustituir
     las clases por unas nuevas deja la capa sin etiquetas y sin ningún error. Solo si
     la capa no tiene ninguna clase se crea una (hace falta `expresion`), preparada para
@@ -732,24 +1421,67 @@ def set_labels(capa: str, expresion: str = None, tamano: float = None,
     params: dict = {"capa": capa}
     for clave, valor in (("expresion", expresion), ("tamano", tamano), ("color", color),
                          ("halo", halo), ("color_halo", color_halo),
-                         ("activar", activar), ("clase", clase)):
+                         ("activar", activar), ("clase", clase),
+                         ("parte_mayor", parte_mayor), ("sin_duplicados_m", sin_duplicados_m),
+                         ("tamano_minimo_m", tamano_minimo_m), ("repetir_cada_mm", repetir_cada_mm),
+                         ("copiar_de", copiar_de), ("por_valor", por_valor), ("where", where),
+                         ("fuente", fuente), ("negrita", negrita), ("cursiva", cursiva),
+                         ("nunca_quitar", nunca_quitar), ("sobrepasar_entidad", sobrepasar_entidad),
+                         ("buffer", buffer), ("colocacion_linea", colocacion_linea)):
         if valor is not None:
             params[clave] = valor
     return _client.send("set_labels", params)
 
 
 @mcp.tool()
-def set_text_element(texto: str, nombre: str = None, buscar: str = None,
-                     grupo: str = None, indice: int = None) -> dict:
+def set_text_element(texto: str = None, nombre: str = None, buscar: str = None,
+                     grupo: str = None, indice: int = None, x: float = None,
+                     y: float = None, tamano: float = None, patron: str = None,
+                     reemplazo: str = None, todos: bool = None, mayusculas: str = None,
+                     region: list = None, centrar_en: list = None, encajar_en: list = None,
+                     margen: float = None, tamano_min: float = None) -> dict:
     """
     Cambia el contenido de un elemento de texto del layout (título, fecha, nº de
-    expediente...), también si está DENTRO de un grupo (el cajetín agrupado). Indica
-    el `texto` nuevo y UN selector:
+    expediente...), también si está DENTRO de un grupo (el cajetín agrupado), y/o su
+    posición y tamaño de letra. Lo que no se pase no cambia: sin `texto`, el texto se
+    queda como estaba.
+
+      - `texto`: el contenido nuevo, entero.
+      - `patron` + `reemplazo`: cambia solo la PARTE que casa con la expresión regular
+        (sintaxis de .NET; los grupos van como `$1` en el reemplazo, no `\\1`). Excluyente
+        con `texto`. Sirve para la fecha, el expediente o una errata sin conocer el texto
+        entero. Sin otro selector, los elementos son los que casan con el patrón; con
+        varios, error con la lista, salvo `todos=True`, que los cambia todos. Un elegido
+        en el que el patrón no casa es error y no se cambia ninguno. El patrón ve también
+        las etiquetas de formato (`<BOL>`, `<FNT ...>`). La respuesta trae `antes` y
+        `ahora` de cada elemento.
+      - `x`, `y`: el punto de anclaje del texto, en unidades de PÁGINA (las de
+        «Tamaño y posición» en ArcMap; la respuesta trae `unidades_pagina`). Basta una
+        de las dos para moverlo solo en ese eje.
+      - `tamano`: tamaño de letra en puntos. La fuente, el color y el halo se quedan.
+      - `mayusculas`: `"normal"` (el texto tal cual se escribe), `"mayusculas"`,
+        `"minusculas"` o `"versalitas"`. Es una propiedad del SÍMBOLO, no del texto: un
+        cajetín escrito en minúsculas que se ve en mayúsculas se arregla con `"normal"`.
+      - `centrar_en`: `[xmin, ymin, xmax, ymax]` en unidades de página; centra lo que el
+        texto ocupa DIBUJADO (no su punto de anclaje) en ese recuadro. Excluye `x`/`y`.
+      - `encajar_en` (+ `margen`, `tamano_min`, por defecto 0 y 4): baja la letra de 0,25
+        en 0,25 hasta que el texto quepa en el recuadro menos el margen, sin pasar de
+        `tamano_min`, y lo centra en él. La respuesta trae `encaje` (`cabe`, tamaño
+        inicial y final, lo que ocupa); si ni al mínimo cabe, lo dice y lo deja así.
+
+    Con cambios de aspecto, la respuesta trae `antes` y `ahora` leídos del elemento
+    (con `mayusculas`, y con lo `dibujado` si se centra o encaja).
+
+    Para elegir el elemento, UN selector:
 
       - `nombre`: el .name del elemento (si está nombrado en ArcMap).
       - `buscar`: su texto ACTUAL (find-and-replace). Coincidencia exacta y, si no,
         por subcadena. Útil cuando los textos del layout no están nombrados (lo
         habitual).
+      - `region`: `[xmin, ymin, xmax, ymax]` en unidades de página: el texto cuyo centro
+        dibujado cae dentro. Para los textos que se repiten entre planos (el «3» del nº de
+        plano) y no tienen nombre. Combinada con `buscar` o `patron`, filtra además por
+        posición. Si no cae ninguno, el error lista los textos con su centro.
 
     Si el selector casa con VARIOS elementos no se elige por ti: el error los lista
     numerados, con su texto y su grupo. Se desempata con `grupo` (nombre del grupo que
@@ -757,12 +1489,45 @@ def set_text_element(texto: str, nombre: str = None, buscar: str = None,
     de esa lista). Hace falta de verdad: un cajetín copiado de otro plano arrastra
     nombre Y texto, y sus elementos son idénticos en todo lo demás.
     """
-    params = {"nombre": nombre, "buscar": buscar, "texto": texto}
-    if grupo is not None:
-        params["grupo"] = grupo
-    if indice is not None:
-        params["indice"] = indice
+    params = {"nombre": nombre, "buscar": buscar}
+    for clave, valor in (("texto", texto), ("grupo", grupo), ("indice", indice),
+                         ("x", x), ("y", y), ("tamano", tamano), ("patron", patron),
+                         ("reemplazo", reemplazo), ("todos", todos), ("mayusculas", mayusculas),
+                         ("region", region), ("centrar_en", centrar_en), ("encajar_en", encajar_en),
+                         ("margen", margen), ("tamano_min", tamano_min)):
+        if valor is not None:
+            params[clave] = valor
     return _client.send("set_text_element", params)
+
+
+@mcp.tool()
+def replace_text(cambios: dict, ambitos: list = None, palabra_completa: bool = True,
+                 conservar_mayusculas: bool = True, simular: bool = False) -> dict:
+    """
+    Buscar y reemplazar por diccionario en TODO el plano a la vez: textos del layout
+    (también los de dentro de un grupo, como el cajetín), nombres de capa, etiquetas de las
+    clases de la simbología (vectorial y ráster) y encabezados. Para las erratas y tildes de
+    una serie: `{"Area": "Área", "Proteccion": "Protección"}` (una serie de montes lo hizo en 386 planos).
+
+    - `cambios`: `{"buscar": "poner"}`. Sin distinguir mayúsculas al buscar; las frases van
+      antes que las palabras sueltas que contienen.
+    - `palabra_completa` (True): «Area» no cambia dentro de «Areas» ni de «Fareas».
+    - `conservar_mayusculas` (True): «AREA» → «ÁREA», «Area» → «Área», «area» → «área». Las
+      mayúsculas propias del reemplazo (siglas, nombres) no se bajan nunca:
+      `{"Murcia": "Región de Murcia"}` da «Región de Murcia», y `{"Rn2000": "RN2000"}`, «RN2000».
+    - `ambitos`: cualquiera de `textos`, `capas`, `clases`, `encabezados` (por defecto todos).
+      Las capas son las del data frame activo.
+    - Las etiquetas de formato de los textos (`<BOL>`, `<FNT name='Arial'>`) no se tocan.
+    - `simular=True`: dice qué cambiaría, sin tocar nada.
+
+    La respuesta trae `cambiados`, `por_ambito` y la lista `cambios` (ámbito, dónde, antes y
+    ahora). También es operación de `edit_mxd_lote`.
+    """
+    params = {"cambios": cambios, "palabra_completa": palabra_completa,
+              "conservar_mayusculas": conservar_mayusculas, "simular": simular}
+    if ambitos is not None:
+        params["ambitos"] = ambitos
+    return _client.send("replace_text", params)
 
 
 @mcp.tool()
@@ -780,13 +1545,22 @@ def goto_ddp_page(pagina: int = None, valor: str = None) -> dict:
 
 
 @mcp.tool()
-def set_definition_query(capa: str, query: str = None) -> dict:
+def set_definition_query(capa: str, query: str = None, anadir: bool = False) -> dict:
     """
     Fija la definition query (filtro SQL) de una capa del data frame activo.
     `query` vacío o None limpia el filtro. Útil para planos temáticos por filtro.
     Devuelve la query anterior y la nueva.
+
+    `anadir=True` no sustituye: añade `query` a la que ya hay con AND, cada una entre
+    paréntesis (`(anterior) AND (nueva)`); sin query previa queda solo la nueva. Para
+    acotar por monte una capa que ya trae su filtro sin conocerlo (`"MUP" = '{MUP}'` en
+    `edit_mxd_lote`). Si la condición ya está en la query, no se repite (`ya_estaba`):
+    relanzar la misma receta no la acumula.
     """
-    return _client.send("set_definition_query", {"capa": capa, "query": query})
+    params = {"capa": capa, "query": query}
+    if anadir:
+        params["anadir"] = True
+    return _client.send("set_definition_query", params)
 
 
 @mcp.tool()
@@ -905,7 +1679,7 @@ def get_layer_info(capa: str) -> dict:
 @mcp.tool()
 def add_layer(fuente: str, posicion: str = "TOP", grupo: str = None,
               nombre: str = None, en_leyenda: bool = True, visible: bool = None,
-              subcapas: list = None) -> dict:
+              subcapas: list = None, si_existe: str = "anadir") -> dict:
     """
     Añade una capa al data frame activo desde una ruta a shapefile, feature class de
     file geodatabase, ráster, **`.lyr`** o **URL de un servicio WMS**. `posicion`:
@@ -936,8 +1710,22 @@ def add_layer(fuente: str, posicion: str = "TOP", grupo: str = None,
     visibilidades. Es la vía para reproducir de una vez la estructura de grupos de
     un proyecto de QGIS. Lo que no trae un `.lyr` de datos sueltos no se inventa:
     el etiquetado sigue sin viajar.
+
+    `si_existe`: qué hacer si en el data frame ya hay una capa con ese nombre (el de
+    `nombre` o, sin él, el que traiga la fuente), en cualquier grupo. `"anadir"` (por
+    defecto) la añade igual, como siempre; `"omitir"` no añade nada y responde
+    `omitida: true` con las `existentes` (ruta y fuente); `"error"`, error. En
+    `edit_mxd_lote`, `"omitir"` hace que relanzar una receta no duplique la capa.
+
+    **La extensión del data frame no se mueve.** ArcMap reencuadra a veces al añadir o
+    quitar capas (en vista de datos y de composición por igual); si lo hace, la vista
+    vuelve a donde estaba y la respuesta trae `extension_restaurada: true`. Si lo que
+    cambió es el CRS del data frame (se quitó la capa que lo fijaba) no se restaura a
+    ciegas: viene `crs_cambiado` y la extensión la fijas tú con `set_extent`.
     """
     params: dict = {"fuente": fuente, "posicion": posicion, "grupo": grupo}
+    if si_existe != "anadir":
+        params["si_existe"] = si_existe
     if nombre is not None:
         params["nombre"] = nombre
     if not en_leyenda:
@@ -971,17 +1759,35 @@ def add_group(nombre: str, posicion: str = "TOP", grupo: str = None,
 
 @mcp.tool()
 def remove_layer(capa: str) -> dict:
-    """Quita una capa del data frame activo por nombre."""
+    """
+    Quita una capa (o un grupo) del data frame activo, por nombre o ruta `Grupo/Capa`.
+
+    Un borrado no adivina: si el nombre casa con varias capas, falla listando sus rutas
+    ANCLADAS, con `/` delante, también cuando una de ellas está en la raíz (en las demás
+    herramientas el nombre pelado elige la de la raíz). Repite con una de ellas tal cual:
+    `"/Límite"` es la de la raíz y `"/Grupo/Límite"` la del grupo.
+
+    La extensión del data frame no se mueve: si ArcMap reencuadra al quitar la capa, la
+    vista vuelve a donde estaba (`extension_restaurada: true`); si cambió el CRS del data
+    frame, `crs_cambiado` y la extensión la fijas tú con `set_extent`. Para cambiar el
+    orden de las capas no quites y vuelvas a añadir: `move_layer` conserva la simbología.
+    """
     return _client.send("remove_layer", {"capa": capa})
 
 
 @mcp.tool()
 def move_layer(capa: str, referencia: str = None, posicion: str = None,
-               grupo: str = None) -> dict:
+               grupo: str = None, en_leyenda: bool = None) -> dict:
     """
     Recoloca una capa (o un grupo) en la TOC del data frame activo **sin quitarla y
     volverla a añadir**: conserva simbología, etiquetas, lo tocado a mano y sus
     entradas de leyenda.
+
+    La leyenda NO sigue a la TOC: sin más, la entrada se queda donde estaba. Con
+    `en_leyenda=True` se recoloca también, en cada leyenda de ese mapa: detrás de la
+    entrada de la capa más cercana que quede encima en la TOC (las de un grupo, en
+    bloque). La respuesta trae `leyendas` con la `posicion` y el `orden` leídos, o un
+    `aviso` si la capa no tiene entrada en alguna.
 
     - `referencia` + `posicion="BEFORE"` (por defecto) o `"AFTER"`: justo encima o
       debajo de otra capa, en el grupo de esa capa (la mueve de grupo si hace falta).
@@ -995,8 +1801,53 @@ def move_layer(capa: str, referencia: str = None, posicion: str = None,
     """
     params: dict = {"capa": capa}
     params.update({k: v for k, v in {"referencia": referencia, "posicion": posicion,
-                                     "grupo": grupo}.items() if v is not None})
+                                     "grupo": grupo, "en_leyenda": en_leyenda}.items() if v is not None})
     return _client.send("move_layer", params)
+
+
+@mcp.tool()
+def rename_layer(capa: str, nombre_nuevo: str) -> dict:
+    """
+    Cambia el nombre de una capa (o grupo) del data frame activo: el que se ve en la
+    TOC y en la leyenda. Refresca las leyendas que dibujan ese mapa.
+
+    Es la vía para corregir el texto de una capa en la leyenda **sin quitarla y volverla
+    a añadir**: la entrada de leyenda conserva su posición y sus opciones (p. ej.
+    «colocar en columna nueva»), que una capa sustituida pierde. Para el texto de una
+    CLASE de la simbología, usa `edit_symbol(etiqueta=...)`.
+
+    - `capa`: nombre o ruta `Grupo/Capa`, como el resto.
+    - `nombre_nuevo`: no puede llevar `/`, `\\` ni `#`, que son los separadores de ruta.
+
+    La respuesta trae `nombre_anterior`, `nombre_nuevo` (leído de vuelta) y
+    `leyendas_refrescadas`, y avisa si el nombre nuevo ya lo tenía otra capa.
+    """
+    return _client.send("rename_layer", {"capa": capa, "nombre_nuevo": nombre_nuevo})
+
+
+@mcp.tool()
+def duplicate_layer(capa: str, nombre_nuevo: str, referencia: str = None, posicion: str = None,
+                    etiquetas: bool = None, en_leyenda: bool = None) -> dict:
+    """
+    Copia una capa dentro del mapa: la misma fuente dibujada dos veces (una con relleno y
+    otra solo con el rótulo, o con otra definition query), sin volver a añadirla ni
+    rehacer su simbología. La copia hereda simbología, etiquetas, definition query,
+    transparencia y escalas de visibilidad, y son SUYAS: cambiarlas no toca la original.
+
+    - `nombre_nuevo`: obligatorio y distinto de todas las capas del mapa (dos homónimas
+      dan guerra en todas las herramientas). Sin `/`, `\\` ni `#`.
+    - `referencia` + `posicion` (`"AFTER"`, debajo, por defecto; o `"BEFORE"`): dónde va,
+      en el grupo de la referencia. Sin `referencia`, junto a la original.
+    - `etiquetas`: `False` deja la copia sin rótulos (o `True` para encenderlos).
+    - `en_leyenda` (False por defecto): si entra en la leyenda del plano. Por defecto no:
+      una copia para el rótulo duplicaría la entrada.
+
+    La respuesta trae el `orden` del grupo leído de vuelta y `simbologia_propia`.
+    """
+    params = {"capa": capa, "nombre_nuevo": nombre_nuevo}
+    params.update({k: v for k, v in {"referencia": referencia, "posicion": posicion, "etiquetas": etiquetas,
+                                     "en_leyenda": en_leyenda}.items() if v is not None})
+    return _client.send("duplicate_layer", params)
 
 
 @mcp.tool()
@@ -1024,11 +1875,12 @@ def apply_symbology_from_layer(capa: str, lyr_file: str) -> dict:
 
 
 @mcp.tool()
-def set_graduated_symbology(capa: str, campo: str, num_clases: int = 5,
-                            metodo: str = "natural_breaks",
+def set_graduated_symbology(capa: str, campo: str, num_clases: int = None,
+                            metodo: str = None,
                             color_desde: list | str = None,
                             color_hasta: list | str = None,
-                            tamano: float = None, algoritmo: str = None) -> dict:
+                            tamano: float = None, algoritmo: str = None,
+                            cortes: list = None, etiquetas: list | str = None) -> dict:
     """
     Simboliza una capa VIVA con colores graduados (class breaks) por un campo
     NUMÉRICO, directamente sobre la sesión de ArcMap (persiste; se guarda con
@@ -1041,6 +1893,12 @@ def set_graduated_symbology(capa: str, campo: str, num_clases: int = 5,
       hay variación suficiente.
     - `metodo`: natural_breaks (defecto) | quantile | equal_interval |
       geometrical_interval | standard_deviation.
+    - `cortes`: en vez de un método, los límites SUPERIORES de cada clase, de menor a
+      mayor (los umbrales de un documento técnico). Excluyente con `num_clases` y
+      `metodo`. Lo que pase del último corte no se dibuja (la respuesta lo avisa).
+    - `etiquetas`: una por clase, o `"auto"`, que las escribe desde los cortes con coma
+      decimal: «≤ a», «a - b», …, «> y». La respuesta trae `cortes` y `etiquetas`
+      leídos del renderer.
     - `color_desde` / `color_hasta`: extremos de la rampa, como RGB [r,g,b] 0-255 o
       como "#RRGGBB" (defecto amarillo claro -> rojo oscuro). Un color mal formado
       es ERROR: antes se ignoraba y salía la rampa por defecto sin decir nada.
@@ -1057,26 +1915,28 @@ def set_graduated_symbology(capa: str, campo: str, num_clases: int = 5,
     query y selección); para clasificar un subconjunto, fíjalo con una definition
     query permanente antes. Admite campos de una tabla unida (join).
     """
-    params = {"capa": capa, "campo": campo, "num_clases": num_clases, "metodo": metodo}
-    if color_desde is not None:
-        params["color_desde"] = color_desde
-    if color_hasta is not None:
-        params["color_hasta"] = color_hasta
-    if tamano is not None:
-        params["tamano"] = tamano
-    if algoritmo is not None:
-        params["algoritmo"] = algoritmo
+    params = {"capa": capa, "campo": campo}
+    # Solo lo que se pasa: con `cortes`, un num_clases o metodo enviados por defecto
+    # harían imposible saber si alguien los pidió a la vez (el add-in pone los defectos).
+    for clave, valor in (("num_clases", num_clases), ("metodo", metodo), ("color_desde", color_desde),
+                         ("color_hasta", color_hasta), ("tamano", tamano), ("algoritmo", algoritmo),
+                         ("cortes", cortes), ("etiquetas", etiquetas)):
+        if valor is not None:
+            params[clave] = valor
     return _client.send("set_graduated_symbology", params)
 
 
 @mcp.tool()
-def set_raster_symbology(capa: str, modo: str = "clasificado", num_clases: int = 5,
+def set_raster_symbology(capa: str, modo: str = "clasificado", num_clases: int = None,
                          color_desde: list = None, color_hasta: list = None,
-                         colores: list = None, etiquetas: list = None,
+                         colores: list = None, etiquetas: list | str = None,
                          algoritmo: str = None, valores: list = None,
-                         transparentes: list = None, transparencia: int = None) -> dict:
+                         transparentes: list = None, transparencia: int = None,
+                         bandas: list = None, cortes: list = None,
+                         conservar_colores: bool = None) -> dict:
     """
-    Simboliza una capa RÁSTER de la TOC: clasificada, estirada o por valores únicos.
+    Simboliza una capa RÁSTER de la TOC: clasificada, estirada, por valores únicos o
+    como composición RGB.
 
     Es la herramienta para NDVI, FCC, P95, pendientes y demás producto ráster.
     `set_graduated_symbology` NO vale aquí: solo acepta capas de entidades.
@@ -1084,12 +1944,19 @@ def set_raster_symbology(capa: str, modo: str = "clasificado", num_clases: int =
     cambios de renderer.
 
     `modo`:
-      - `clasificado` (por defecto): `num_clases` clases (2-32) con rampa de color.
+      - `clasificado` (por defecto): `num_clases` clases (2-32, defecto 5) con rampa de
+        color, o las que den `cortes` (límites SUPERIORES de cada clase, de menor a mayor;
+        el inferior de la primera es el mínimo del ráster). `cortes` y `num_clases` se
+        excluyen; los cortes se devuelven leídos del renderer.
       - `estirado`: rampa continua entre el mínimo y el máximo de la banda 0.
       - `unico`: un color por valor de píxel. **Es el modo de un ráster CATEGÓRICO**
         —máscara de visibilidad, FCC binario, reclasificación, `paletted` de QGIS—,
         donde el clasificado falla con un E_FAIL de COM porque no hay histograma
         que cortar, y donde clasificar sería mentir sobre el dato.
+      - `rgb`: composición de color de un ráster multibanda (una ortofoto PNOA de 4
+        bandas que entró con una sola banda, en azul). `bandas`: rojo, verde y azul,
+        contando desde 1 (por defecto `[1, 2, 3]`). En 8 bits no se estira, como
+        corresponde a una ortofoto; la respuesta trae `bandas` leídas y `estiramiento`.
 
     MODO `unico`:
       - `valores`: lista de valores de píxel a pintar (ej. `[1, 2]`). Obligatorio;
@@ -1112,11 +1979,18 @@ def set_raster_symbology(capa: str, modo: str = "clasificado", num_clases: int =
         derivar de dos extremos, es una decisión por clase.
       - `color_desde` / `color_hasta`: los dos extremos de una rampa. Por defecto
         va de amarillo claro `[255, 255, 178]` a rojo oscuro `[189, 0, 38]`.
+      - `conservar_colores=True` (solo `clasificado`): los colores de la clasificación
+        que la capa YA tiene, para cambiar solo los cortes (una serie de planos con su
+        paleta propia). Exige tantos `cortes` como clases tenga; sin `cortes` ni
+        `num_clases`, reclasifica con el mismo número. Excluye `colores` y la rampa. La
+        respuesta trae los `colores` leídos de vuelta.
 
     `etiquetas`: lista de `num_clases` rótulos de leyenda. Cuando los cortes salen
     de una reclasificación, el número del corte no dice nada ("1 – 2") y lo que
     sirve es el significado ("Defoliación fuerte"). Sin esto, cada clase se rotula
-    con su rango.
+    con su rango. En `clasificado`, `"auto"` las escribe desde los cortes con coma
+    decimal («≤ a», «a - b», …, «> y») y `"auto<"` igual pero con la primera como
+    «< a», la convención de unos planos reales.
 
     `algoritmo` de interpolación de la rampa: `cielab` (por defecto), `lablch` o
     `hsv`. **No uses `hsv` para nada cuantitativo**: interpola el tono dando la
@@ -1131,11 +2005,18 @@ def set_raster_symbology(capa: str, modo: str = "clasificado", num_clases: int =
     y el histograma en `.aux.xml`). Se calculan una vez (~50 s en un TIFF de 2 GB) y
     después es instantáneo; en una carpeta sin escritura se recalculan cada vez.
 
-    La cabecera de la leyenda queda siempre en `Value`: ArcObjects la fija en el
-    `Update()` y después es de solo lectura. Se quita en el elemento de leyenda
-    del layout, no desde aquí.
+    La cabecera de la leyenda la fija ArcObjects en el `Update()` (`Value`, o el
+    «<VALOR>» de una fuente sustituida). Se cambia después con
+    `edit_symbol(capa, encabezado="...")`, comprobado en un JPG exportado, o se oculta
+    con `set_legend_item(mostrar_encabezado=False)`.
     """
-    params: dict = {"capa": capa, "modo": modo, "num_clases": num_clases}
+    params: dict = {"capa": capa, "modo": modo}
+    if num_clases is not None:
+        params["num_clases"] = num_clases
+    if cortes is not None:
+        params["cortes"] = cortes
+    if conservar_colores is not None:
+        params["conservar_colores"] = conservar_colores
     if valores is not None:
         params["valores"] = valores
     if transparentes is not None:
@@ -1152,14 +2033,18 @@ def set_raster_symbology(capa: str, modo: str = "clasificado", num_clases: int =
         params["etiquetas"] = etiquetas
     if algoritmo is not None:
         params["algoritmo"] = algoritmo
+    if bandas is not None:
+        params["bandas"] = bandas
     return _client.send("set_raster_symbology", params)
 
 
 @mcp.tool()
-def set_unique_values_symbology(capa: str, campo: str, tamano: float = None,
+def set_unique_values_symbology(capa: str, campo: str = None, tamano: float = None,
                                 color_desde: list | str = None,
                                 color_hasta: list | str = None,
-                                algoritmo: str = None) -> dict:
+                                algoritmo: str = None, campos: list = None,
+                                delimitador: str = None, clases: list = None,
+                                resto: str = None) -> dict:
     """
     Simboliza una capa de entidades por VALORES ÚNICOS del campo (categórica).
 
@@ -1185,16 +2070,31 @@ def set_unique_values_symbology(capa: str, campo: str, tamano: float = None,
     hay: contarlas obligaría a recorrer la tabla entera, que es el cuelgue que el
     tope evita). Una leyenda de miles de entradas no es una leyenda. Los NULL se
     omiten.
+
+    - `campos`: en lugar de `campo`, **hasta 3 campos** (p. ej. `["ANIO_ACT",
+      "Actuacion"]`): cada combinación es una categoría, con sus valores unidos por
+      `delimitador` (por defecto `", "`, el de ArcMap). Los valores de las clases se
+      escriben así: `"2019, Clareo"`.
+    - `clases`: las clases explícitas, en este orden:
+      `[{"valores": ["0", "99"], "etiqueta": "Sin actuación", "color": "#CCCCCC"}, ...]`.
+      Varios `valores` van a la MISMA clase (un símbolo, una entrada de leyenda).
+      `etiqueta` (por defecto, el primer valor) y `color` (por defecto, la paleta) son
+      opcionales.
+    - `resto`: etiqueta de «todos los demás valores», en gris. Sin él, lo que no tiene
+      clase NO se dibuja, y la respuesta lo dice en `valores_sin_clase`.
+
+    Con `campos`, `clases` o `resto` la respuesta trae las clases **leídas del
+    renderer** (`valor`, `etiqueta`, `valores` agrupados), `valores_sin_clase` y
+    `clases_sin_entidades`: arcpy devuelve `classValues` vacío con varios campos y no
+    sirve para comprobarlo.
     """
     params: dict = {"capa": capa, "campo": campo}
-    if tamano is not None:
-        params["tamano"] = tamano
-    if color_desde is not None:
-        params["color_desde"] = color_desde
-    if color_hasta is not None:
-        params["color_hasta"] = color_hasta
-    if algoritmo is not None:
-        params["algoritmo"] = algoritmo
+    for clave, valor in (("tamano", tamano), ("color_desde", color_desde),
+                         ("color_hasta", color_hasta), ("algoritmo", algoritmo),
+                         ("campos", campos), ("delimitador", delimitador),
+                         ("clases", clases), ("resto", resto)):
+        if valor is not None:
+            params[clave] = valor
     return _client.send("set_unique_values_symbology", params)
 
 
@@ -1210,7 +2110,9 @@ def _params_simbolo(capa, **valores):
 def set_single_symbology(capa: str, color_relleno: list | str = None,
                          color_borde: list | str = None, grosor_borde: float = None,
                          sin_relleno: bool = None, tamano: float = None,
-                         transparencia: float = None, etiqueta: str = None) -> dict:
+                         transparencia: float = None, etiqueta: str = None,
+                         patron_linea: str | list = None, trama: dict | bool = None,
+                         estilo_marcador: str = None) -> dict:
     """
     Pone a una capa de ENTIDADES **un solo símbolo** (sin clasificar), con los colores
     que pidas. Sustituye la simbología que tenga.
@@ -1226,29 +2128,66 @@ def set_single_symbology(capa: str, color_relleno: list | str = None,
     - Puntos: `color_relleno`, `tamano` (pt) y, opcional, `color_borde`/`grosor_borde`.
     - `transparencia` 0-100, de la capa. `etiqueta`: el texto de la entrada en la TOC.
     - Colores: `[R, G, B]` o `"#RRGGBB"`; mal formado es error.
-
+    - `patron_linea` (líneas, y el BORDE de los polígonos): `"discontinua"` (guion 9 pt,
+      hueco 4,5), `"punteada"` (1,5 / 3), `"guion_punto"`, `"continua"`, o la lista de
+      guiones y huecos en puntos (`[9, 4.5]`). Una línea simple pasa a cartográfica: el
+      estilo «Dash» de la simple son guiones de píxel y a 2 pt se imprime CONTINUA.
+    - `trama` (polígonos): relleno de líneas `{"angulo": 45, "separacion": 5, "color":
+      "#RRGGBB", "grosor": 1}` (pt); lo que no se dé sale de lo que había (el color, del
+      relleno de esa clase). `true`, la trama por defecto; `false`, vuelve a relleno liso.
+      Con trama el color va en `trama.color`, no en `color_relleno`.
+    - `estilo_marcador` (puntos): `circulo`, `cuadrado`, `rombo`, `cruz` o `x`.
     Para cambiar un color de una simbología que ya está montada (una categoría de unos
     valores únicos, por ejemplo) sin rehacerla, usa `edit_symbol`.
     """
     return _client.send("set_single_symbology", _params_simbolo(
         capa, color_relleno=color_relleno, color_borde=color_borde, grosor_borde=grosor_borde,
-        sin_relleno=sin_relleno, tamano=tamano, transparencia=transparencia, etiqueta=etiqueta))
+        sin_relleno=sin_relleno, tamano=tamano, transparencia=transparencia, etiqueta=etiqueta,
+        patron_linea=patron_linea, trama=trama, estilo_marcador=estilo_marcador))
 
 
 @mcp.tool()
 def edit_symbol(capa: str, categoria: str | int = None, color_relleno: list | str = None,
                 color_borde: list | str = None, grosor_borde: float = None,
                 sin_relleno: bool = None, tamano: float = None,
-                transparencia: float = None) -> dict:
+                transparencia: float = None, etiqueta: str = None,
+                quitar: bool = None, anadir_valores: list = None,
+                encabezado: str = None, patron_linea: str | list = None,
+                trama: dict | bool = None, estilo_marcador: str = None) -> dict:
     """
     Cambia SOLO lo que pidas de la simbología que la capa YA tiene, sin rehacerla:
     símbolo único, valores únicos o rangos. El resto del símbolo (tipo, patrón, lo que no
     se pida) y las demás categorías se quedan como estaban.
 
+    - `anadir_valores` con `categoria`: mete esos valores en una clase de valores únicos
+      que ya existe; se dibujan con su símbolo y salen bajo su etiqueta («todo lo de año 0
+      → Sin actuación programada»). Un valor que ya tenga clase es error.
+    - `encabezado`: el texto que sale encima de las clases en la TOC y en la leyenda;
+      `""` lo deja vacío. (`set_legend_item(mostrar_encabezado=...)` solo lo muestra u
+      oculta.)
+    - **Capas RÁSTER** clasificadas o por valores únicos: solo `encabezado` (quita el
+      «<VALOR>» que deja una fuente sustituida), y `etiqueta` y `color_relleno` de una
+      `categoria` (su etiqueta, o su número 1..n). Para reclasificar, `set_raster_symbology`.
+
     - `categoria`: en valores únicos, el valor o su etiqueta; en rangos, el número de la
       clase (1..n) o su etiqueta. Sin ella se aplica a TODAS las categorías, pero solo lo
       que no borra la clasificación (borde, grosor, tamaño, transparencia): cambiar el
       relleno de todas a la vez es error.
+    - `etiqueta`: el texto de esa clase en la leyenda y la TOC (p. ej. para corregir
+      tildes), sin rehacer la simbología. Con la capa clasificada exige `categoria`, y
+      que case con una sola clase.
+    - `quitar=True` con `categoria`: quita esa clase de unos valores únicos y deja los
+      colores de las demás COMO ESTABAN (por arcpy, `classValues` sin el valor regenera
+      la rampa entera). La respuesta dice qué pasa con sus entidades: van a «todos los
+      demás valores» o dejan de dibujarse. No vale para rangos.
+    - `patron_linea`, `trama` y `estilo_marcador`, como en `set_single_symbology`, en una
+      `categoria` o en todas: «Propuesta» discontinua a 4 pt es
+      `edit_symbol(capa, categoria="Propuesta", patron_linea="discontinua", grosor_borde=4)`.
+      Una trama sin color conserva el de cada clase, así que vale para todas a la vez.
+      **Símbolos de varias capas**: la lectura los marca con `capas_simbolo` (y `capas_borde`
+      si lo es el borde de un relleno). Sobre ellos `patron_linea` y `trama` son error (no se
+      sabe a qué capa aplicarlos) y `estilo_marcador` los cambia por un marcador simple, que
+      pierde las demás capas: para eso, `set_single_symbology`.
     - Los demás parámetros, como en `set_single_symbology`.
 
     Sin nada que cambiar, devuelve la simbología actual: úsalo así para ver las
@@ -1258,7 +2197,9 @@ def edit_symbol(capa: str, categoria: str | int = None, color_relleno: list | st
     return _client.send("edit_symbol", _params_simbolo(
         capa, categoria=None if categoria is None else str(categoria), color_relleno=color_relleno, color_borde=color_borde,
         grosor_borde=grosor_borde, sin_relleno=sin_relleno, tamano=tamano,
-        transparencia=transparencia))
+        transparencia=transparencia, etiqueta=etiqueta, quitar=quitar,
+        anadir_valores=None if anadir_valores is None else [str(v) for v in anadir_valores],
+        encabezado=encabezado, patron_linea=patron_linea, trama=trama, estilo_marcador=estilo_marcador))
 
 
 @mcp.tool()
@@ -1383,6 +2324,64 @@ def save_mxd(verificar: bool = None) -> dict:
     return _tras_guardar(r, "ruta", verificar)
 
 
+@mcp.tool()
+def open_mxd(ruta: str, cambios_sin_guardar: str) -> dict:
+    """
+    Abre otro .mxd en la sesión de ArcMap que tiene el puente, **sin cerrar ArcMap** (el
+    puente sigue vivo). Sustituye a cerrar ArcMap, lanzarlo con el .mxd y volver a
+    arrancar el puente: ~45 s por documento y alguna caída.
+
+    - `ruta`: ruta ABSOLUTA del .mxd.
+    - `cambios_sin_guardar` (obligatorio): `"guardar"` guarda antes el documento abierto
+      en su ruta; `"descartar"` tira lo que no esté guardado. Es obligatorio porque ArcMap
+      no deja consultar si hay cambios pendientes, y si los hay los pregunta con un diálogo
+      que deja el puente colgado esperando un clic. Si no sabes cuál, pregunta al usuario.
+    - Un .mxd de una versión de ArcMap posterior no se abre (también saldría un diálogo).
+
+    ArcMap abre el documento en diferido; esta herramienta espera a verlo abierto y
+    responde con su ruta, data frames y `marcos_ole` (si tiene, no se edita con arcpy:
+    se corrompe). La espera la gobierna ARCMAP_SAVE_TIMEOUT.
+    """
+    import time
+    # UN plazo para todo (guardar, pedir la apertura y esperarla). Con un SAVE_TIMEOUT por
+    # llamada, el peor caso eran dos enteros seguidos: ~21 min (revisión del 2026-10-01).
+    limite = time.monotonic() + int(SAVE_TIMEOUT)
+    r = _client.send("open_mxd", {"ruta": ruta, "cambios_sin_guardar": cambios_sin_guardar},
+                     timeout=SAVE_TIMEOUT)
+    if not r.get("ok") or "solicitado" not in (r.get("result") or {}):
+        # Sin `solicitado` no hay apertura que esperar (un add-in con otro contrato).
+        return r
+    # ntpath y no os.path: las dos rutas son de Windows. En Linux (el CI) os.path no iguala
+    # `C:\b.mxd` con `C:\B.mxd` y el bucle no acababa nunca (2026-10-28).
+    import ntpath
+    pedido = ntpath.normcase(ntpath.normpath(ruta))
+    info = None
+    while time.monotonic() < limite:
+        # Mientras ArcMap carga el documento, su hilo está ocupado y esto espera en cola:
+        # no hace falta un sondeo agresivo.
+        info = _client.send("get_arcmap_info", timeout=max(1, int(limite - time.monotonic())))
+        mxd = ((info or {}).get("result") or {}).get("mxd")
+        if info.get("ok") and mxd and ntpath.normcase(ntpath.normpath(mxd)) == pedido:
+            break
+        time.sleep(0.5)
+    else:
+        return {"ok": False, "error": (
+            "ArcMap no ha llegado a abrir %s en %s s: el documento activo sigue siendo %s. Mira si hay"
+            " un diálogo abierto en ArcMap." % (ruta, int(SAVE_TIMEOUT),
+                                              ((info or {}).get("result") or {}).get("mxd")))}
+    res = dict(r.get("result") or {})
+    res.pop("solicitado", None)
+    res["abierto"] = info["result"]["mxd"]
+    for clave in ("data_frames", "df_activo", "vista_activa"):
+        res[clave] = info["result"].get(clave)
+    n_ole, _err = _mxd_marcos_ole(ruta)
+    if n_ole:
+        res["marcos_ole"] = n_ole
+        res["aviso_marcos_ole"] = ("tiene %d marco(s) OLE: edítalo con las herramientas del puente y"
+                                   " save_mxd, nunca con arcpy de fuera (se corrompe)." % n_ole)
+    return {"ok": True, "result": res}
+
+
 def _tras_guardar(r, clave_ruta, verificar):
     """Reabre lo guardado si se pidió, o si la predicción del add-in encontró capas que
     se van a perder. `rotas_en_memoria` solo sirve para esa comparación y no se devuelve."""
@@ -1406,10 +2405,16 @@ def _tras_guardar(r, clave_ruta, verificar):
     return r
 
 
-def _verificar_guardado(ruta, rotas_en_memoria, timeout=180):
+def _verificar_guardado(ruta, rotas_en_memoria, timeout=60):
     """Reabre `ruta` con el auditor standalone y devuelve las capas rotas en disco que no
     lo estaban en memoria. Las rutas de grupo se comparan con `/` (el auditor da
-    `Grupo\\Capa`, el add-in `Grupo/Capa`)."""
+    `Grupo\\Capa`, el add-in `Grupo/Capa`).
+
+    60 s y no 180: reabrir un .mxd sano cuesta ~9 s (medido con ArcMap abierto), y cuando
+    no termina no es por lento, es que se ha quedado esperando a algo. El 2026-10-01 un
+    plano de un expediente real SIN marcos OLE se quedó así los 180 s enteros, y otro del mismo
+    proyecto colgó un export_mxd_lote 10 min; la causa está sin identificar (no es la
+    licencia ni el OLE). Esperar más no la arregla."""
     import subprocess
 
     py27 = _python27_arcgis()
@@ -1417,11 +2422,16 @@ def _verificar_guardado(ruta, rotas_en_memoria, timeout=180):
     if not ruta or py27 is None or not os.path.isfile(auditor):
         return {"reabierto": False, "motivo": "falta el Python 2.7 de ArcGIS (ARCMAP_PYTHON27) o el auditor"}
     try:
-        proc = subprocess.run([py27, auditor, ruta], capture_output=True, timeout=timeout)
+        proc = subprocess.run([py27, auditor, ruta], capture_output=True, timeout=timeout,
+                              **SIN_VENTANA)
         bruto = proc.stdout.decode("utf-8", "replace").strip()
         datos = json.loads(bruto) if bruto else {"ok": False, "error": "sin salida"}
     except subprocess.TimeoutExpired:
-        return {"reabierto": False, "motivo": "el auditor no abrió el .mxd en %s s" % timeout}
+        return {"reabierto": False,
+                "motivo": ("el documento SÍ se ha guardado; lo que no ha terminado es la comprobación:"
+                           " el arcpy de fuera no abrió el .mxd en %s s (lo normal son ~10 s). No es"
+                           " lentitud, se ha quedado esperando a algo: mira `describe_mxd` (marcos OLE)"
+                           " o comprueba las rutas reabriendo el documento con ArcMap cerrado" % timeout)}
     except (json.JSONDecodeError, OSError) as exc:
         return {"reabierto": False, "motivo": "no se pudo auditar: %s" % exc}
     if not datos.get("ok"):
@@ -1495,7 +2505,9 @@ def repair_data_source(capa: str, ruta_antigua: str, ruta_nueva: str,
     Busca la capa en TODOS los data frames, igual que el listado (antes solo miraba
     el activo, y una capa rota de un data frame secundario se listaba pero no se
     podía reparar). `data_frame` acota la búsqueda a uno; si el nombre casa en más
-    de un sitio y no lo indicas, la llamada falla listando los candidatos.
+    de un sitio y no lo indicas, la llamada falla listando los candidatos. Como
+    `remove_layer`, no adivina entre homónimas: hace falta la ruta anclada con `/`
+    delante (`"/Límite"`, `"/Grupo/Límite"`), y `data_frame` si se repite entre marcos.
 
     **Reparada en memoria no es reparada en disco.** Si el documento guarda rutas
     relativas y la carpeta del .mxd más la ruta relativa del workspace nuevo llega a
@@ -1507,6 +2519,100 @@ def repair_data_source(capa: str, ruta_antigua: str, ruta_nueva: str,
     if data_frame is not None:
         params["data_frame"] = data_frame
     return _client.send("repair_data_source", params)
+
+
+@mcp.tool()
+def replace_data_source(capa: str, fuente: str) -> dict:
+    """
+    Apunta una capa del data frame activo a OTRO dataset, conservando su simbología,
+    etiquetas y definition query: el `replaceDataSource` de arcpy. Para cuando cambia el
+    fichero, no solo la carpeta: el ráster regional por el de cada monte
+    (`N_pies_ha_20m.tif` → `M0001_N_pies_ha_20m_Anexo1.tif`), o `Masas_V0` por
+    `Rodales_V1`. Si solo cambia el principio de la ruta, `repair_data_source`.
+
+    - `fuente`: ruta completa del dataset nuevo (`.shp`, `.tif`, `Carpeta.gdb\\clase`...). Se
+      abre antes de tocar nada: si no existe, error y la capa queda como estaba.
+    - Ráster con ráster y entidades con entidades, con la misma geometría; si no, error.
+    - En un ráster CLASIFICADO se conservan los cortes, las etiquetas, los colores y el
+      encabezado (al reapuntar, ArcMap los regeneraba: «<VALOR>» y la primera clase en
+      blanco). Si el rango del dato nuevo es otro, la respuesta lo recuerda en `avisos`.
+    - Avisa si la definition query usa campos que el dataset nuevo no tiene.
+    - Con homónimas no adivina: hace falta la ruta anclada con `/` delante, como en
+      `remove_layer`.
+    - También es operación de `edit_mxd_lote` (con `variables_por_mxd`, un fichero por
+      monte en una sola llamada).
+
+    La respuesta trae `fuente_anterior`, `fuente_nueva` (leída de vuelta), y si la capa
+    estaba o queda rota.
+    """
+    return _client.send("replace_data_source", {"capa": capa, "fuente": fuente})
+
+
+@mcp.tool()
+def save_layer_as_lyr(capa: str, ruta: str, sobrescribir: bool = False) -> dict:
+    """
+    Guarda una capa del data frame activo como fichero `.lyr`, con su simbología,
+    etiquetas, definition query y transparencia; si es un GRUPO, con todo su árbol. Es el
+    «Guardar como archivo de capa» de ArcMap. Para sacar la simbología buena de un plano y
+    llevarla a los demás de la serie con `apply_symbology_from_layer` o `add_layer`.
+
+    - `ruta`: ruta ABSOLUTA del `.lyr`, en una carpeta que exista. Si ya existe, error salvo
+      con `sobrescribir=True`.
+    - Se escribe a un temporal y se REABRE antes de dejarlo en `ruta`: si lo leído (nombre,
+      tipo, fuente, renderer, etiquetas, query, transparencia y las hijas de un grupo) no
+      coincide con la capa, error y no se deja nada. La respuesta trae `leido`.
+    - Las rutas de los datos se guardan absolutas.
+    - También es operación de `edit_mxd_lote` (`ruta` con `{VARIABLE}` para un .lyr por
+      plano); el lote guarda además el .mxd, como siempre.
+    """
+    return _client.send("save_layer_as_lyr", {"capa": capa, "ruta": ruta,
+                                              "sobrescribir": bool(sobrescribir)})
+
+
+def _origen_con_ole(origen):
+    """Motivo para no abrir el .mxd de origen de copy_layout_elements, o None. Abrirlo desde
+    fuera con ArcMap abierto y un marco OLE en su layout se queda colgado (ver describe_mxd)."""
+    if not origen or not os.path.isfile(origen):
+        return None  # el add-in da el error de ruta, con su texto
+    n, error = _mxd_marcos_ole(origen)
+    if n:
+        return ("el origen %s tiene %d marco(s) OLE: abrirlo desde fuera se queda colgado. Copia los"
+                " elementos con ese plano abierto en ArcMap, o quita antes los marcos." % (origen, n))
+    return None
+
+
+@mcp.tool()
+def copy_layout_elements(origen: str, nombres: list = None, region: list = None,
+                         tipos: list = None, quitar: list = None) -> dict:
+    """
+    Copia elementos del layout de OTRO .mxd a este, en la misma posición: los logos del
+    cajetín de un plano bueno al resto de la serie. Busca también DENTRO de los grupos (el
+    cajetín agrupado) y la imagen incrustada viaja con sus bytes.
+
+    - `origen`: ruta ABSOLUTA del .mxd del que copiar (se abre solo para leer).
+    - Qué copiar, uno o los dos: `nombres` (los nombres de los elementos en el origen) y
+      `region` (`[xmin, ymin, xmax, ymax]` en unidades de página: los que tengan el centro
+      dentro; para el logo sin nombre). Si no casa nada, el error lista lo que hay, con su
+      nombre, grupo y caja.
+    - `tipos`: `imagen` (por defecto), `texto`, `grafico` (líneas, rectángulos...). Los
+      marcos de datos, leyendas y demás de un mapa no se copian.
+    - `quitar`: nombres de elementos SUELTOS de este documento que se borran antes (los
+      logos viejos). Si alguno no está, error y no se toca nada.
+    - Si la página del origen mide distinto, se pega igual y se avisa.
+    - Un origen con marcos OLE se rechaza sin abrirlo.
+    - También es operación de `edit_mxd_lote`.
+
+    La respuesta trae `copiados` (nombre, tipo, grupo de donde salió y `caja` leída ya
+    pegada) y `quitados`.
+    """
+    error = _origen_con_ole(origen)
+    if error:
+        return {"ok": False, "error": error}
+    params = {"origen": origen}
+    for clave, valor in (("nombres", nombres), ("region", region), ("tipos", tipos), ("quitar", quitar)):
+        if valor is not None:
+            params[clave] = valor
+    return _client.send("copy_layout_elements", params)
 
 
 @mcp.tool()
@@ -1606,6 +2712,30 @@ def set_active_df(nombre: str) -> dict:
     activo' (set_scale, set_extent, export_view_png...) pasarán a actuar sobre éste.
     """
     return _client.send("set_active_df", {"nombre": nombre})
+
+
+@mcp.tool()
+def set_frame_clip(data_frame: str = None, capa: str = None, where: str = None,
+                   excluir: list = None, quitar: bool = None) -> dict:
+    """
+    Recorta un data frame a la forma de una capa de polígonos (el «Clip to shape» de
+    ArcMap: el mapa de un monte recortado a su perímetro), con capas que se libran del
+    recorte y se ven enteras, o quita el recorte. arcpy no lo expone.
+
+    - `data_frame`: por nombre; sin él, el activo.
+    - `capa` (+ `where` opcional): la forma es la UNIÓN de sus entidades. Se respeta la
+      definition query de la capa, y `where` filtra además (un monte de la capa de montes).
+    - `excluir`: capas que NO se recortan (la base cartográfica, el propio límite). Sin
+      `capa`, cambia solo las excluidas de un recorte que ya existe.
+    - `quitar=True`: sin recorte (también quita las excluidas). Va solo.
+
+    Sin `capa`, `excluir` ni `quitar`, devuelve el estado: `recorte` (None | Shape |
+    MapExtent | PageIndex), `excluidas` y `area_forma`. Con cambios, trae `antes` y el estado
+    leído de vuelta. Compruébalo en el plano exportado: el recorte solo se VE en el export.
+    """
+    params = {k: v for k, v in {"data_frame": data_frame, "capa": capa, "where": where,
+                                "excluir": excluir, "quitar": quitar}.items() if v is not None}
+    return _client.send("set_frame_clip", params)
 
 
 @mcp.tool()
@@ -1844,7 +2974,8 @@ def _arcmap_en_marcha():
     import subprocess
     try:
         out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq ArcMap.exe", "/NH"],
-                             capture_output=True, timeout=15).stdout.decode("utf-8", "replace")
+                             capture_output=True, timeout=15,
+                             **SIN_VENTANA).stdout.decode("utf-8", "replace")
         return "arcmap.exe" in out.lower()
     except (OSError, subprocess.SubprocessError):
         return True
@@ -2046,10 +3177,31 @@ def _python27_arcgis():
     return None
 
 
+def _estado_exportacion(mxd, margen=60):
+    """¿El JPG/PDF del mismo nombre junto al .mxd es posterior a su último guardado?
+
+    Solo fechas de fichero, sin abrir nada. `margen` porque guardar y exportar van
+    seguidos y el export puede llevar unos segundos de ventaja. Con JPG y PDF, manda el
+    más nuevo. Visto el 2026-10-06: un plano editado a las 10:47 se quedó sin re-exportar
+    y el recuento de JPG cuadraba por casualidad."""
+    base = os.path.splitext(mxd)[0]
+    exportes = []
+    for ext in (".jpg", ".pdf"):
+        try:
+            exportes.append((os.path.getmtime(base + ext), base + ext))
+        except OSError:
+            pass
+    if not exportes:
+        return {"exportacion": "sin_exportar"}
+    fecha, fichero = max(exportes)
+    estado = "al_dia" if fecha >= os.path.getmtime(mxd) - margen else "desfasada"
+    return {"exportacion": estado, "exportacion_fichero": os.path.basename(fichero)}
+
+
 @mcp.tool()
 def audit_folder(ruta: str, con_capas: bool = True, timeout_por_documento: int = 90,
                  max_documentos: int = 200, recursivo: bool = False,
-                 forzar_con_arcmap_abierto: bool = False) -> dict:
+                 forzar_con_arcmap_abierto: bool = False, detalle: bool = False) -> dict:
     """
     Audita TODOS los .mxd de una carpeta: versión, capas, fuentes y definition queries.
 
@@ -2097,6 +3249,25 @@ def audit_folder(ruta: str, con_capas: bool = True, timeout_por_documento: int =
     (`dentro` / `parcial` / `fuera`). Un `None` en cualquiera de esos campos es «no se
     pudo leer», no «apagada»; se cuentan en `num_en_plano_desconocido`. Lo que NO se
     mira: el rango de escalas de la capa, que arcpy.mapping 10.x no expone.
+
+    **¿ESTÁ EXPORTADO?** Cada documento trae `exportacion`: `al_dia`, `desfasada`
+    (el .mxd se guardó después de su JPG/PDF) o `sin_exportar`, mirando el fichero del
+    mismo nombre junto al .mxd; el `resumen` los cuenta. Solo fechas, sin abrir nada:
+    sale también con `con_capas=False`. Úsalo antes de entregar una serie: un plano
+    editado y no re-exportado no se nota contando ficheros.
+
+    **INVENTARIO RICO (`detalle=True`)**: además, cada documento se lee con
+    `arcmap-mcp-disco.exe` (los mismos handlers que la sesión viva): por capa del data
+    frame activo, su simbología clase a clase (valores, etiquetas, colores, patrones) y su
+    etiquetado (expresión, fuente, tamaño, Maplex); los textos del layout con su posición, y
+    cada leyenda con sus entradas y su formato. En la respuesta va un `detalle` por
+    documento con los recuentos (capas, clasificadas, etiquetadas, textos, leyendas...); el
+    inventario entero, en el fichero de `detalle_completo` (en un plano de 160 capas son
+    ~130 KB). **Con `detalle=True` la lista `capas` de cada documento también va solo al
+    fichero** (en la respuesta queda `capas_en_detalle` con cuántas son, y todos los
+    recuentos): con seis planos reales la respuesta pasaba de 100 KB y el cliente no la
+    mostraba. Cuesta ~3 s por plano. Para comparar un plano con su plantilla, `compare_mxd`.
+    Un documento con marcos OLE y ArcMap abierto no se lee (se quedaría colgado).
 
     `max_documentos` corta la lista (por defecto 200) y **lo dice** en la
     respuesta: nunca trunca en silencio. `max_documentos` y `timeout_por_documento`
@@ -2167,6 +3338,15 @@ def audit_folder(ruta: str, con_capas: bool = True, timeout_por_documento: int =
     # Solo se pregunta si algún documento tiene marcos OLE: es lo único que depende de que
     # ArcMap esté abierto (desde la 2.15.0 la pasada 2 no mira a ArcMap para nada más).
     arcmap_abierto = None
+    inventarios = {}
+    aviso_detalle = None
+    # Lo pedido, no lo que se pudo: sin el ejecutable no hay inventario, pero la lista de capas
+    # va igual al fichero (es lo que pesa en la respuesta).
+    pidio_detalle = bool(detalle)
+    if detalle and _disco_exe() is None:
+        detalle = False
+        aviso_detalle = ("detalle=True necesita arcmap-mcp-disco.exe, que viaja en el .esriaddin de la 2.17.0:"
+                         " instálalo (o define ARCMAP_DISCO_EXE). Se devuelve la auditoría sin inventario.")
 
     for doc in documentos:
         version, err_version = _mxd_version_declarada(doc)
@@ -2181,13 +3361,28 @@ def audit_folder(ruta: str, con_capas: bool = True, timeout_por_documento: int =
         else:
             fila["problema_fichero"] = err_version
             resumen["ilegibles"] += 1
+        fila.update(_estado_exportacion(doc))
+        por_estado = resumen.setdefault("exportacion", {})
+        por_estado[fila["exportacion"]] = por_estado.get(fila["exportacion"], 0) + 1
 
         n_ole, _err_ole = _mxd_marcos_ole(doc)
         if n_ole:
             fila["marcos_ole"] = n_ole
             resumen["con_marcos_ole"] = resumen.get("con_marcos_ole", 0) + 1
-            if con_capas and arcmap_abierto is None:
+            if (con_capas or detalle) and arcmap_abierto is None:
                 arcmap_abierto = _arcmap_en_marcha()
+
+        if detalle:
+            if n_ole and arcmap_abierto:
+                fila["detalle"] = {"sin_leer": "tiene %d marco(s) OLE y ArcMap está abierto: leerlo desde fuera se"
+                                               " queda colgado. Repite con ArcMap cerrado." % n_ole}
+            else:
+                inv = _inventario_mxd(doc, timeout_por_documento)
+                if inv.get("ok"):
+                    inventarios[doc] = inv["inventario"]
+                    fila["detalle"] = _resumen_inventario(inv["inventario"])
+                else:
+                    fila["detalle"] = {"error": inv.get("error")}
 
         if con_capas and cortada:
             fila["sin_abrir"] = True
@@ -2206,7 +3401,7 @@ def audit_folder(ruta: str, con_capas: bool = True, timeout_por_documento: int =
             try:
                 proc = subprocess.run(
                     [py27, auditor, doc],
-                    capture_output=True, timeout=timeout_por_documento)
+                    capture_output=True, timeout=timeout_por_documento, **SIN_VENTANA)
                 bruto = proc.stdout.decode("utf-8", "replace").strip()
                 datos = json.loads(bruto) if bruto else {"ok": False, "error": "sin salida"}
                 if datos.get("ok"):
@@ -2261,13 +3456,119 @@ def audit_folder(ruta: str, con_capas: bool = True, timeout_por_documento: int =
                                     "respuesta." % (total, len(documentos), total - len(documentos)))
     if aviso_capas:
         salida["aviso_capas"] = aviso_capas
+    if aviso_detalle:
+        salida["aviso_detalle"] = aviso_detalle
+    if pidio_detalle:
+        # La lista `capas` de cada documento va SOLO al fichero: con 6 planos reales la
+        # respuesta pesaba 106 KB y el cliente no la mostraba (2026-10-10). Los recuentos se
+        # quedan. Si el fichero no se puede escribir, la lista se queda en la respuesta.
+        fichero = _guardar_detalle_lote({"carpeta": carpeta, "documentos": resultados,
+                                         "inventarios": inventarios}, prefijo="audit_folder")
+        if fichero:
+            salida["detalle_completo"] = fichero
+            salida["documentos"] = [_fila_sin_capas(f) for f in resultados]
+        else:
+            salida["aviso_detalle_completo"] = ("No se pudo escribir el fichero de detalle (%TEMP%\\arcmap-mcp-lotes):"
+                                                " la lista de capas y el inventario no se guardan; las capas van en"
+                                                " la respuesta.")
     return salida
+
+
+def _fila_sin_capas(fila):
+    """La fila de audit_folder sin su lista `capas` (que queda en el fichero de detalle) y con
+    cuántas eran, para que se sepa que no se ha perdido nada."""
+    if "capas" not in fila:
+        return fila
+    f = dict(fila)
+    capas = f.pop("capas")
+    f["capas_en_detalle"] = len(capas) if isinstance(capas, list) else 0
+    return f
+
+
+def _cpu_segundos(proc):
+    """Segundos de CPU (usuario + núcleo) que lleva el proceso, o None si no se puede leer."""
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+    c, e, k, u = (wintypes.FILETIME() for _ in range(4))
+    try:
+        ok = ctypes.windll.kernel32.GetProcessTimes(wintypes.HANDLE(int(proc._handle)),
+                                                    ctypes.byref(c), ctypes.byref(e),
+                                                    ctypes.byref(k), ctypes.byref(u))
+    except (AttributeError, OSError, ValueError):
+        return None
+    if not ok:
+        return None
+    total = 0
+    for ft in (k, u):
+        total += (ft.dwHighDateTime << 32) | ft.dwLowDateTime
+    return total / 1e7
+
+
+def _ejecutar_vigilando(args, timeout, corte_sin_cpu, intervalo=5.0):
+    """Lanza `args` y devuelve (returncode, stdout, stderr, motivo_corte).
+
+    Además del tiempo límite, corta el proceso si su CPU no se mueve en `corte_sin_cpu`
+    segundos (0 = sin ese corte). Un arcpy colgado no consume nada: el 2026-10-01 un
+    export_mxd_lote se quedó 10 min al 0 % con un plano de un expediente real que, repetido en cinco
+    condiciones distintas, abre en 10-12 s. Sin esto, cada documento colgado cuesta el
+    timeout entero. Si hay que cortar, motivo_corte dice por qué; si no, es None."""
+    import subprocess
+    import threading
+    import time
+
+    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **SIN_VENTANA)
+    salida = {"out": b"", "err": b""}
+
+    def leer(flujo, clave):
+        salida[clave] = flujo.read()
+
+    hilos = [threading.Thread(target=leer, args=(proc.stdout, "out"), daemon=True),
+             threading.Thread(target=leer, args=(proc.stderr, "err"), daemon=True)]
+    for h in hilos:
+        h.start()
+    inicio = time.monotonic()
+    cpu_previa, quieto_desde = None, inicio
+    motivo = None
+    while proc.poll() is None:
+        ahora = time.monotonic()
+        if ahora - inicio >= timeout:
+            motivo = "TIMEOUT tras %s s" % timeout
+            break
+        if corte_sin_cpu:
+            cpu = _cpu_segundos(proc)
+            if cpu is not None:
+                if cpu_previa is None or cpu - cpu_previa > 0.05:
+                    cpu_previa, quieto_desde = cpu, ahora
+                elif ahora - quieto_desde >= corte_sin_cpu:
+                    motivo = ("SIN PROGRESO: la CPU del proceso no se movió en %d s (llevaba %.1f s de"
+                              " CPU en total)" % (corte_sin_cpu, cpu))
+                    if cpu < 1:
+                        # `import arcpy` solo ya gasta ~6 s de CPU: con menos de 1 el
+                        # hijo se paró al arrancar, no en el documento ni en la red.
+                        motivo += (". Con menos de 1 s de CPU el proceso no llegó ni a importar"
+                                   " arcpy: el bloqueo es al arrancar, no del documento")
+                    break
+        try:
+            # wait y no sleep: un hijo que acaba en 1 s devolvía a los 5 (6 min de más en un
+            # lote de 150 planos, medido en la revisión del 2026-10-01).
+            proc.wait(timeout=min(intervalo, max(0.05, timeout - (ahora - inicio))))
+        except subprocess.TimeoutExpired:
+            pass
+    if motivo:
+        proc.kill()
+    proc.wait()
+    for h in hilos:
+        h.join(5)
+    return proc.returncode, salida["out"], salida["err"], motivo
 
 
 @mcp.tool()
 def export_mxd_lote(mxds: list, formato: str = "jpg", dpi: int = 230,
                     carpeta_salida: str = None, sobrescribir: bool = True,
-                    timeout_por_documento: int = 600) -> dict:
+                    timeout_por_documento: int = 600, corte_sin_cpu: int = 120,
+                    si_capas_rotas: str = "exportar") -> dict:
     """
     Exporta el layout de VARIOS .mxd del disco, cada uno en su propio proceso.
 
@@ -2290,17 +3591,32 @@ def export_mxd_lote(mxds: list, formato: str = "jpg", dpi: int = 230,
       final se mueve encima: un fallo no se lleva el plano que había.
     - `timeout_por_documento`: segundos por documento (600). Un documento con
       fuentes de red que no responden muere solo, y el lote sigue.
+    - `corte_sin_cpu`: segundos con la CPU del proceso quieta tras los que se da el
+      documento por colgado y se corta (120; 0 = no cortar así). Un arcpy colgado no
+      consume nada (visto: 10 min al 0 %), y sin esto cada uno cuesta el timeout entero.
+      Súbelo si los planos esperan mucho a fuentes de red lentas: esa espera también
+      tiene la CPU quieta.
 
     Presupuesto: ~6 s de `import arcpy` por documento más lo que cueste dibujarlo;
     planos de ~100 capas con WMS salen a ~25 s cada uno. Un lote de 150 son una hora
     larga: pártelo si el cliente MCP corta antes.
+
+    - `si_capas_rotas`: cada fila trae `capas_rotas`, las capas rotas que SALEN en
+      el plano (la capa, sus grupos y su marco en la hoja; el criterio de
+      `audit_folder`): una rota dentro de un grupo apagado no cuenta. Con "exportar"
+      (por defecto) se exporta igual y se avisa; con "fallar", ese documento no se
+      exporta y el plano que ya había se conserva. Un export con «ok» y una capa
+      rota visible es un plano sin esa capa: mira `capas_rotas` antes de entregar.
+
+    Excepción a «abierto o cerrado»: un .mxd con **marcos OLE** (tablas de Word en el
+    layout) NO se lanza con ArcMap abierto, porque el arcpy de fuera se cuelga al
+    cargarlo. Sale como fallido con `marcos_ole` y el motivo; repítelo con ArcMap cerrado.
 
     Devuelve, POR DOCUMENTO, el .mxd, la salida, los bytes y si pisó algo. Mira los
     bytes: un plano que pesa la mitad que sus vecinos es el primer síntoma de capas
     rotas o de una vista que no es la que crees.
     """
     import shutil
-    import subprocess
     import tempfile
     import time
 
@@ -2316,12 +3632,22 @@ def export_mxd_lote(mxds: list, formato: str = "jpg", dpi: int = 230,
         return {"ok": False, "error": "dpi fuera de rango (24-600): %s." % dpi}
     if timeout_por_documento < 1:
         return {"ok": False, "error": "timeout_por_documento debe ser >= 1."}
+    try:
+        corte_sin_cpu = int(corte_sin_cpu or 0)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "corte_sin_cpu debe ser un entero (segundos; 0 = sin corte)."}
+    if corte_sin_cpu < 0:
+        return {"ok": False, "error": "corte_sin_cpu no puede ser negativo (0 = sin corte)."}
     if isinstance(mxds, str):
         mxds = [mxds]
     if not mxds:
         return {"ok": False, "error": "mxds está vacía: no hay nada que exportar."}
     if carpeta_salida and not os.path.isdir(carpeta_salida):
         return {"ok": False, "error": "carpeta_salida no existe: %s" % carpeta_salida}
+    si_capas_rotas = (si_capas_rotas or "exportar").lower()
+    if si_capas_rotas not in ("exportar", "fallar"):
+        return {"ok": False, "error": "si_capas_rotas debe ser 'exportar' o 'fallar' (recibido: %r)."
+                                      % si_capas_rotas}
 
     py27 = _python27_arcgis()
     exportador = os.path.join(os.path.dirname(os.path.abspath(__file__)), "exportar_mxd.py")
@@ -2331,6 +3657,14 @@ def export_mxd_lote(mxds: list, formato: str = "jpg", dpi: int = 230,
 
     resultados = []
     resumen = {"exportados": 0, "fallidos": 0, "saltados": 0}
+    aviso_cpu = None
+    if corte_sin_cpu and os.path.basename(py27).lower() != "python.exe":
+        # Un lanzador (.cmd, el python.exe de un venv...) arranca el intérprete como hijo y
+        # se queda quieto: su CPU no se mueve y el corte mataría TODOS los documentos.
+        aviso_cpu = ("corte_sin_cpu desactivado: ARCMAP_PYTHON27 apunta a %s, que no es un python.exe,"
+                     " y la CPU que se mediría sería la de un lanzador quieto" % py27)
+        corte_sin_cpu = 0
+    arcmap_abierto = None        # se consulta una vez, y solo si algún .mxd tiene OLE
     trabajos = tempfile.mkdtemp(prefix="arcmap-mcp-lote_")
     try:
         for i, bruto in enumerate(mxds):
@@ -2348,25 +3682,49 @@ def export_mxd_lote(mxds: list, formato: str = "jpg", dpi: int = 230,
                 resumen["saltados"] += 1
                 resultados.append(fila)
                 continue
+            n_ole, _err_ole = _mxd_marcos_ole(ruta)
+            if n_ole:
+                if arcmap_abierto is None:
+                    arcmap_abierto = _arcmap_en_marcha()
+                if arcmap_abierto:
+                    # Con ArcMap abierto el arcpy de fuera se cuelga al cargar un marco OLE
+                    # y arrastra a los procesos que abren otros .mxd a la vez (2026-10-06:
+                    # cinco matados a mano). Ni se lanza: fallido, porque el plano no sale.
+                    fila["marcos_ole"] = n_ole
+                    fila["error"] = ("no se exporta: tiene %d marco(s) OLE y ArcMap está abierto, y "
+                                     "en ese caso el arcpy de fuera se queda colgado al cargarlo. "
+                                     "Repite con ArcMap cerrado." % n_ole)
+                    resumen["fallidos"] += 1
+                    resultados.append(fila)
+                    continue
 
             trabajo = os.path.join(trabajos, "trabajo_%d.json" % i)
             with open(trabajo, "w", encoding="utf-8") as f:
-                json.dump({"mxd": ruta, "salida": destino, "formato": formato, "dpi": dpi},
-                          f, ensure_ascii=False)
+                json.dump({"mxd": ruta, "salida": destino, "formato": formato, "dpi": dpi,
+                           "si_capas_rotas": si_capas_rotas}, f, ensure_ascii=False)
             inicio = time.time()
             try:
-                proc = subprocess.run([py27, exportador, trabajo], capture_output=True,
-                                      timeout=timeout_por_documento)
-                bruto_salida = proc.stdout.decode("utf-8", "replace").strip()
-                datos = json.loads(bruto_salida) if bruto_salida else {
-                    "ok": False, "error": "sin salida; stderr: %s"
-                    % proc.stderr.decode("utf-8", "replace")[-500:]}
-            except subprocess.TimeoutExpired:
-                datos = {"ok": False, "error": "TIMEOUT tras %s s (el proceso muere solo; el lote "
-                                               "sigue). Causa habitual: fuentes de red que no "
-                                               "responden." % timeout_por_documento}
+                _rc, out, err, corte = _ejecutar_vigilando([py27, exportador, trabajo],
+                                                           timeout_por_documento, corte_sin_cpu)
+                if corte:
+                    datos = {"ok": False, "error": "%s: se corta este documento y el lote sigue. Causa"
+                                                   " habitual: fuentes de red que no responden, o un"
+                                                   " .mxd que deja colgado al arcpy de fuera."
+                                                   % corte}
+                else:
+                    bruto_salida = out.decode("utf-8", "replace").strip()
+                    datos = json.loads(bruto_salida) if bruto_salida else {
+                        "ok": False, "error": "sin salida; stderr: %s"
+                        % err.decode("utf-8", "replace")[-500:]}
             except (json.JSONDecodeError, OSError) as exc:
                 datos = {"ok": False, "error": "no se pudo exportar: %s" % exc}
+
+            # Antes de la comprobación del fichero, que puede reescribir `datos`.
+            for clave in ("capas_rotas", "capas_rotas_sin_decidir", "capas_rotas_error"):
+                if datos.get(clave):
+                    fila[clave] = datos[clave]
+            if fila.get("capas_rotas"):
+                resumen["con_capas_rotas"] = resumen.get("con_capas_rotas", 0) + 1
 
             # No basta con que el hijo diga ok: el fichero tiene que estar, tener
             # tamaño y ser de ESTA pasada. Un código de salida no prueba la salida.
@@ -2392,8 +3750,771 @@ def export_mxd_lote(mxds: list, formato: str = "jpg", dpi: int = 230,
     finally:
         shutil.rmtree(trabajos, ignore_errors=True)
 
-    return {"ok": resumen["fallidos"] == 0, "formato": formato, "dpi": dpi,
-            "total": len(mxds), "resumen": resumen, "documentos": resultados}
+    salida = {"ok": resumen["fallidos"] == 0, "formato": formato, "dpi": dpi,
+              "total": len(mxds), "resumen": resumen, "documentos": resultados}
+    if resumen.get("con_capas_rotas"):
+        # Arriba y no solo en la fila: el «ok» del lote no dice nada de esto, y fue
+        # justo ese «ok» lo que dejó salir cuatro planos sin cantones.
+        salida["aviso"] = ("%d documento(s) con capas rotas que salen en el plano: mira "
+                           "`capas_rotas` en cada fila antes de entregar."
+                           % resumen["con_capas_rotas"])
+    if aviso_cpu:
+        salida["aviso_corte_sin_cpu"] = aviso_cpu
+    return salida
+
+
+# --------------------------------------------------------------------------- #
+# Modo disco (ADR-010): edit_mxd_lote.
+#
+# Las operaciones son herramientas vivas, con sus nombres y parámetros, que ejecuta
+# arcmap-mcp-disco.exe con los MISMOS handlers del add-in sobre un .mxd del disco. El
+# ejecutable viaja dentro del .esriaddin: se saca de ahí a una caché propia, así nunca
+# va desfasado del add-in instalado.
+# --------------------------------------------------------------------------- #
+
+OPERACIONES_LOTE = (
+    "set_legend", "set_legend_item", "set_text_element", "set_labels", "edit_symbol",
+    "set_single_symbology", "set_unique_values_symbology", "set_graduated_symbology",
+    "set_raster_symbology", "apply_symbology_from_layer", "add_layer", "add_group", "remove_layer",
+    "rename_layer", "duplicate_layer", "move_layer", "set_layer_visibility", "set_definition_query",
+    "set_scale", "set_extent", "set_frame_clip", "replace_data_source", "replace_text",
+    "save_layer_as_lyr", "copy_layout_elements",
+)
+
+_ADDIN_ID = "{51f4ce63-6bcf-49b2-ae3a-ba2c79ea3e1a}"
+
+
+def _disco_exe():
+    """Ruta de arcmap-mcp-disco.exe, o None. Por orden: ARCMAP_DISCO_EXE; el que trae el
+    .esriaddin instalado (extraído a %LOCALAPPDATA%\\arcmap-mcp\\disco\\<firma>, porque quien
+    instala con doble clic solo tiene el zip); la compilación del repo."""
+    import tempfile
+    import zipfile
+    forzado = os.environ.get("ARCMAP_DISCO_EXE")
+    if forzado and os.path.isfile(forzado):
+        return forzado
+    base = os.path.join(os.environ.get("USERPROFILE", ""), "Documents", "ArcGIS", "AddIns")
+    paquetes = []
+    try:
+        for version in sorted(os.listdir(base), reverse=True):
+            carpeta = os.path.join(base, version, _ADDIN_ID)
+            if os.path.isdir(carpeta):
+                paquetes += [os.path.join(carpeta, f) for f in os.listdir(carpeta) if f.lower().endswith(".esriaddin")]
+    except OSError:
+        pass
+    for paquete in paquetes:
+        st = os.stat(paquete)
+        cache = os.path.join(os.environ.get("LOCALAPPDATA", tempfile.gettempdir()), "arcmap-mcp", "disco",
+                             "%d-%d" % (st.st_size, int(st.st_mtime)))
+        exe = os.path.join(cache, "arcmap-mcp-disco.exe")
+        if os.path.isfile(exe):
+            return exe
+        try:
+            with zipfile.ZipFile(paquete) as z:
+                nombres = [n for n in z.namelist() if n.replace("\\", "/").lower().startswith("install/")]
+                if not any(n.lower().endswith("arcmap-mcp-disco.exe") for n in nombres):
+                    continue                      # add-in anterior al modo disco
+                os.makedirs(cache, exist_ok=True)
+                for n in nombres:
+                    destino = os.path.join(cache, os.path.basename(n.replace("\\", "/")))
+                    if os.path.basename(destino):
+                        with z.open(n) as src, open(destino + ".tmp", "wb") as dst:
+                            dst.write(src.read())
+                        os.replace(destino + ".tmp", destino)
+            return exe
+        except (OSError, zipfile.BadZipFile):
+            continue
+    repo = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "addin",
+                        "ArcmapMcp.Disco", "bin", "Release", "arcmap-mcp-disco.exe")
+    return repo if os.path.isfile(repo) else None
+
+
+def _mxd_abierto_en_arcmap():
+    """(ruta normalizada del documento abierto con el puente o None, títulos de ventana de
+    ArcMap). Sin puente no se sabe la ruta, y se compara por el nombre del título."""
+    abierto = None
+    r = _client.send("get_arcmap_info", timeout=15)
+    if r.get("ok") and (r.get("result") or {}).get("mxd"):
+        abierto = os.path.normcase(os.path.abspath(r["result"]["mxd"]))
+    titulos = []
+    try:
+        out = subprocess.run(["tasklist", "/V", "/FO", "CSV", "/NH", "/FI", "IMAGENAME eq ArcMap.exe"],
+                             capture_output=True, timeout=15, **SIN_VENTANA).stdout.decode("mbcs", "replace")
+        for linea in out.splitlines():
+            campos = [c.strip('"') for c in linea.split('","')]
+            if campos and campos[0].lower().startswith("arcmap.exe"):
+                titulos.append(campos[-1])
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return abierto, titulos
+
+
+@mcp.tool()
+def edit_mxd_lote(mxds: list = None, operaciones: list = None, bak: bool = True,
+                  timeout_por_documento: int = 600, corte_sin_cpu: int = 120,
+                  en_paralelo: int = 1, detalle: bool = False,
+                  operaciones_por_mxd: dict = None, variables_por_mxd: dict = None,
+                  plantilla: str = None, plantilla_por_mxd: dict = None,
+                  sobrescribir: bool = False) -> dict:
+    """
+    Aplica una lista de operaciones a varios .mxd del disco y los guarda, sin abrirlos
+    en ArcMap (ArcMap puede estar cerrado o con otro documento). Es la herramienta para
+    retocar una serie de planos: leyenda a 8 pt, una entrada fuera, etiquetas, un texto del
+    cajetín... en 29 planos con una llamada, en vez de abrir y guardar cada uno.
+
+    Las series reales llevan variaciones por plano (cada monte con su código en el filtro,
+    sus clases, sus capas), y hay dos formas de darlas:
+    - `variables_por_mxd`: `{ruta: {"MUP": "M0001", "MONTE": "Sierra Ejemplo"}}`. En cualquier
+      texto de las operaciones, `{MUP}` se cambia por el valor de ESE plano:
+      `{"tool": "set_definition_query", "capa": "Rodales", "query": "\\"ID_MONTE\\" = '{MUP}'"}`.
+      Solo se sustituyen los nombres declarados; una llave que no sea una variable se queda tal
+      cual. Si un plano no define una variable que sus operaciones usan, no se lanza nada.
+    - `operaciones_por_mxd`: `{ruta: [ops]}`, operaciones propias de cada plano, que van
+      DESPUÉS de las comunes de `operaciones`. Con ella, `mxds` y `operaciones` son opcionales:
+      sin `mxds`, los planos son las claves.
+
+    Para CREAR los planos a partir de una plantilla (una hoja por plano de la serie):
+    - `plantilla`: un .mxd del que salen todos, o `plantilla_por_mxd`: `{destino: origen}`.
+      Cada destino de `mxds` se crea abriendo su plantilla, aplicando las operaciones en
+      memoria y guardando con «Guardar como» en el destino, que reescribe las rutas relativas
+      para la carpeta nueva (copiar el fichero a mano las rompe). Sin operaciones, solo copia.
+      Si una operación falla, el destino no se crea.
+    - `sobrescribir` (False): un destino que ya existe es error salvo con True (y entonces
+      se le hace `.bak`). La plantilla con marcos OLE se rechaza, como cualquier origen.
+
+    - `operaciones`: lista de herramientas con sus parámetros, como en vivo:
+      `[{"tool": "set_legend", "tamano": 8}, {"tool": "set_legend_item", "capa": "Badén",
+      "quitar": true}]`. Admitidas: set_legend, set_legend_item, set_text_element, set_labels,
+      edit_symbol, set_single_symbology, set_unique_values_symbology, set_graduated_symbology,
+      set_raster_symbology, apply_symbology_from_layer, add_layer, add_group, remove_layer,
+      rename_layer, duplicate_layer, move_layer, set_layer_visibility, set_definition_query,
+      set_scale, set_extent (`coords` o `capa`), set_frame_clip, replace_data_source,
+      replace_text, save_layer_as_lyr y copy_layout_elements. Actúan sobre el data frame
+      que el .mxd guardó como activo.
+    - **Todo o nada por documento**: si falla una operación, ese .mxd no se guarda (y se dice
+      cuál falló); los demás siguen.
+    - `bak` (True): copia `<plano>.mxd.bak` antes de guardar.
+    - Se guarda conservando el ajuste de rutas relativas del documento y **se verifica
+      reabriendo**: las mismas lecturas (TOC, leyendas y lo tocado de cada capa) antes de
+      guardar y al reabrir. `verificado: false` y `diferencias` si algo no sobrevivió.
+    - Cada .mxd en su propio proceso, con `timeout_por_documento` y `corte_sin_cpu`, como
+      `export_mxd_lote`. `en_paralelo` (1-4): cuántos a la vez. Verificar reabriendo cuesta
+      lo que una apertura: en un plano pesado, un documento suelto va más lento que
+      `open_mxd` + operaciones + `save_mxd`; en una serie, en paralelo, no.
+    - La respuesta va RESUMIDA: por documento, `verificado`, `diferencias` y lo que devolvió
+      cada operación, con los valores largos (el `orden` de una leyenda, las lecturas de la
+      verificación) recortados. Sin recortar pesaba ~60.000 caracteres por plano de 150 capas
+      y el cliente no la mostraba. Lo completo se escribe siempre en el fichero de
+      `detalle_completo`; `detalle=True` lo devuelve también en la respuesta (solo para pocos
+      planos).
+
+    Se NIEGA, sin tocarlos: los .mxd con **marcos OLE** (guardarlos desde fuera los corrompe;
+    para esos, `open_mxd` + las herramientas + `save_mxd`) y **el documento abierto en
+    ArcMap** (el siguiente save_mxd pisaría lo hecho). No exporta: después, `export_mxd_lote`.
+    """
+    import shutil
+    import tempfile
+    import time
+    if operaciones_por_mxd is not None and not isinstance(operaciones_por_mxd, dict):
+        return {"ok": False, "error": "'operaciones_por_mxd' es un diccionario {ruta del .mxd: [operaciones]}."}
+    if variables_por_mxd is not None and not isinstance(variables_por_mxd, dict):
+        return {"ok": False, "error": "'variables_por_mxd' es un diccionario {ruta del .mxd: {\"NOMBRE\": \"valor\"}}."}
+    if plantilla_por_mxd is not None and not isinstance(plantilla_por_mxd, dict):
+        return {"ok": False, "error": "'plantilla_por_mxd' es un diccionario {destino .mxd: plantilla .mxd}."}
+    if plantilla and plantilla_por_mxd:
+        return {"ok": False, "error": "'plantilla' y 'plantilla_por_mxd' se excluyen."}
+    if mxds is None and operaciones_por_mxd:
+        mxds = list(operaciones_por_mxd)
+    if mxds is None and plantilla_por_mxd:
+        mxds = list(plantilla_por_mxd)
+    if not isinstance(mxds, list) or not mxds:
+        return {"ok": False, "error": "'mxds' debe ser una lista no vacía de rutas absolutas a .mxd."}
+    origenes = {}
+    if plantilla:
+        origenes = {_clave_mxd(m): os.path.abspath(os.path.expandvars(str(plantilla))) for m in mxds}
+    elif plantilla_por_mxd:
+        origenes = {_clave_mxd(k): os.path.abspath(os.path.expandvars(str(v))) for k, v in plantilla_por_mxd.items()}
+        sobran = [k for k in origenes if k not in {_clave_mxd(m) for m in mxds}]
+        if sobran:
+            return {"ok": False, "error": "plantilla_por_mxd trae destinos que no están en 'mxds': %s." % ", ".join(sobran)}
+    operaciones = operaciones or []
+    if not isinstance(operaciones, list):
+        return {"ok": False, "error": "'operaciones' debe ser una lista de {\"tool\": ..., parámetros}."}
+    if not operaciones and not operaciones_por_mxd and not origenes:
+        return {"ok": False, "error": "'operaciones' debe ser una lista no vacía de {\"tool\": ..., parámetros}"
+                                      " (o da 'operaciones_por_mxd', o una 'plantilla' para solo copiar)."}
+    try:
+        planes = _planes_lote(mxds, operaciones, operaciones_por_mxd or {}, variables_por_mxd or {},
+                              sin_ops_vale=set(origenes))
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    exe = _disco_exe()
+    if exe is None:
+        return {"ok": False, "error": "No se encuentra arcmap-mcp-disco.exe: el add-in instalado es anterior al modo"
+                                      " disco. Instala el .esriaddin de esta versión (o define ARCMAP_DISCO_EXE)."}
+
+    if not isinstance(en_paralelo, int) or not 1 <= en_paralelo <= 4:
+        return {"ok": False, "error": "'en_paralelo' va de 1 a 4 (recibido: %r)." % (en_paralelo,)}
+
+    abierto, titulos = (None, [])
+    if _arcmap_en_marcha():
+        abierto, titulos = _mxd_abierto_en_arcmap()
+    resultados = []
+    resumen = {"guardados": 0, "fallidos": 0, "no_verificados": 0}
+    trabajos = tempfile.mkdtemp(prefix="arcmap-mcp-disco_")
+
+    def una(fila, trabajo):
+        inicio = time.time()
+        try:
+            _rc, out, err, corte = _ejecutar_vigilando([exe, trabajo], timeout_por_documento, corte_sin_cpu)
+            if corte:
+                datos = {"ok": False, "error": "%s: se corta este documento y el lote sigue. Si se cortó a mitad"
+                                               " del guardado, revisa el .mxd y su .bak." % corte}
+            else:
+                texto = out.decode("utf-8", "replace").strip()
+                datos = json.loads(texto.splitlines()[-1]) if texto else {
+                    "ok": False, "error": "sin salida; stderr: %s" % err.decode("utf-8", "replace")[-500:]}
+        except (json.JSONDecodeError, OSError) as exc:
+            datos = {"ok": False, "error": "no se pudo ejecutar el modo disco: %s" % exc}
+        fila["segundos"] = round(time.time() - inicio, 1)
+        for clave in ("guardado", "creado", "bak", "operaciones", "verificacion", "error"):
+            if clave in datos:
+                fila[clave] = datos[clave]
+        return datos
+
+    try:
+        # 1. Las negativas, sin lanzar nada.
+        pendientes = []
+        for i, bruto in enumerate(mxds):
+            ruta = os.path.abspath(os.path.expandvars(str(bruto)))
+            fila = {"mxd": ruta}
+            resultados.append(fila)
+            origen = origenes.get(_clave_mxd(ruta))
+            if origen is not None:
+                fila["origen"] = origen
+                if not ruta.lower().endswith(".mxd"):
+                    fila["error"] = "el destino tiene que acabar en .mxd"
+                    resumen["fallidos"] += 1
+                    continue
+                if not (os.path.isfile(origen) and origen.lower().endswith(".mxd")):
+                    fila["error"] = "la plantilla no existe o no es un .mxd: %s" % origen
+                    resumen["fallidos"] += 1
+                    continue
+                if os.path.normcase(origen) == os.path.normcase(ruta):
+                    fila["error"] = "la plantilla y el destino son el mismo fichero"
+                    resumen["fallidos"] += 1
+                    continue
+                if os.path.exists(ruta) and not sobrescribir:
+                    fila["error"] = "el destino ya existe; pasa sobrescribir=True para pisarlo (se le hace .bak)"
+                    resumen["fallidos"] += 1
+                    continue
+            elif not (os.path.isfile(ruta) and ruta.lower().endswith(".mxd")):
+                fila["error"] = "no existe o no es un .mxd"
+                resumen["fallidos"] += 1
+                continue
+            n_ole, _err = _mxd_marcos_ole(origen or ruta)
+            if n_ole:
+                fila["marcos_ole"] = n_ole
+                fila["error"] = ("no se toca: tiene %d marco(s) OLE, y guardarlo desde fuera de ArcMap lo corrompe."
+                                 " Para este plano: open_mxd + las herramientas + save_mxd." % n_ole)
+                resumen["fallidos"] += 1
+                continue
+            nombre = os.path.basename(ruta).lower()
+            if os.path.normcase(ruta) == abierto or (abierto is None and any(
+                    t.lower().startswith(nombre) or t.lower().startswith(nombre[:-4] + " ") for t in titulos)):
+                fila["error"] = ("no se toca: es el documento abierto en ArcMap, y el siguiente save_mxd pisaría lo"
+                                 " hecho. Usa las herramientas vivas sobre él, o ciérralo antes.")
+                resumen["fallidos"] += 1
+                continue
+            trabajo = os.path.join(trabajos, "trabajo_%d.json" % i)
+            with open(trabajo, "w", encoding="utf-8") as f:
+                trabajo_json = {"mxd": ruta, "operaciones": planes[i], "bak": bool(bak)}
+                if origen is not None:
+                    trabajo_json.update({"origen": origen, "sobrescribir": bool(sobrescribir)})
+                json.dump(trabajo_json, f, ensure_ascii=False)
+            pendientes.append((fila, trabajo))
+
+        # 2. Un proceso por documento; con en_paralelo > 1, varios a la vez (son independientes).
+        if en_paralelo == 1:
+            todos = [una(f, t) for f, t in pendientes]
+        else:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=en_paralelo) as pool:
+                todos = list(pool.map(lambda ft: una(*ft), pendientes))
+        for datos in todos:
+            if datos.get("ok"):
+                resumen["guardados"] += 1
+            elif datos.get("guardado"):
+                resumen["no_verificados"] += 1
+            else:
+                resumen["fallidos"] += 1
+    finally:
+        shutil.rmtree(trabajos, ignore_errors=True)
+    r = {"ok": resumen["fallidos"] == 0 and resumen["no_verificados"] == 0, "total": len(mxds),
+         "resumen": resumen, "documentos": resultados}
+    fichero = _guardar_detalle_lote(r)
+    if fichero:
+        r["detalle_completo"] = fichero
+    if not detalle:
+        r["documentos"] = [_resumir_fila_lote(f) for f in resultados]
+    return r
+
+
+_VARIABLE_LOTE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _clave_mxd(ruta):
+    return os.path.normcase(os.path.abspath(os.path.expandvars(str(ruta))))
+
+
+def _planes_lote(mxds, comunes, por_mxd, variables, sin_ops_vale=frozenset()):
+    """La lista de operaciones de cada plano, en el orden de `mxds`: las comunes y luego las
+    suyas, con sus variables sustituidas. Todo se valida ANTES de lanzar nada: una clave que
+    no es de ningún plano, una operación que no es del lote, o una variable que el plano usa y
+    no define, es error para todo el lote (un lote a medias por una errata es peor)."""
+    claves = [_clave_mxd(m) for m in mxds]
+    propias = {}
+    for k, ops in por_mxd.items():
+        if not isinstance(ops, list):
+            raise ValueError("operaciones_por_mxd[%r] debe ser una lista de operaciones." % (k,))
+        propias[_clave_mxd(k)] = ops
+    vars_ = {}
+    for k, v in variables.items():
+        if not isinstance(v, dict):
+            raise ValueError("variables_por_mxd[%r] debe ser un diccionario {\"NOMBRE\": \"valor\"}." % (k,))
+        vars_[_clave_mxd(k)] = {str(n): v[n] for n in v}
+    for nombre, dicc in (("operaciones_por_mxd", propias), ("variables_por_mxd", vars_)):
+        sobran = [k for k in dicc if k not in claves]
+        if sobran:
+            raise ValueError("%s trae planos que no están en 'mxds': %s." % (nombre, ", ".join(sobran)))
+    declaradas = set()
+    for v in vars_.values():
+        declaradas.update(v)
+
+    def sustituir(valor, mapa, donde, faltan):
+        if isinstance(valor, str):
+            def cambio(m):
+                n = m.group(1)
+                if n not in declaradas:
+                    return m.group(0)
+                if n not in mapa:
+                    faltan.add(n)
+                    return m.group(0)
+                return str(mapa[n])
+            return _VARIABLE_LOTE.sub(cambio, valor)
+        if isinstance(valor, list):
+            return [sustituir(x, mapa, donde, faltan) for x in valor]
+        if isinstance(valor, dict):
+            return {k: sustituir(x, mapa, donde, faltan) for k, x in valor.items()}
+        return valor
+
+    planes = []
+    for mxd, clave in zip(mxds, claves):
+        ops = list(comunes) + list(propias.get(clave, []))
+        if not ops and clave not in sin_ops_vale:
+            raise ValueError("El plano %s no tiene ninguna operación (ni comunes ni propias)." % mxd)
+        for i, op in enumerate(ops):
+            if not isinstance(op, dict) or op.get("tool") not in OPERACIONES_LOTE:
+                raise ValueError("operaciones[%d] de %s: %r no es una operación del lote. Admitidas: %s."
+                                 % (i, mxd, op.get("tool") if isinstance(op, dict) else op,
+                                    ", ".join(OPERACIONES_LOTE)))
+        faltan = set()
+        ops = sustituir(ops, vars_.get(clave, {}), mxd, faltan)
+        if faltan:
+            raise ValueError("El plano %s usa %s y no las define en variables_por_mxd."
+                             % (mxd, ", ".join("{%s}" % n for n in sorted(faltan))))
+        for op in ops:
+            if op.get("tool") == "copy_layout_elements":
+                error = _origen_con_ole(op.get("origen"))
+                if error:
+                    raise ValueError("%s: %s" % (mxd, error))
+        planes.append(ops)
+    return planes
+
+
+_LOTE_VALOR_MAX = 400
+
+
+def _recortar_valor_lote(valor):
+    """Un valor de la respuesta de una operación, o su aviso si es largo."""
+    texto = json.dumps(valor, ensure_ascii=False)
+    if len(texto) <= _LOTE_VALOR_MAX:
+        return valor
+    return "(%d caracteres, recortado: está en detalle_completo)" % len(texto)
+
+
+def _resumir_fila_lote(fila):
+    """La fila de un documento sin lo que hace inmanejable la respuesta de un lote: las
+    lecturas de la verificación (la TOC y las leyendas enteras, dos veces) y los valores
+    largos de cada operación. Se quedan los veredictos y las diferencias, que es lo que
+    decide."""
+    f = dict(fila)
+    v = f.get("verificacion")
+    if isinstance(v, dict):
+        v = dict(v)
+        lecturas = v.pop("lecturas", None)
+        if isinstance(lecturas, list):
+            v["lecturas"] = [l.get("lectura") for l in lecturas if isinstance(l, dict)]
+        f["verificacion"] = v
+    ops = f.get("operaciones")
+    if isinstance(ops, list):
+        cortas = []
+        for op in ops:
+            if not isinstance(op, dict):
+                cortas.append(op)
+                continue
+            c = {k: op[k] for k in op if k != "result"}
+            if isinstance(op.get("result"), dict):
+                c["result"] = {k: _recortar_valor_lote(x) for k, x in op["result"].items()}
+            elif "result" in op:
+                c["result"] = _recortar_valor_lote(op["result"])
+            cortas.append(c)
+        f["operaciones"] = cortas
+    return f
+
+
+def _guardar_detalle_lote(r, prefijo="edit_mxd_lote"):
+    """Escribe la respuesta completa de un lote en %TEMP%\\arcmap-mcp-lotes y devuelve la
+    ruta, o None si no se pudo (no es motivo para que el lote falle)."""
+    import tempfile
+    import time
+    try:
+        carpeta = os.path.join(tempfile.gettempdir(), "arcmap-mcp-lotes")
+        os.makedirs(carpeta, exist_ok=True)
+        ruta = os.path.join(carpeta, "%s_%s_%03d_%d.json" % (
+            prefijo, time.strftime("%Y%m%d-%H%M%S"), int(time.time() * 1000) % 1000, os.getpid()))
+        with open(ruta + ".tmp", "w", encoding="utf-8") as fh:
+            json.dump(r, fh, ensure_ascii=False, indent=1)
+        os.replace(ruta + ".tmp", ruta)
+        return ruta
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# Inventario rico y comparación con la plantilla (hueco 14 de la auditoría de scripts,
+# 2026-10-10). Una serie de montes se auditó con scripts propios porque audit_folder solo daba capas,
+# fuentes y rotas. El inventario lo hace arcmap-mcp-disco.exe en modo lectura, con los
+# mismos handlers que la sesión viva: comparar un plano con su plantilla solo es justo si
+# los dos se leen con el mismo lector.
+# --------------------------------------------------------------------------- #
+
+def _inventario_mxd(ruta, timeout=600, corte_sin_cpu=120):
+    """Inventario rico de un .mxd (sin tocarlo), o {"ok": False, "error": ...}."""
+    import shutil
+    import tempfile
+    exe = _disco_exe()
+    if exe is None:
+        return {"ok": False, "error": "No se encuentra arcmap-mcp-disco.exe: instala el .esriaddin de esta versión"
+                                      " (o define ARCMAP_DISCO_EXE)."}
+    carpeta = tempfile.mkdtemp(prefix="arcmap-mcp-inventario_")
+    try:
+        trabajo = os.path.join(carpeta, "trabajo.json")
+        with open(trabajo, "w", encoding="utf-8") as f:
+            json.dump({"mxd": ruta, "inventario": True}, f, ensure_ascii=False)
+        _rc, out, err, corte = _ejecutar_vigilando([exe, trabajo], timeout, corte_sin_cpu)
+        if corte:
+            return {"ok": False, "error": "%s al leer %s" % (corte, ruta)}
+        texto = out.decode("utf-8", "replace").strip()
+        if not texto:
+            return {"ok": False, "error": "sin salida; stderr: %s" % err.decode("utf-8", "replace")[-500:]}
+        return json.loads(texto.splitlines()[-1])
+    except (json.JSONDecodeError, OSError) as exc:
+        return {"ok": False, "error": "no se pudo leer %s: %s" % (ruta, exc)}
+    finally:
+        shutil.rmtree(carpeta, ignore_errors=True)
+
+
+def _resumen_inventario(inv):
+    """Lo que cabe en la respuesta de audit_folder por documento; lo demás va al fichero."""
+    capas = inv.get("capas") or []
+    datos = [c for c in capas if not c.get("grupo")]
+    return {
+        "capas": len(datos),
+        "grupos": len(capas) - len(datos),
+        "clasificadas": sum(1 for c in datos if (c.get("simbologia") or {}).get("renderer") not in (None, "simple")),
+        "etiquetadas": sum(1 for c in datos if c.get("etiquetas")),
+        "con_query": sum(1 for c in datos if c.get("definition_query")),
+        "textos": len(inv.get("textos") or []),
+        "leyendas": len(inv.get("leyendas") or []),
+        "entradas_de_leyenda": sum(len(l.get("entradas") or []) for l in inv.get("leyendas") or []),
+        "lecturas_con_error": sum(1 for c in datos for k in ("simbologia", "etiquetado")
+                                  if "error" in (c.get(k) or {})),
+    }
+
+
+_AMBITOS_COMPARAR = ("general", "capas", "simbologia", "etiquetado", "textos", "leyendas")
+
+
+def _distinto(a, b):
+    return json.dumps(a, sort_keys=True, ensure_ascii=False) != json.dumps(b, sort_keys=True, ensure_ascii=False)
+
+
+def _diferencias_dict(a, b, ignorar=()):
+    """{campo: [plano, referencia]} de los campos que difieren entre dos dicts."""
+    a, b = a or {}, b or {}
+    return {k: [a.get(k), b.get(k)] for k in sorted(set(a) | set(b))
+            if k not in ignorar and _distinto(a.get(k), b.get(k))}
+
+
+def _clave_clase(c, i):
+    if c.get("categoria") is not None:
+        return str(c.get("categoria"))
+    return str(c.get("etiqueta") or "#%d" % (i + 1))
+
+
+def _error_de_lectura(p, r):
+    """Si alguna de las dos lecturas falló: None si fallan igual, o la diferencia."""
+    if not _distinto(p.get("error"), r.get("error")):
+        return None
+    return {"lectura": [p.get("error"), r.get("error")]}
+
+
+def _comparar_simbologia(p, r):
+    """Cambios entre dos lecturas de edit_symbol: renderer, encabezado y clase a clase."""
+    p, r = p or {}, r or {}
+    if "error" in p or "error" in r:
+        return _error_de_lectura(p, r)
+    cambios = _diferencias_dict(p, r, ignorar=("capa", "clases", "aviso", "antes"))
+    cp = {_clave_clase(c, i): c for i, c in enumerate(p.get("clases") or [])}
+    cr = {_clave_clase(c, i): c for i, c in enumerate(r.get("clases") or [])}
+    if set(cp) - set(cr):
+        cambios["clases_solo_en_plano"] = sorted(set(cp) - set(cr))
+    if set(cr) - set(cp):
+        cambios["clases_solo_en_referencia"] = sorted(set(cr) - set(cp))
+    por_clase = {k: _diferencias_dict(cp[k], cr[k]) for k in sorted(set(cp) & set(cr))}
+    por_clase = {k: v for k, v in por_clase.items() if v}
+    if por_clase:
+        cambios["clases"] = por_clase
+    return cambios or None
+
+
+def _comparar_etiquetado(p, r):
+    p, r = p or {}, r or {}
+    if "error" in p or "error" in r:
+        return _error_de_lectura(p, r)
+    cambios = _diferencias_dict(p, r, ignorar=("capa", "clases", "clase_creada", "aviso"))
+    cp = {str(c.get("clase")): c for c in p.get("clases") or []}
+    cr = {str(c.get("clase")): c for c in r.get("clases") or []}
+    if set(cp) ^ set(cr):
+        cambios["clases"] = {"solo_en_plano": sorted(set(cp) - set(cr)),
+                             "solo_en_referencia": sorted(set(cr) - set(cp))}
+    por_clase = {k: _diferencias_dict(cp[k], cr[k]) for k in sorted(set(cp) & set(cr))}
+    por_clase = {k: v for k, v in por_clase.items() if v}
+    if por_clase:
+        cambios["por_clase"] = por_clase
+    return cambios or None
+
+
+def _emparejar_textos(tp, tr, tolerancia):
+    """Parejas (i, j) de textos del layout: por nombre si lo tienen y es único (con su grupo) en
+    los dos; si no, el más cercano por el centro dibujado, a menos de `tolerancia`. Devuelve
+    (parejas, sin_pareja_en_plano, sin_pareja_en_referencia)."""
+    parejas, libres_p, libres_r = [], list(range(len(tp))), list(range(len(tr)))
+
+    def nombre_unico(lista, t):
+        return bool(t.get("nombre")) and sum(1 for x in lista if x.get("nombre") == t.get("nombre")
+                                             and x.get("grupo") == t.get("grupo")) == 1
+
+    for i in list(libres_p):
+        t = tp[i]
+        if not nombre_unico(tp, t):
+            continue
+        j = next((j for j in libres_r if tr[j].get("nombre") == t.get("nombre")
+                  and tr[j].get("grupo") == t.get("grupo") and nombre_unico(tr, tr[j])), None)
+        if j is not None:
+            parejas.append((i, j))
+            libres_p.remove(i)
+            libres_r.remove(j)
+    candidatas = []
+    for i in libres_p:
+        for j in libres_r:
+            a, b = tp[i].get("centro"), tr[j].get("centro")
+            if a and b:
+                d = ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+                if d <= tolerancia:
+                    candidatas.append((d, i, j))
+    for _d, i, j in sorted(candidatas):
+        if i in libres_p and j in libres_r:
+            parejas.append((i, j))
+            libres_p.remove(i)
+            libres_r.remove(j)
+    return parejas, libres_p, libres_r
+
+
+def _comparar_leyenda(a, b):
+    c = {}
+    ea = [e.get("capa") for e in a.get("entradas") or []]
+    eb = [e.get("capa") for e in b.get("entradas") or []]
+    if set(ea) - set(eb):
+        c["entradas_solo_en_plano"] = [e for e in ea if e not in eb]
+    if set(eb) - set(ea):
+        c["entradas_solo_en_referencia"] = [e for e in eb if e not in ea]
+    if [e for e in ea if e in eb] != [e for e in eb if e in ea]:
+        c["orden"] = [ea, eb]
+    interruptores = {}
+    for ent_a in a.get("entradas") or []:
+        ent_b = next((e for e in b.get("entradas") or [] if e.get("capa") == ent_a.get("capa")), None)
+        if ent_b is not None:
+            x = _diferencias_dict(ent_a, ent_b, ignorar=("capa",))
+            if x:
+                interruptores[str(ent_a.get("capa"))] = x
+    if interruptores:
+        c["interruptores"] = interruptores
+    f = _diferencias_dict(a.get("formato"), b.get("formato"))
+    if f:
+        c["formato"] = f
+    c.update(_diferencias_dict({k: a.get(k) for k in ("leyenda", "data_frame", "caja")},
+                               {k: b.get(k) for k in ("leyenda", "data_frame", "caja")}))
+    return c
+
+
+def _comparar_inventarios(plano, ref, ambitos=None, tolerancia_posicion=0.5):
+    """Diferencias entre dos inventarios (los de arcmap-mcp-disco.exe en modo inventario),
+    por ámbito; cada cambio como [plano, referencia]. Vacío = iguales en lo comparado."""
+    ambitos = list(ambitos or _AMBITOS_COMPARAR)
+    dif = {}
+    if "general" in ambitos:
+        g = _diferencias_dict({k: plano.get(k) for k in ("data_frame", "escala")},
+                              {k: ref.get(k) for k in ("data_frame", "escala")})
+        if g:
+            dif["general"] = g
+    cp = {c["ruta"]: c for c in plano.get("capas") or []}
+    cr = {c["ruta"]: c for c in ref.get("capas") or []}
+    comunes = [k for k in cp if k in cr]
+    if "capas" in ambitos:
+        d = {}
+        if set(cp) - set(cr):
+            d["solo_en_plano"] = [k for k in cp if k not in cr]
+        if set(cr) - set(cp):
+            d["solo_en_referencia"] = [k for k in cr if k not in cp]
+        if comunes != [k for k in cr if k in cp]:
+            d["orden_distinto"] = True
+        cambios = {}
+        for k in comunes:
+            c = _diferencias_dict(cp[k], cr[k], ignorar=("ruta", "simbologia", "etiquetado"))
+            if c:
+                cambios[k] = c
+        if cambios:
+            d["cambios"] = cambios
+        if d:
+            dif["capas"] = d
+    for ambito, comparar in (("simbologia", _comparar_simbologia), ("etiquetado", _comparar_etiquetado)):
+        if ambito not in ambitos:
+            continue
+        d = {}
+        for k in comunes:
+            if ambito in cp[k] or ambito in cr[k]:
+                c = comparar(cp[k].get(ambito), cr[k].get(ambito))
+                if c:
+                    d[k] = c
+        if d:
+            dif[ambito] = d
+    if "textos" in ambitos:
+        tp, tr = plano.get("textos") or [], ref.get("textos") or []
+        parejas, solo_p, solo_r = _emparejar_textos(tp, tr, tolerancia_posicion)
+        d = {}
+        cambiados = []
+        for i, j in parejas:
+            c = _diferencias_dict(tp[i], tr[j], ignorar=("centro",))
+            a, b = tp[i].get("centro"), tr[j].get("centro")
+            if a and b and max(abs(a[0] - b[0]), abs(a[1] - b[1])) > 0.05:
+                c["centro"] = [a, b]
+            if c:
+                cambiados.append({"en_referencia": tr[j].get("texto"), "centro": b, "cambios": c})
+        if cambiados:
+            d["cambiados"] = cambiados
+        campos = ("nombre", "grupo", "texto", "centro")
+        if solo_p:
+            d["solo_en_plano"] = [{k: tp[i].get(k) for k in campos} for i in solo_p]
+        if solo_r:
+            d["solo_en_referencia"] = [{k: tr[j].get(k) for k in campos} for j in solo_r]
+        if d:
+            dif["textos"] = d
+    if "leyendas" in ambitos:
+        lp, lr = plano.get("leyendas") or [], ref.get("leyendas") or []
+        d = {}
+        if len(lp) != len(lr):
+            d["numero"] = [len(lp), len(lr)]
+        for n, (a, b) in enumerate(zip(lp, lr), 1):
+            c = _comparar_leyenda(a, b)
+            if c:
+                d["leyenda_%d" % n] = c
+        if d:
+            dif["leyendas"] = d
+    return dif
+
+
+def _contar_diferencias(dif):
+    """Cuántos ELEMENTOS difieren: cada campo general, capa de más o de menos o cambiada, capa
+    con simbología o etiquetado distinto, texto cambiado o sin pareja y leyenda distinta (y el
+    orden de las capas, si cambia). No cuenta los campos de dentro de cada uno."""
+    n = len(dif.get("general") or {})
+    capas = dif.get("capas") or {}
+    n += len(capas.get("solo_en_plano") or []) + len(capas.get("solo_en_referencia") or [])
+    n += len(capas.get("cambios") or {}) + (1 if capas.get("orden_distinto") else 0)
+    n += len(dif.get("simbologia") or {}) + len(dif.get("etiquetado") or {})
+    textos = dif.get("textos") or {}
+    n += sum(len(textos.get(k) or []) for k in ("cambiados", "solo_en_plano", "solo_en_referencia"))
+    leyendas = dif.get("leyendas") or {}
+    n += sum(1 for k in leyendas if k.startswith("leyenda_")) + (1 if "numero" in leyendas else 0)
+    return n
+
+
+@mcp.tool()
+def compare_mxd(mxd: str, referencia: str, ambitos: list = None,
+                tolerancia_posicion: float = 0.5, timeout_por_documento: int = 600) -> dict:
+    """
+    Compara un .mxd con su PLANTILLA (u otro plano de la serie) y dice en qué se separa: lo que
+    se hacía a ojo antes de exportar una serie. No necesita ArcMap ni toca ninguno de los dos:
+    los lee `arcmap-mcp-disco.exe` con los mismos handlers que la sesión viva.
+
+    - `ambitos` (por defecto todos): `general` (data frame activo y escala), `capas` (las del
+      data frame activo por su ruta de grupo: de más, de menos, orden y, por capa, visible,
+      fuente, definition query, etiquetas encendidas y si está rota), `simbologia`
+      (renderer, encabezado y clase a clase: valor, etiqueta, colores, grosor, patrón,
+      trama), `etiquetado` (motor, expresión, fuente, tamaño, Maplex...), `textos` (los del
+      layout, también los agrupados del cajetín) y `leyendas` (entradas, orden,
+      interruptores, formato y caja).
+    - Los textos se emparejan por nombre si lo tienen (único) y, si no, por la posición de
+      lo dibujado, a menos de `tolerancia_posicion` (unidades de página). En una serie los
+      del cajetín CAMBIAN a propósito (título, nº de plano): salen en `textos.cambiados` con
+      el texto de la referencia y lo que cambia.
+    - Un .mxd con marcos OLE y ArcMap abierto no se lee (se quedaría colgado).
+
+    Devuelve `iguales`, `num_diferencias` y `diferencias` por ámbito, cada cambio como
+    `[plano, referencia]`. La lectura completa de los dos va a `detalle_completo`.
+    """
+    ambitos = list(ambitos) if ambitos else list(_AMBITOS_COMPARAR)
+    malos = [a for a in ambitos if a not in _AMBITOS_COMPARAR]
+    if malos:
+        return {"ok": False, "error": "ámbitos desconocidos: %s. Admitidos: %s." % (
+            ", ".join(map(str, malos)), ", ".join(_AMBITOS_COMPARAR))}
+    rutas = []
+    for nombre, valor in (("mxd", mxd), ("referencia", referencia)):
+        ruta = os.path.abspath(os.path.expandvars(str(valor or "")))
+        if not (os.path.isfile(ruta) and ruta.lower().endswith(".mxd")):
+            return {"ok": False, "error": "%s no existe o no es un .mxd: %s" % (nombre, ruta)}
+        n_ole, _e = _mxd_marcos_ole(ruta)
+        if n_ole and _arcmap_en_marcha():
+            return {"ok": False, "error": "%s tiene %d marco(s) OLE y ArcMap está abierto: leerlo desde fuera se"
+                                          " queda colgado. Repite con ArcMap cerrado." % (ruta, n_ole)}
+        rutas.append(ruta)
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        lecturas = list(pool.map(lambda r: _inventario_mxd(r, timeout_por_documento), rutas))
+    for ruta, lec in zip(rutas, lecturas):
+        if not lec.get("ok"):
+            return {"ok": False, "error": "no se pudo leer %s: %s" % (ruta, lec.get("error"))}
+    dif = _comparar_inventarios(lecturas[0]["inventario"], lecturas[1]["inventario"], ambitos,
+                                float(tolerancia_posicion))
+    r = {"ok": True, "mxd": rutas[0], "referencia": rutas[1], "iguales": not dif,
+         "num_diferencias": _contar_diferencias(dif), "diferencias": dif}
+    completo = dict(r, inventarios={"mxd": lecturas[0]["inventario"], "referencia": lecturas[1]["inventario"]})
+    fichero = _guardar_detalle_lote(completo, prefijo="compare_mxd")
+    if fichero:
+        r["detalle_completo"] = fichero
+    return r
 
 
 # --------------------------------------------------------------------------- #

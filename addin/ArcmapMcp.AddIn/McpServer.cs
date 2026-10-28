@@ -472,6 +472,7 @@ namespace ArcmapMcp.AddIn
                 { "get_canvas_screenshot", Handlers.ScreenshotHandler.Run },
                 { "list_layout_elements",  Handlers.LayoutHandlers.ListLayoutElements },
                 { "set_legend_item",       Handlers.LayoutHandlers.SetLegendItem },
+                { "set_legend",            Handlers.LayoutHandlers.SetLegend },
                 { "set_labels",            Handlers.LabelHandlers.SetLabels },
                 { "export_pdf",            Handlers.ExportHandlers.ExportPdf },
                 { "export_jpg",            Handlers.ExportHandlers.ExportJpg },
@@ -482,6 +483,7 @@ namespace ArcmapMcp.AddIn
                 { "set_layer_visibility",  Handlers.MapHandlers.SetLayerVisibility },
                 { "set_definition_query",  Handlers.MapHandlers.SetDefinitionQuery },
                 { "save_mxd",              Handlers.DocumentHandlers.SaveMxd },
+                { "open_mxd",              Handlers.DocumentHandlers.OpenMxd },
                 { "save_mxd_as",           Handlers.DocumentHandlers.SaveMxdAs },
                 // Geoprocesamiento nativo sobre la sesión viva.
                 { "run_geoprocessing",     Handlers.GeoprocessingHandlers.RunGeoprocessing },
@@ -498,6 +500,8 @@ namespace ArcmapMcp.AddIn
                 { "add_group",                  Handlers.LayerHandlers.AddGroup },
                 { "remove_layer",               Handlers.LayerHandlers.RemoveLayer },
                 { "move_layer",                 Handlers.TocHandlers.MoveLayer },
+                { "rename_layer",               Handlers.LayerHandlers.RenameLayer },
+                { "duplicate_layer",            Handlers.LayerHandlers.DuplicateLayer },
                 { "apply_symbology_from_layer", Handlers.LayerHandlers.ApplySymbologyFromLayer },
                 { "set_graduated_symbology",    Handlers.LayerHandlers.SetGraduatedSymbology },
                 { "set_raster_symbology",       Handlers.RasterSymbologyHandlers.SetRasterSymbology },
@@ -513,6 +517,7 @@ namespace ArcmapMcp.AddIn
                 { "describe_data",              Handlers.WorkspaceHandlers.DescribeData },
                 { "list_data_frames",           Handlers.DataFrameHandlers.ListDataFrames },
                 { "set_active_df",              Handlers.DataFrameHandlers.SetActiveDf },
+                { "set_frame_clip",             Handlers.DataFrameHandlers.SetFrameClip },
                 { "get_workspace",              Handlers.WorkspaceHandlers.GetWorkspace },
                 { "set_workspace",              Handlers.WorkspaceHandlers.SetWorkspace },
                 { "list_feature_classes",       Handlers.WorkspaceHandlers.ListFeatureClasses },
@@ -520,6 +525,10 @@ namespace ArcmapMcp.AddIn
                 { "list_rasters",               Handlers.WorkspaceHandlers.ListRasters },
                 { "list_broken_data_sources",   Handlers.SourceHandlers.ListBrokenDataSources },
                 { "repair_data_source",         Handlers.SourceHandlers.RepairDataSource },
+                { "replace_data_source",        Handlers.SourceHandlers.ReplaceDataSource },
+                { "replace_text",               Handlers.LayoutHandlers.ReplaceText },
+                { "save_layer_as_lyr",          Handlers.LayerHandlers.SaveLayerAsLyr },
+                { "copy_layout_elements",       Handlers.CopiaElementosHandlers.CopyLayoutElements },
             };
 
         // Comandos que ArcObjects no cubre (código arcpy arbitrario, Data Driven
@@ -543,11 +552,23 @@ namespace ArcmapMcp.AddIn
                 { "run_geoprocessing_fuera", Handlers.PythonHandlers.GeoprocesoFuera },
             };
 
-        /// <summary>Cuántos comandos entiende el puente. Lo consume la ficha "Acerca de"
+        /// <summary>Comandos del puente que NO son una herramienta: run_geoprocessing_fuera es el modo
+        /// fuera_de_arcmap de run_geoprocessing. Contarlo daba 79 herramientas en «Acerca de» con 78
+        /// reales (revisión del 2026-10-25).</summary>
+        private static readonly System.Collections.Generic.HashSet<string> _comandosInternos =
+            new System.Collections.Generic.HashSet<string> { "run_geoprocessing_fuera" };
+
+        /// <summary>Cuántas herramientas sirve el puente. Lo consume la ficha "Acerca de"
         /// para no tener que mantener el número a mano (estuvo en 48 con 57 tools reales).</summary>
         public static int NumComandos
         {
-            get { return _handlers.Count + _handlersFondo.Count; }
+            get
+            {
+                int n = 0;
+                foreach (string k in _handlers.Keys) if (!_comandosInternos.Contains(k)) n++;
+                foreach (string k in _handlersFondo.Keys) if (!_comandosInternos.Contains(k)) n++;
+                return n;
+            }
         }
 
         // Exports a disco y GP nativos pueden tardar mucho más de 60s (layouts densos,
@@ -557,7 +578,10 @@ namespace ArcmapMcp.AddIn
         // de 60 s con facilidad, y el timeout cortaba con el cálculo ya escribiendo
         // campos en la fuente real.
         private static readonly System.Collections.Generic.HashSet<string> _comandosLargos =
-            new System.Collections.Generic.HashSet<string> { "export_pdf", "export_jpg", "export_view_png", "run_geoprocessing", "calculate_geometry" };
+            new System.Collections.Generic.HashSet<string> { "export_pdf", "export_jpg", "export_view_png", "run_geoprocessing", "calculate_geometry",
+                // El servidor lo espera con el timeout largo de los export (_exportar); aquí el STA
+                // lo cortaba a 60 s (revisión del 2026-10-25).
+                "get_canvas_screenshot" };
         private static readonly TimeSpan LongHandlerTimeout = TimeSpan.FromSeconds(1800);
 
         // save_mxd y save_mxd_as acaban en SaveDocument/SaveAsDocument, la MISMA operación
@@ -566,7 +590,7 @@ namespace ArcmapMcp.AddIn
         // defecto, guardar un documento grande devolvía un timeout mientras ArcMap seguía
         // escribiéndolo: el peor error posible, el que dice que falló algo que sí pasó.
         private static readonly System.Collections.Generic.HashSet<string> _comandosGuardado =
-            new System.Collections.Generic.HashSet<string> { "save_mxd", "save_mxd_as" };
+            new System.Collections.Generic.HashSet<string> { "save_mxd", "save_mxd_as", "open_mxd" };
         private static readonly TimeSpan GuardadoTimeout = TimeSpan.FromSeconds(600);
 
         // Techo de SEGURIDAD para los handlers de fondo. No compite con sus timeouts

@@ -144,6 +144,8 @@ namespace ArcmapMcp.AddIn.Handlers
         /// In-process no hay conflicto y pasar el Layer honra def. query y selección.</summary>
         public static JObject CalculateGeometry(JObject parameters)
         {
+            // 'capa' es alias de 'entrada' en el puente (el servidor MCP solo manda 'entrada'): se deja
+            // por compatibilidad con quien hable al puente directamente.
             string entrada = (string)(parameters["entrada"] ?? parameters["capa"]);
             JToken props = parameters["propiedades"];
             if (string.IsNullOrEmpty(entrada) || props == null || props.Type == JTokenType.Null)

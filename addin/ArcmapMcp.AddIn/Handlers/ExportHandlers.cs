@@ -107,17 +107,61 @@ namespace ArcmapMcp.AddIn.Handlers
                     + " WMS o rásters pesados): espera y repite.", ex);
             }
 
-            try
+            // Con reintentos: un destino en Dropbox o abierto en un visor suelta el
+            // bloqueo en décimas de segundo. El 2026-10-01 (un expediente real) un solo intento
+            // falló y dejó el temporal junto al plano, porque el borrado del temporal
+            // también falló (Dropbox bloquea cada fichero nuevo al sincronizarlo) y
+            // Borrar() se lo calla. Sleep corto y sin DoEvents: ver el E_PENDING arriba.
+            //
+            // El destino viejo NO se borra antes de tener el nuevo en su sitio: se aparta con
+            // un rename, entra el nuevo y solo entonces se borra el apartado. Borrándolo
+            // primero, en SMB o en la unidad de Drive un fichero abierto en un visor queda
+            // «pendiente de borrar»: File.Exists sigue diciendo que está, el código creía
+            // que el viejo seguía ahí y borraba el temporal, y al cerrar el visor se perdían
+            // los dos (revisión del 2026-10-01).
+            Exception ultimo = null;
+            string apartado = null;
+            for (int intento = 0; intento < 4; intento++)
             {
-                if (File.Exists(salida))
-                    File.Delete(salida);
-                File.Move(tmp, salida);
+                if (intento > 0)
+                    System.Threading.Thread.Sleep(250 * intento);
+                try
+                {
+                    if (apartado == null && File.Exists(salida))
+                    {
+                        string destinoApartado = TemporalJuntoA(salida) + ".viejo";
+                        File.Move(salida, destinoApartado);
+                        apartado = destinoApartado;
+                    }
+                    File.Move(tmp, salida);
+                    ultimo = null;
+                    break;
+                }
+                catch (Exception ex) { ultimo = ex; }
             }
-            catch (Exception ex)
+            if (ultimo != null)
             {
-                Borrar(tmp);
+                // El nuevo no entró: el viejo vuelve a su sitio, si se había apartado.
+                if (apartado != null && !File.Exists(salida))
+                {
+                    try { File.Move(apartado, salida); apartado = null; }
+                    catch (Exception exVuelta)
+                    {
+                        // Ni entra el nuevo ni vuelve el viejo: los dos se conservan.
+                        throw new InvalidOperationException("La exportación terminó pero no se pudo escribir "
+                            + salida + " tras 4 intentos (" + ultimo.Message + "), ni devolver a su sitio el"
+                            + " plano anterior (" + exVuelta.Message + "). No se ha borrado nada: el plano NUEVO"
+                            + " está en " + tmp + " y el ANTERIOR en " + apartado + ". Renombra el que quieras"
+                            + " cuando se libere el bloqueo.", ultimo);
+                    }
+                }
+                bool quedaTemporal = !BorrarConReintentos(tmp);
                 throw new InvalidOperationException("La exportación terminó pero no se pudo escribir "
-                    + salida + " (¿abierto en otro programa?): " + ex.Message, ex);
+                    + salida + " tras 4 intentos (¿abierto en otro programa o sincronizándose?): "
+                    + ultimo.Message
+                    + (quedaTemporal
+                        ? ". Tampoco se pudo borrar el temporal, que sigue en " + tmp + ": bórralo a mano."
+                        : ""), ultimo);
             }
 
             // QUÉ se ha exportado. Estas tools exportan SIEMPRE el documento abierto, y
@@ -139,6 +183,11 @@ namespace ArcmapMcp.AddIn.Handlers
                     inner[prop.Key] = prop.Value;
             if (aviso != null)
                 inner["aviso"] = aviso;
+            // El plano nuevo ya está en su sitio: ahora sí se borra el apartado. Si sigue
+            // abierto en un visor, se queda y se dice, en vez de dejarlo huérfano.
+            if (apartado != null && !BorrarConReintentos(apartado))
+                inner["aviso_plano_anterior"] = "El plano nuevo está en su sitio; el anterior no se pudo borrar"
+                    + " (¿abierto en un visor?) y queda en " + apartado + ": bórralo cuando se cierre.";
             return Protocol.Result(inner);
         }
 
@@ -182,6 +231,21 @@ namespace ArcmapMcp.AddIn.Handlers
         {
             try { if (File.Exists(ruta)) File.Delete(ruta); }
             catch { }
+        }
+
+        /// <summary>Como Borrar, pero insiste un poco y dice si lo consiguió: para
+        /// avisar del temporal que queda en vez de dejarlo huérfano en silencio.</summary>
+        private static bool BorrarConReintentos(string ruta)
+        {
+            for (int intento = 0; intento < 4; intento++)
+            {
+                if (intento > 0)
+                    System.Threading.Thread.Sleep(250 * intento);
+                Borrar(ruta);
+                if (!File.Exists(ruta))
+                    return true;
+            }
+            return false;
         }
 
         /// <summary>

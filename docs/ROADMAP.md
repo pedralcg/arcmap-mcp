@@ -7,10 +7,10 @@
 
 Estable. La arquitectura actual —add-in .NET dentro de ArcMap (ArcObjects nativo +
 runner arcpy out-of-process) y servidor FastMCP en Python 3— está validada end-to-end
-en ArcMap 10.5, con **60 herramientas** que incluyen el análisis ambiental (índices
+en ArcMap 10.5, con **78 herramientas** que incluyen el análisis ambiental (índices
 espectrales, hidrología, curvas, perfiles 3D y ruta de mínimo coste) y series de planos
-reales de decenas de páginas. La regresión en sesión viva cubre unas **34** de ellas con
-106 comprobaciones; el resto se ha ejercitado a mano, no automáticamente, y ahí es donde
+reales de decenas de páginas. La regresión en sesión viva cubre **56** de ellas con
+480 comprobaciones; el resto se ha ejercitado a mano, no automáticamente, y ahí es donde
 toca seguir ampliando cobertura.
 
 El servidor es registrable en cinco clientes IA (Claude Code, Claude Desktop, Gemini

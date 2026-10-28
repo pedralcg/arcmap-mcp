@@ -18,7 +18,7 @@ namespace ArcmapMcp.AddIn.Handlers
     /// viendo bien, así que nadie se entera hasta reabrir.
     ///
     /// No depende de la ruta absoluta del dato (aguantó 252 caracteres con el
-    /// .mxd en una carpeta corta), ni del nombre del fichero: el caso de ID2018 que
+    /// .mxd en una carpeta corta), ni del nombre del fichero: el caso de una serie de montes que
     /// lo destapó, con un dato de 224, rompía por lo profundo de la carpeta del .mxd.
     ///
     /// Esto PREDICE. La única comprobación que no miente es reabrir el documento
