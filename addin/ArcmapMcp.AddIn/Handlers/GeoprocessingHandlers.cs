@@ -29,6 +29,24 @@ namespace ArcmapMcp.AddIn.Handlers
                 ? "3d" : moduloArcpy;
         }
 
+        /// <summary>Módulos de arcpy que admiten la forma punteada `modulo.Herramienta`.
+        /// La lista sirve de filtro: sin ella, cualquier cosa con un punto delante se tomaba
+        /// por módulo y una ruta de .tbx acababa partida por el punto de «ArcGIS10.8» (ver
+        /// <see cref="NombreGp"/>).</summary>
+        private static readonly HashSet<string> ModulosArcpy = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "management", "analysis", "sa", "ddd", "cartography", "conversion", "arc", "edit",
+            "geocoding", "ga", "lr", "md", "na", "fabric", "samples", "schematics", "server",
+            "stpm", "stats", "ta", "interop"
+        };
+
+        /// <summary>True si el texto parece una ruta (o un nombre de fichero con unidad), no
+        /// un módulo de arcpy: `C:\tools\mis.tbx\MiModelo`.</summary>
+        private static bool PareceRuta(string texto)
+        {
+            return texto.IndexOf('\\') >= 0 || texto.IndexOf('/') >= 0 || texto.IndexOf(':') >= 0;
+        }
+
         /// <summary>Checkout best-effort de la extensión que el toolbox necesita
         /// (equivalente .NET del checkout de extensiones de arcpy). Si falla,
         /// Execute dará su propio error de licencia y se devuelve tal cual.</summary>
@@ -269,20 +287,33 @@ namespace ArcmapMcp.AddIn.Handlers
         }
 
         /// <summary>Forma punteada estilo arcpy (management.GetCount) → nombre GP
-        /// (GetCount_management); el alias de toolbox sale por <paramref name="alias"/>.</summary>
+        /// (GetCount_management); el alias de toolbox sale por <paramref name="alias"/>.
+        /// Acepta el prefijo opcional `arcpy.` y deja pasar tal cual lo que no es un módulo
+        /// conocido: por ejemplo la ruta de un .tbx propio (`C:\tools\mis.tbx\MiModelo`), que
+        /// el geoprocesador sí sabe ejecutar. Antes se partía por el PRIMER punto, así que una
+        /// ruta con punto (siempre la tiene: `.tbx`) se rompía y ningún modelo ni script tool
+        /// se podía llamar.</summary>
         internal static string NombreGp(string tool, out string alias)
         {
             alias = null;
-            int punto = tool.IndexOf('.');
+            if (string.IsNullOrEmpty(tool)) return tool;
+            string s = tool.Trim();
+            if (s.StartsWith("arcpy.", StringComparison.OrdinalIgnoreCase))
+                s = s.Substring("arcpy.".Length);
+            int punto = s.IndexOf('.');
             if (punto > 0)
             {
-                alias = AliasToolbox(tool.Substring(0, punto));
-                return tool.Substring(punto + 1) + "_" + alias;
+                string cabeza = s.Substring(0, punto);
+                if (!PareceRuta(cabeza) && ModulosArcpy.Contains(cabeza))
+                {
+                    alias = AliasToolbox(cabeza.ToLowerInvariant());
+                    return s.Substring(punto + 1) + "_" + alias;
+                }
             }
-            int guion = tool.LastIndexOf('_');
-            if (guion > 0)
-                alias = tool.Substring(guion + 1);
-            return tool;
+            int guion = s.LastIndexOf('_');
+            if (guion > 0 && !PareceRuta(s))
+                alias = s.Substring(guion + 1);
+            return s;
         }
 
         /// <summary>
@@ -310,6 +341,10 @@ namespace ArcmapMcp.AddIn.Handlers
         /// </summary>
         private static int MaxParametros(IGeoProcessor2 gp, string tool, string nombreGp)
         {
+            // Una herramienta por ruta (modelo o script tool de un .tbx propio) no tiene firma
+            // legible: Usage responde "not found" y aquí se confundiría con una tool que no
+            // existe. Se ejecuta sin comprobar y el geoprocesador dirá lo que sea.
+            if (PareceRuta(nombreGp)) return -1;
             string firma;
             try
             {

@@ -3,6 +3,22 @@
 Formato inspirado en [Keep a Changelog](https://keepachangelog.com/es/); versionado
 [SemVer](https://semver.org/lang/es/).
 
+## [No publicado]
+
+### Corregido
+- **`run_geoprocessing` no podía llamar a un `.tbx` propio** (herramientas de modelo o de script):
+  `NombreGp` partía el nombre por el **primer** punto y tomaba por alias de toolbox cualquier cosa
+  que hubiera delante, así que una ruta como `C:\…\ArcGIS10.8\…\mis.tbx\MiModelo` se convertía en
+  `8\…\MiModelo_C:\workspace\ArcGIS10` y el geoprocesador respondía «No existe la herramienta».
+  Ahora solo se interpreta como `modulo.Herramienta` si el prefijo es un módulo de arcpy conocido
+  (`management`, `analysis`, `sa`, `ddd`, …) y no parece una ruta; lo demás se pasa tal cual.
+  `MaxParametros` tampoco rechaza por firma las herramientas que llegan por ruta.
+  Reproducido el 2026-11-04 (ArcMap 10.8): la misma llamada devolvía
+  `nombre GP '8\Desktop10.8\…\GetCount_C:\workspace\ArcGIS10'`.
+- **`run_geoprocessing` rechazaba el prefijo `arcpy.`** que se copia de cualquier script
+  (`arcpy.management.GetCount` → `management.GetCount_arcpy`, «No existe»). Ahora se acepta y se
+  ignora, como hace arcpy.
+
 ## [2.17.0] - 2026-10-28
 
 La versión de las series de planos. `edit_mxd_lote` edita varios .mxd del disco sin abrirlos en
