@@ -788,6 +788,11 @@ def _tool_arcpy(tool):
     la misma que la via nativa y la que se comprueba con Usage en el add-in.
     Error accionable si no existe: la llamada nativa dice lo mismo."""
     tool = _u(tool or u"").strip()
+    # El prefijo 'arcpy.' que se copia de un script se acepta y se ignora, como en la
+    # via nativa (NombreGp). Las rutas de .tbx no llegan aqui: el add-in las rechaza
+    # antes para la via de fuera.
+    if tool.lower().startswith(u"arcpy."):
+        tool = tool[len(u"arcpy."):]
     if u"." in tool:
         modulo, nombre = tool.split(u".", 1)
     elif u"_" in tool:

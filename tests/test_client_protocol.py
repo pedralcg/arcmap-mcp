@@ -28,6 +28,7 @@ timeout que le pasan a `send`, que es una decisión del servidor y se comprueba 
 cliente espía. El resto es trabajo de una suite end-to-end aparte, con un MXD fijo.
 """
 import ast
+import base64
 import json
 import os
 import re
@@ -2533,6 +2534,103 @@ class TestAuditFolderDetalle(unittest.TestCase):
         self.assertIn("arcmap-mcp-disco.exe", r["aviso_detalle"])
         self.assertNotIn("detalle", r["documentos"][0])
         leer.assert_not_called()
+
+
+class TestAvisoCalculateValue(unittest.TestCase):
+    """CalculateValue ejecuta Python arbitrario dentro de ArcMap: la respuesta lo avisa
+    (decisión de 2026-10-30). Las demás herramientas no traen el aviso."""
+
+    def _con_respuesta(self, respuesta):
+        espia = ClienteEspia()
+        espia.send = lambda ctype, params=None, timeout=None: json.loads(json.dumps(respuesta))
+        original = servidor._client
+        servidor._client = espia
+        self.addCleanup(setattr, servidor, "_client", original)
+
+    def test_las_tres_formas_del_nombre_avisan(self):
+        self._con_respuesta({"ok": True, "result": {"salidas": ["10"]}})
+        for tool in ("management.CalculateValue", "CalculateValue_management", " calculatevalue "):
+            r = servidor.run_geoprocessing(tool, ["2*3+4"])
+            self.assertIn("execute_arcpy", r["result"].get("aviso", ""), tool)
+            self.assertEqual(r["result"]["salidas"], ["10"])
+
+    def test_fuera_de_arcmap_tambien(self):
+        self._con_respuesta({"ok": True, "result": {}})
+        r = servidor.run_geoprocessing("management.CalculateValue", ["1"], fuera_de_arcmap=True)
+        self.assertIn("aviso", r["result"])
+
+    def test_otra_herramienta_no_avisa(self):
+        self._con_respuesta({"ok": True, "result": {}})
+        r = servidor.run_geoprocessing("management.CalculateField", ["c", "f", "1"])
+        self.assertNotIn("aviso", r["result"])
+
+    def test_no_pisa_un_aviso_del_add_in(self):
+        self._con_respuesta({"ok": True, "result": {"aviso": "previo."}})
+        r = servidor.run_geoprocessing("management.CalculateValue", ["1"])
+        self.assertTrue(r["result"]["aviso"].startswith("previo. "))
+
+    def test_un_error_se_devuelve_tal_cual(self):
+        self._con_respuesta({"ok": False, "error": "falló"})
+        r = servidor.run_geoprocessing("management.CalculateValue", ["1/0"])
+        self.assertEqual(r, {"ok": False, "error": "falló"})
+
+    def test_con_prefijo_arcpy_tambien_avisa(self):
+        # Con el prefijo aceptado (PR #10), esta forma corría CalculateValue sin aviso.
+        self._con_respuesta({"ok": True, "result": {}})
+        r = servidor.run_geoprocessing("arcpy.management.CalculateValue", ["1"])
+        self.assertIn("execute_arcpy", r["result"].get("aviso", ""))
+
+
+class TestAvisoToolPorRuta(unittest.TestCase):
+    """Un modelo o script de un .tbx/.pyt propio se llama por ruta (PR #10). Un script tool
+    es Python que corre en ArcMap: la respuesta lo avisa, como con CalculateValue."""
+
+    def _con_respuesta(self, respuesta):
+        espia = ClienteEspia()
+        espia.send = lambda ctype, params=None, timeout=None: json.loads(json.dumps(respuesta))
+        original = servidor._client
+        servidor._client = espia
+        self.addCleanup(setattr, servidor, "_client", original)
+
+    def test_rutas_avisan(self):
+        self._con_respuesta({"ok": True, "result": {}})
+        for tool in (r"C:\tools\mis.tbx\MiModelo", "D:/sig/tools.pyt/MiScript",
+                     r"\\servidor\gis\caja.tbx\Modelo"):
+            r = servidor.run_geoprocessing(tool, [])
+            self.assertIn("origen conocido", r["result"].get("aviso", ""), tool)
+
+    def test_nombres_del_sistema_no_avisan(self):
+        self._con_respuesta({"ok": True, "result": {}})
+        for tool in ("management.GetCount", "arcpy.management.GetCount", "3d.Slope",
+                     "GetCount_management", "mialias.MiModelo"):
+            r = servidor.run_geoprocessing(tool, [])
+            self.assertNotIn("aviso", r["result"], tool)
+
+
+class TestCapturaConAviso(unittest.TestCase):
+    """get_canvas_screenshot con la vista equivocada: el add-in captura la activa y avisa.
+    Devolviendo solo la imagen el aviso se perdía (2026-10-30, un «layout» que era la vista)."""
+
+    PNG = base64.b64encode(b"\x89PNG\r\n\x1a\n").decode("ascii")
+
+    def _con_respuesta(self, result):
+        espia = ClienteEspia()
+        espia.send = lambda ctype, params=None, timeout=None: {"ok": True, "result": result}
+        original = servidor._client
+        servidor._client = espia
+        self.addCleanup(setattr, servidor, "_client", original)
+
+    def test_el_aviso_llega_junto_a_la_imagen(self):
+        self._con_respuesta({"imagen_b64": self.PNG, "modo": "vista",
+                             "aviso": "la vista solicitada ('layout') no es la activa"})
+        r = servidor.get_canvas_screenshot("layout")
+        self.assertIsInstance(r, list)
+        self.assertIsInstance(r[0], servidor.Image)
+        self.assertIn("no es la activa", r[1])
+
+    def test_sin_aviso_solo_la_imagen(self):
+        self._con_respuesta({"imagen_b64": self.PNG, "modo": "vista"})
+        self.assertIsInstance(servidor.get_canvas_screenshot("vista"), servidor.Image)
 
 
 if __name__ == "__main__":

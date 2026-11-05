@@ -996,6 +996,14 @@ def gp_fuera_forma_punteada_y_clasica():
 
 
 @caso
+def gp_fuera_acepta_el_prefijo_arcpy():
+    # PR #10: el prefijo que se copia de un script. Antes se tomaba 'arcpy' por modulo.
+    del LLAMADAS[:]
+    assert _gp(u"arcpy.management.GetCount", [u"a.shp"])["salidas"] == [u"24"]
+    assert LLAMADAS == [("GetCount", u"a.shp")], LLAMADAS
+
+
+@caso
 def gp_fuera_tool_inexistente_lo_dice():
     try:
         _gp(u"management.NoExiste", [u"x"])

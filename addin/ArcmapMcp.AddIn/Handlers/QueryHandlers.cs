@@ -323,12 +323,20 @@ namespace ArcmapMcp.AddIn.Handlers
             IMap map = MapHandlers.FocusMap(out doc);
             ILayer lyr = CapaRequerida(parameters, map);
             int n = ContarFeatures(lyr, where);
-            return Protocol.Result(new JObject
+            // Con selección se cuenta dentro de ella, como en ArcMap; la respuesta lo dice
+            // porque un 1 de 137 sin más parecía el total de la capa (lo midió HeyElowen).
+            IFeatureSelection fsel = lyr as IFeatureSelection;
+            int seleccionadas = fsel != null && fsel.SelectionSet != null ? fsel.SelectionSet.Count : 0;
+            var r = new JObject
             {
                 ["capa"] = lyr.Name,
                 ["where"] = where,
-                ["num"] = n
-            });
+                ["num"] = n,
+                ["sobre_seleccion"] = seleccionadas > 0
+            };
+            if (seleccionadas > 0)
+                r["seleccionadas"] = seleccionadas;
+            return Protocol.Result(r);
         }
 
         public static JObject ListFields(JObject parameters)

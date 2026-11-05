@@ -30,8 +30,10 @@ propios PR.
    esté en verde (squash), y borrar la rama.
 5. **Versiones**: la versión vive en `addin/ArcmapMcp.AddIn/Config.xml` y en el
    `.csproj` (`<Version>`), más su entrada en `CHANGELOG.md`; se suben **por PR**.
-   El tag (`vX.Y.Z`) se crea sobre `main` **después** del merge, nunca en una rama,
-   y el release lleva el zip de `empaquetar.ps1`.
+   El tag (`vX.Y.Z`) se crea sobre `main` **después** del merge, nunca en una rama.
+   El release no lleva adjuntos: el README manda descargar con *Code ▸ Download
+   ZIP*. `empaquetar.ps1` genera ese mismo ZIP en local, para probar la instalación
+   en otro equipo antes de publicar; no es un artefacto del release.
 
 ## Gotchas que ya han costado sesiones
 

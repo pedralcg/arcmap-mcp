@@ -3,6 +3,64 @@
 Formato inspirado en [Keep a Changelog](https://keepachangelog.com/es/); versionado
 [SemVer](https://semver.org/lang/es/).
 
+## [2.18.0] - 2026-11-05
+
+`run_geoprocessing` ya puede llamar a modelos y scripts de un toolbox propio (`.tbx` o `.pyt`) por
+su ruta, y acepta el prefijo `arcpy.` que se copia de cualquier script. Es la aportación de
+@psf412 en el [PR #10](https://github.com/pedralcg/arcmap-mcp/pull/10), terminada y probada en vivo
+sobre ArcMap 10.5. Además: avisos en `set_extent` cuando ArcMap estira la extensión a la proporción
+del marco (el caso del [issue #8](https://github.com/pedralcg/arcmap-mcp/issues/8)), y en
+`count_features` cuando cuenta sobre la selección; la simbología graduada respeta la definition
+query, y `CalculateValue` avisa de que ejecuta Python sin guardas. Sin herramientas nuevas (78).
+
+### Cambiado
+
+- **`set_extent`** devuelve también `extent_pedida` y un `aviso` cuando ArcMap estira un eje más
+  de un 1 % para ajustar la extensión a la proporción del marco de datos (el caso del
+  [issue #8](https://github.com/pedralcg/arcmap-mcp/issues/8): 724686 de ancho pedidos, 1449372
+  obtenidos). Antes la respuesta ya daba la extensión real, pero había que compararla a mano.
+  Vale igual en vivo y en `edit_mxd_lote`, cuya verificación ya aceptaba ese ajuste.
+- **`count_features`** dice si contó sobre la selección (`sobre_seleccion`, `seleccionadas`).
+  Con entidades seleccionadas siempre contó dentro de ellas, pero la documentación decía
+  «sin `where`, el total de la capa»: 1 de 137 se leía como el total.
+- **`run_geoprocessing`** con `management.CalculateValue` avisa en la respuesta: evalúa Python
+  arbitrario dentro de ArcMap, sin las guardas de `execute_arcpy`, y si el código cae se lleva
+  ArcMap con lo no guardado. Sigue funcionando; el riesgo queda documentado.
+
+### Corregido
+
+- **`set_graduated_symbology`** clasificaba con todos los valores de la tabla aunque la capa
+  tuviera definition query: con una query que dejaba 11 de 24 entidades, los cortes iban hasta
+  el máximo de la capa, que no se dibujaba, y tres de cuatro clases quedaban vacías. Ahora el
+  histograma sale de lo que pasa la definition query, como en ArcMap. El docstring, además, se
+  contradecía (recomendaba una definition query que luego ignoraba).
+- **`set_extent`** devolvía error cuando ArcMap seguía dibujando al leer la escala (`E_PENDING`,
+  0x8000000A), aunque la extensión ya estuviera aplicada. Ahora responde con `escala: null` y
+  un aviso.
+- **`get_canvas_screenshot`** pedida en la vista que no está activa captura la activa, y el
+  add-in lo avisaba, pero el servidor devolvía solo la imagen: un «layout» que era la vista de
+  datos pasaba por bueno. Ahora el aviso llega como texto junto a la imagen.
+- **`run_geoprocessing` no podía llamar a un `.tbx` propio** (herramientas de modelo o de script):
+  `NombreGp` partía el nombre por el **primer** punto y tomaba por alias de toolbox cualquier cosa
+  que hubiera delante, así que una ruta como `C:\…\ArcGIS10.8\…\mis.tbx\MiModelo` se convertía en
+  `8\…\MiModelo_C:\workspace\ArcGIS10` y el geoprocesador respondía «No existe la herramienta».
+  Y pasarla tal cual tampoco basta: `IGeoProcessor.Execute` **no ejecuta por ruta** (E_FAIL sin
+  arrancar, medido en 10.5 dentro y fuera de ArcMap). Ahora un nombre con `\`, `/` o `:` se toma
+  por `toolbox.tbx|.pyt\[toolset\]Herramienta`: se añade el toolbox y se llama a
+  `Herramienta_alias`, con la firma comprobada como en las del sistema. Se rechaza **antes de
+  añadirlo** un toolbox cuyo alias ya use otro (una copia con alias `management` dejaba
+  `management.GetCount` en «not unique» para toda la sesión) y uno sin alias cuyo nombre ya exista.
+  Lo que no es ruta se trata como antes (siguen valiendo `3d.Slope` y el alias de un toolbox propio
+  importado). Solo dentro de ArcMap: con `fuera_de_arcmap=True` una ruta da error claro. La
+  respuesta avisa de que un script tool o un `.pyt` es código Python que corre en ArcMap.
+  Reproducido el 2026-11-04 (ArcMap 10.8): la misma llamada devolvía
+  `nombre GP '8\Desktop10.8\…\GetCount_C:\workspace\ArcGIS10'`.
+  Gracias a @psf412 por el informe y el arreglo ([PR #10](https://github.com/pedralcg/arcmap-mcp/pull/10)).
+- **`run_geoprocessing` rechazaba el prefijo `arcpy.`** que se copia de cualquier script
+  (`arcpy.management.GetCount` → `management.GetCount_arcpy`, «No existe»). Ahora se acepta y se
+  ignora, como hace arcpy, en las dos vías. El aviso de `CalculateValue` también reconoce esa
+  forma: sin ello, `arcpy.management.CalculateValue` habría corrido sin aviso.
+
 ## [2.17.0] - 2026-10-28
 
 La versión de las series de planos. `edit_mxd_lote` edita varios .mxd del disco sin abrirlos en

@@ -192,7 +192,7 @@ respetan definition query y selección, igual que la tabla de atributos).
 | `select_by_attribute` | Selección por SQL sobre una capa: `select_by_attribute(capa, where)`. Siempre selección NUEVA (`NEW_SELECTION`); no hay modos ADD/REMOVE/SUBSET. Devuelve el nº seleccionado |
 | `clear_selection` | Limpia la selección |
 | `get_unique_values` | Valores únicos de un campo (iterar planos por categoría). `max_valores` (1000) corta el recorrido y lo dice con `truncado: true` |
-| `count_features` | Conteo (total o con `where`; honra def. query y selección) |
+| `count_features` | Conteo (total o con `where`; honra def. query y selección). Con selección cuenta dentro de ella y lo dice: `sobre_seleccion` y `seleccionadas` |
 | `list_fields` | Campos de capa/tabla (nombre, tipo) |
 | `get_layer_info` | Detalle de una capa: campos, tipo geom, extent, CRS, count |
 | `get_layer_features` | Lee FILAS de atributos (respeta def. query/selección). `limite` entre 1 y 5000; admite campos de una tabla unida |
@@ -230,7 +230,7 @@ respuesta lo avisa y te manda aquí.
 
 | Tool | Qué hace |
 |---|---|
-| `set_graduated_symbology` | Rangos sobre un campo numérico (capas de ENTIDADES), por método o con `cortes` fijos (límites superiores de cada clase). `etiquetas` por clase o `"auto"` (desde los cortes, con coma decimal). Devuelve cortes y etiquetas leídos del renderer |
+| `set_graduated_symbology` | Rangos sobre un campo numérico (capas de ENTIDADES), por método o con `cortes` fijos (límites superiores de cada clase). `etiquetas` por clase o `"auto"` (desde los cortes, con coma decimal). Devuelve cortes y etiquetas leídos del renderer. Clasifica con lo que pasa la definition query (no con la selección) |
 | `set_unique_values_symbology` | Categorías por valores únicos de un campo o de **hasta 3** (`campos`), en capas de ENTIDADES. `clases` explícitas con varios valores por clase, etiqueta y color; `resto` para «todos los demás valores». Devuelve las clases leídas del renderer y los valores que se quedan sin clase |
 | `set_raster_symbology` | RÁSTER: `modo="clasificado"` (2-32 clases, o `cortes` fijos; `etiquetas="auto"`), `"estirado"` (rampa continua), `"unico"` (un color por valor de píxel) o `"rgb"` (composición de color de un multibanda, `bandas=[r, g, b]`; sin estirar en 8 bits) |
 | `apply_symbology_from_layer` | Aplica un `.lyr` plantilla ya preparado |
@@ -351,7 +351,7 @@ el menú de marcadores no se distinguen. La búsqueda por nombre ignora mayúscu
 
 | Tool | Qué hace | Modo |
 |---|---|---|
-| `run_geoprocessing` | Geoproceso por nombre punteado (`analysis.Buffer`, `management.GetCount`, `sa.Slope`…) + params, sin escribir código. Resuelve nombres de capa de la TOC (honra def. query/selección). Una tool inexistente o con parámetros de más da error **antes** de ejecutar | **nativo** — ocupa la interfaz mientras dura. Con `fuera_de_arcmap=True`, **out-of-process**: ArcMap libre, las capas viajan por la ruta de su fuente (con def. query o selección se niega), `anadir_al_mapa` y `sobrescribir` |
+| `run_geoprocessing` | Geoproceso por nombre punteado (`analysis.Buffer`, `management.GetCount`, `sa.Slope`…) + params, sin escribir código. Resuelve nombres de capa de la TOC (honra def. query/selección). Una tool inexistente o con parámetros de más da error **antes** de ejecutar | **nativo** — ocupa la interfaz mientras dura. Con `fuera_de_arcmap=True`, **out-of-process**: ArcMap libre, las capas viajan por la ruta de su fuente (con def. query o selección se niega), `anadir_al_mapa` y `sobrescribir`. `management.CalculateValue` ejecuta Python arbitrario dentro de ArcMap sin las guardas de `execute_arcpy`: funciona, pero la respuesta trae un `aviso`. Acepta el prefijo `arcpy.`. Un modelo o script de un `.tbx`/`.pyt` propio se llama por su **ruta** (`C:\tools\mis.tbx\MiModelo`): solo nativo; el add-in añade el toolbox y llama a `Herramienta_alias` con la firma comprobada. Se rechaza un toolbox cuyo alias ya use otro (p. ej. `management`) y uno sin alias con un nombre repetido. La respuesta trae un `aviso` (un script tool es Python que corre en ArcMap) |
 | `save_mxd` | Guarda el .mxd en su ruta actual. Predice las capas que perderán la ruta relativa (`capas_perderan_ruta`) y, con `verificar` o si predice alguna, **reabre** lo guardado y lista las rotas nuevas | nativo; la verificación, arcpy standalone |
 | `save_mxd_as` | Guarda una copia en otra ruta (absoluta). **`sobrescribir=False` por defecto**: si el destino existe, falla sin tocarlo. Al regenerar una serie de .mxd, pasa `sobrescribir=True`. Predice y verifica las rutas relativas como `save_mxd`, contra la carpeta de destino | nativo |
 | `open_mxd` | Abre otro .mxd en la misma sesión **sin cerrar ArcMap**. Nunca deja que ArcMap pregunte: los cambios pendientes del actual se guardan, se descartan o no se abre (`cambios_sin_guardar`); un .mxd de versión posterior no se abre | nativo |
@@ -382,10 +382,10 @@ el menú de marcadores no se distinguen. La búsqueda por nombre ignora mayúscu
 
 | Tool | Qué hace |
 |---|---|
-| `get_canvas_screenshot` | Captura la vista/layout y la devuelve como **IMAGEN INLINE** — el agente la ve al instante; cancelable con ESC |
+| `get_canvas_screenshot` | Captura la vista/layout y la devuelve como **IMAGEN INLINE** — el agente la ve al instante; cancelable con ESC. Solo captura la vista ACTIVA: si se pide la otra, la imagen llega con un texto de aviso |
 | `list_data_frames` / `set_active_df` | Lista/cambia el data frame activo |
 | `set_frame_clip` | Recorta un data frame a la forma (unión de entidades) de una capa de polígonos, con `where` opcional y capas que se libran del recorte (`excluir`); `quitar=True` lo deja sin recorte. Sin parámetros, el estado. El recorte solo se ve en el export |
-| `set_extent` | Encuadra a coords o al extent de una capa/selección |
+| `set_extent` | Encuadra a coords o al extent de una capa/selección. Devuelve la extensión obtenida y la pedida, y un `aviso` si ArcMap estiró un eje más de un 1 % para ajustarla a la proporción del marco |
 | `describe_data` | Describe un dataset en disco (CRS, tipo, campos) |
 | `get_workspace` / `set_workspace` | Lee/fija el workspace por defecto de los listados (estado del add-in; se restablece al reiniciar ArcMap) |
 | `list_feature_classes` | Feature classes del workspace (incl. datasets) |

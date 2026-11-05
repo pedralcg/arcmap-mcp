@@ -29,6 +29,238 @@ namespace ArcmapMcp.AddIn.Handlers
                 ? "3d" : moduloArcpy;
         }
 
+        /// <summary>True si el texto parece una ruta (o un nombre de fichero con unidad), no
+        /// un módulo de arcpy: `C:\tools\mis.tbx\MiModelo`. Ningún nombre de tool del sistema
+        /// ni alias de toolbox lleva `\`, `/` ni `:`.</summary>
+        internal static bool PareceRuta(string texto)
+        {
+            return texto.IndexOf('\\') >= 0 || texto.IndexOf('/') >= 0 || texto.IndexOf(':') >= 0;
+        }
+
+        /// <summary>Parte `C:\carpeta\mis.tbx\[Toolset\]Herramienta` en la ruta del toolbox
+        /// (.tbx o .pyt) y el nombre de la herramienta (el último tramo: los toolsets solo
+        /// organizan, el nombre es único dentro del toolbox). Devuelve false si no hay un tramo
+        /// .tbx/.pyt seguido de una herramienta. Sin ArcObjects, para probarla sin ArcMap.</summary>
+        internal static bool PartirRutaToolbox(string ruta, out string toolbox, out string herramienta)
+        {
+            toolbox = null;
+            herramienta = null;
+            if (string.IsNullOrEmpty(ruta)) return false;
+            string s = ruta.Trim().TrimEnd('\\', '/');
+            string[] tramos = s.Split('\\', '/');
+            int pos = 0;
+            for (int i = 0; i < tramos.Length - 1; i++)
+            {
+                pos += tramos[i].Length;
+                string t = tramos[i].ToLowerInvariant();
+                if (t.EndsWith(".tbx") || t.EndsWith(".pyt"))
+                {
+                    toolbox = s.Substring(0, pos);
+                    herramienta = tramos[tramos.Length - 1].Trim();
+                    return herramienta.Length > 0 && toolbox.Length > 4;
+                }
+                pos += 1; // el separador
+            }
+            return false;
+        }
+
+        // Alias -> ruta de los toolboxes que ha añadido este add-in. El geoprocesador es uno
+        // por proceso: lo que se añade con AddToolbox lo ven todas las instancias (medido el
+        // 2026-11-05), y acepta dos toolboxes con el MISMO alias sin quejarse. Este registro
+        // es lo que impide que un alias repetido ejecute la herramienta de otro toolbox.
+        private static readonly Dictionary<string, string> ToolboxesPorAlias =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private static readonly HashSet<string> ToolboxesSinAlias =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Herramienta de un .tbx/.pyt propio por su ruta → nombre GP ejecutable. IGeoProcessor
+        /// NO ejecuta por ruta (E_FAIL sin arrancar, medido en 10.5 dentro y fuera de ArcMap, PR
+        /// #10): hay que añadir el toolbox y llamar a `Herramienta_alias`, que además deja leer
+        /// la firma con Usage. Rechaza un alias que ya use OTRO toolbox (el GP los aceptaría los
+        /// dos y podría correr la herramienta equivocada). Sin alias se llama por el nombre a
+        /// secas: si está repetido el GP se niega («not unique») y aquí se explica qué hacer.
+        /// Corre en el hilo de ArcMap.
+        /// </summary>
+        internal static string ResolverToolPorRuta(IGeoProcessor2 gp, string ruta)
+        {
+            string tbx, herramienta;
+            if (!PartirRutaToolbox(ruta, out tbx, out herramienta))
+                throw new ArgumentException("'" + ruta + "' parece una ruta, pero no de una herramienta"
+                    + " de toolbox. Usa 'C:\\carpeta\\mi_toolbox.tbx\\Herramienta' (o .pyt), o la forma"
+                    + " de arcpy 'modulo.Herramienta'.");
+            tbx = System.IO.Path.GetFullPath(tbx);
+            if (!System.IO.File.Exists(tbx))
+                throw new ArgumentException("No existe el toolbox '" + tbx + "'.");
+
+            IGPToolbox toolbox;
+            try
+            {
+                IGPUtilities u = new GPUtilitiesClass();
+                toolbox = (IGPToolbox)u.GetNameObjectFromLocation(tbx).Open();
+            }
+            catch (Exception ex)
+            {
+                throw new ArgumentException("No se pudo abrir el toolbox '" + tbx + "': " + ex.Message);
+            }
+            IGPTool gpTool = null;
+            try { gpTool = toolbox.OpenTool(herramienta); } catch { }
+            if (gpTool == null)
+                throw new ArgumentException("El toolbox '" + tbx + "' no tiene la herramienta '"
+                    + herramienta + "'. Tiene: " + NombresDeTools(toolbox) + ". Va el NOMBRE de la"
+                    + " herramienta, no su etiqueta.");
+            herramienta = gpTool.Name;
+
+            string alias = toolbox.Alias ?? "";
+            if (alias.Length > 0)
+            {
+                string previa;
+                if (ToolboxesPorAlias.TryGetValue(alias, out previa))
+                {
+                    if (!string.Equals(previa, tbx, StringComparison.OrdinalIgnoreCase))
+                        throw new ArgumentException("El alias '" + alias + "' del toolbox '" + tbx
+                            + "' ya lo usa otro toolbox de esta sesión ('" + previa + "'). Con dos"
+                            + " toolboxes del mismo alias el geoprocesador podría ejecutar la"
+                            + " herramienta del otro: cambia el alias en las propiedades del toolbox.");
+                }
+                else
+                {
+                    string otro = ToolboxDeSistemaConAlias(gp, alias, toolbox);
+                    if (otro != null)
+                        throw new ArgumentException("El alias '" + alias + "' del toolbox '" + tbx
+                            + "' es el de '" + otro + "'. Con el mismo alias el geoprocesador podría"
+                            + " ejecutar la herramienta del otro: cambia el alias en las propiedades"
+                            + " del toolbox, o llama a la herramienta del sistema por su nombre"
+                            + " ('" + alias + "." + herramienta + "').");
+                }
+            }
+
+            else if (!ToolboxesSinAlias.Contains(tbx))
+            {
+                // Sin alias la herramienta se llama por el nombre a secas. Si ese nombre ya
+                // existe en la sesión, añadir el toolbox lo dejaría ambiguo para todos («not
+                // unique»): se comprueba ANTES de AddToolbox.
+                string previa = "";
+                try { previa = gp.Usage(herramienta) ?? ""; } catch { }
+                if (previa.IndexOf(" not found", StringComparison.OrdinalIgnoreCase) < 0
+                    || previa.IndexOf("not unique", StringComparison.OrdinalIgnoreCase) >= 0)
+                    throw new ArgumentException("El toolbox '" + tbx + "' no tiene alias y ya hay"
+                        + " una herramienta '" + herramienta + "' en la sesión: añadirlo la dejaría"
+                        + " ambigua. Ponle un alias al toolbox (propiedades del toolbox en ArcCatalog).");
+            }
+
+            gp.AddToolbox(tbx);
+            if (alias.Length > 0)
+                ToolboxesPorAlias[alias] = tbx;
+            else
+                ToolboxesSinAlias.Add(tbx);
+            string nombre = alias.Length > 0 ? herramienta + "_" + alias : herramienta;
+            string firma = "";
+            try { firma = gp.Usage(nombre) ?? ""; } catch { }
+            if (firma.IndexOf("not unique", StringComparison.OrdinalIgnoreCase) >= 0)
+                throw new ArgumentException("Hay otra herramienta '" + nombre + "' en la sesión"
+                    + (alias.Length == 0 ? " y el toolbox '" + tbx + "' no tiene alias" : "")
+                    + ", así que el geoprocesador no sabe cuál ejecutar."
+                    + (alias.Length == 0 ? " Ponle un alias al toolbox (propiedades del toolbox en ArcCatalog)."
+                                         : " Cambia el alias del toolbox."));
+            Log.Info("Herramienta por ruta: '" + ruta + "' -> '" + nombre + "' (toolbox " + tbx + ").");
+            return nombre;
+        }
+
+        private static string NombresDeTools(IGPToolbox toolbox)
+        {
+            var nombres = new List<string>();
+            try
+            {
+                IEnumGPTool ts = toolbox.Tools;
+                ts.Reset();
+                IGPTool t;
+                while ((t = ts.Next()) != null && nombres.Count < 30)
+                    nombres.Add(t.Name);
+            }
+            catch { }
+            return nombres.Count > 0 ? string.Join(", ", nombres) : "(no se pudo listar)";
+        }
+
+        /// <summary>Nombre del toolbox YA cargado que usa este alias, o null. Se decide por
+        /// RUTA, no por nombre: una copia de Data Management Tools.tbx conserva el nombre
+        /// interno «Data Management Tools» y por nombre pasaba por el del sistema (medido el
+        /// 2026-11-05). Añadirla de todos modos deja DOS toolboxes con alias 'management' y
+        /// desde ese momento 'management.GetCount' da «not unique» en toda la sesión: por eso
+        /// se rechaza ANTES de AddToolbox. Solo se admite el alias repetido si el fichero es
+        /// el propio toolbox del sistema (el de la carpeta Toolboxes de la instalación).
+        /// ListToolboxes da "Nombre(alias)".</summary>
+        private static string ToolboxDeSistemaConAlias(IGeoProcessor2 gp, string alias, IGPToolbox toolbox)
+        {
+            if (EsToolboxDeLaInstalacion(toolbox.PathName))
+                return null;
+            string sufijo = "(" + alias + ")";
+            try
+            {
+                IGpEnumList lista = gp.ListToolboxes("*");
+                string x;
+                while (!string.IsNullOrEmpty(x = lista.Next()))
+                    if (x.EndsWith(sufijo, StringComparison.OrdinalIgnoreCase))
+                        return x.Substring(0, x.Length - sufijo.Length);
+            }
+            catch (Exception ex)
+            {
+                // Sin la lista no se puede descartar el choque: mejor negarse que dejar la
+                // sesión con un alias duplicado.
+                throw new ArgumentException("No se pudo comprobar si el alias '" + alias
+                    + "' ya está en uso (ListToolboxes: " + ex.Message + "); no se añade el toolbox.");
+            }
+            return null;
+        }
+
+        /// <summary>True si la ruta está en la carpeta ArcToolbox\Toolboxes de la instalación
+        /// de ArcGIS en uso: es un toolbox del sistema, que ya está cargado.</summary>
+        private static bool EsToolboxDeLaInstalacion(string ruta)
+        {
+            try
+            {
+                string full = System.IO.Path.GetFullPath(ruta ?? "");
+                foreach (string raiz in RaicesInstalacion())
+                {
+                    string dir = System.IO.Path.GetFullPath(System.IO.Path.Combine(raiz, "ArcToolbox", "Toolboxes"))
+                        .TrimEnd('\\') + "\\";
+                    if (full.StartsWith(dir, StringComparison.OrdinalIgnoreCase)
+                        && full.IndexOf('\\', dir.Length) < 0)
+                        return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        /// <summary>Carpeta de la instalación de ArcGIS Desktop: la del ejecutable del proceso
+        /// (".../Desktop10.5/bin/ArcMap.exe", como en MxdVersion) y, si no corre dentro de
+        /// ArcMap, la InstallDir del registro de ESRI.</summary>
+        private static IEnumerable<string> RaicesInstalacion()
+        {
+            string exe = null;
+            try { exe = System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName; } catch { }
+            if (exe != null)
+            {
+                string bin = System.IO.Path.GetDirectoryName(exe);
+                if (string.Equals(System.IO.Path.GetFileName(bin), "bin", StringComparison.OrdinalIgnoreCase))
+                    yield return System.IO.Path.GetDirectoryName(bin);
+            }
+            string version = MxdVersion.VersionArcMapSesion() ?? "10.5";
+            foreach (string clave in new[] { @"SOFTWARE\Wow6432Node\ESRI\Desktop" + version, @"SOFTWARE\ESRI\Desktop" + version })
+            {
+                string dir = null;
+                try
+                {
+                    using (var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(clave))
+                        if (k != null) dir = k.GetValue("InstallDir") as string;
+                }
+                catch { }
+                if (!string.IsNullOrEmpty(dir))
+                    yield return dir;
+            }
+        }
+
         /// <summary>Checkout best-effort de la extensión que el toolbox necesita
         /// (equivalente .NET del checkout de extensiones de arcpy). Si falla,
         /// Execute dará su propio error de licencia y se devuelve tal cual.</summary>
@@ -85,6 +317,12 @@ namespace ArcmapMcp.AddIn.Handlers
             }
 
             IGeoProcessor2 gp = new GeoProcessorClass();
+
+            // Una herramienta de un .tbx/.pyt propio llega por ruta, que Execute no admite:
+            // se añade el toolbox y se pasa a 'Herramienta_alias' (PR #10). Desde aquí sigue
+            // el camino normal, con la comprobación de firma incluida.
+            if (PareceRuta(tool.Trim()))
+                nombreGp = ResolverToolPorRuta(gp, tool.Trim());
 
             // La firma de la tool, antes de nada. Sin esto, un nombre de tool que no
             // existe fallaba en Execute ANTES de arrancar, sin escribir mensajes propios,
@@ -269,20 +507,31 @@ namespace ArcmapMcp.AddIn.Handlers
         }
 
         /// <summary>Forma punteada estilo arcpy (management.GetCount) → nombre GP
-        /// (GetCount_management); el alias de toolbox sale por <paramref name="alias"/>.</summary>
+        /// (GetCount_management); el alias de toolbox sale por <paramref name="alias"/>.
+        /// La ruta de un .tbx propio (`C:\tools\mis.tbx\MiModelo`) pasa TAL CUAL, que el
+        /// geoprocesador sí sabe ejecutar: antes se partía por el PRIMER punto (el de
+        /// «ArcGIS10.8» o el de `.tbx`) y ningún modelo ni script tool se podía llamar
+        /// (PR #10, psf412). Se acepta y se ignora el prefijo `arcpy.`. Todo lo que no es
+        /// ruta se trata exactamente como antes, sin lista de módulos: así siguen valiendo
+        /// `3d.Slope` y el alias de un toolbox propio importado (`mialias.MiModelo`).</summary>
         internal static string NombreGp(string tool, out string alias)
         {
             alias = null;
-            int punto = tool.IndexOf('.');
+            if (string.IsNullOrEmpty(tool)) return tool;
+            string s = tool.Trim();
+            if (PareceRuta(s)) return s;
+            if (s.StartsWith("arcpy.", StringComparison.OrdinalIgnoreCase))
+                s = s.Substring("arcpy.".Length);
+            int punto = s.IndexOf('.');
             if (punto > 0)
             {
-                alias = AliasToolbox(tool.Substring(0, punto));
-                return tool.Substring(punto + 1) + "_" + alias;
+                alias = AliasToolbox(s.Substring(0, punto));
+                return s.Substring(punto + 1) + "_" + alias;
             }
-            int guion = tool.LastIndexOf('_');
+            int guion = s.LastIndexOf('_');
             if (guion > 0)
-                alias = tool.Substring(guion + 1);
-            return tool;
+                alias = s.Substring(guion + 1);
+            return s;
         }
 
         /// <summary>
