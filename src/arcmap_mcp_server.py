@@ -1603,6 +1603,10 @@ def get_canvas_screenshot(modo: str = "vista", dpi: int = 96):
     `modo="vista"` renderiza el data frame activo; `modo="layout"` la página completa.
     `dpi` 96 por defecto (payload pequeño; sube para más detalle). Ideal en bucles de
     QA visual: aplicar un filtro/escala y "ver" el resultado.
+
+    Solo se captura con garantías la vista ACTIVA de ArcMap: si pides la otra, llega la
+    activa y, junto a la imagen, un texto con el aviso. Para el layout estando en vista
+    de datos (o al revés), `export_view_png`, que sí cambia de vista y la restaura.
     """
     # Por _exportar: la captura también llega con E_PENDING (`dibujando: `) si el mapa
     # sigue dibujando, y se reintenta aquí, fuera de ArcMap (ADR-007).
@@ -1610,7 +1614,13 @@ def get_canvas_screenshot(modo: str = "vista", dpi: int = 96):
     if not resp.get("ok"):
         return resp  # error legible (sin puente, etc.)
     data = base64.b64decode(resp["result"]["imagen_b64"])
-    return Image(data=data, format="png")
+    imagen = Image(data=data, format="png")
+    # El add-in avisa cuando captura otra vista que la pedida; devolviendo solo la imagen,
+    # el aviso se perdía y un «layout» que era la vista de datos pasaba por bueno (2026-10-30).
+    aviso = resp["result"].get("aviso")
+    if aviso:
+        return [imagen, "aviso: " + aviso]
+    return imagen
 
 
 # --------------------------------------------------------------------------- #
@@ -1655,8 +1665,11 @@ def get_unique_values(capa: str, campo: str, where: str = None,
 @mcp.tool()
 def count_features(capa: str, where: str = None) -> dict:
     """
-    Cuenta entidades de una capa. Con `where` cuenta las que cumplen el filtro SIN
-    alterar la selección actual; sin `where`, el total de la capa.
+    Cuenta entidades de una capa, siempre dentro de su definition query. Si la capa
+    tiene SELECCIÓN, cuenta dentro de ella (como ArcMap): sin `where`, el número de
+    seleccionadas; con `where`, las seleccionadas que cumplen el filtro. La respuesta
+    trae `sobre_seleccion` (y `seleccionadas`) para que no se tome por el total; para
+    contar la capa entera, `clear_selection` antes. La selección no se altera.
     """
     return _client.send("count_features", {"capa": capa, "where": where})
 
@@ -1911,9 +1924,10 @@ def set_graduated_symbology(capa: str, campo: str, num_clases: int = None,
       2.11.0 el defecto aquí era HSV; pasa `hsv` solo si necesitas reproducir
       exactamente los colores de una serie ya entregada.
 
-    El histograma usa TODOS los valores del campo en la fuente (ignora definition
-    query y selección); para clasificar un subconjunto, fíjalo con una definition
-    query permanente antes. Admite campos de una tabla unida (join).
+    La clasificación sale de las entidades que pasan la definition query de la capa,
+    como en ArcMap (hasta la 2.17.0 usaba la tabla entera); la selección no cuenta. Para
+    clasificar un subconjunto, fíjalo con `set_definition_query` antes. Admite campos de
+    una tabla unida (join).
     """
     params = {"capa": capa, "campo": campo}
     # Solo lo que se pasa: con `cortes`, un num_clases o metodo enviados por defecto
@@ -2655,18 +2669,81 @@ def run_geoprocessing(tool: str, params: list = None,
       dentro.
     Dentro de ArcMap, `anadir_al_mapa` y `sobrescribir` no se usan (manda la
     configuración de geoprocesamiento de ArcMap).
+
+    `management.CalculateValue` evalúa una expresión Python, así que deja ejecutar
+    código arbitrario DENTRO de ArcMap (incluso un script entero con `execfile`). No pasa
+    por ninguna guarda de `execute_arcpy` (copia del documento, rechazo de .mxd con
+    OLE, tiempo máximo): congela ArcMap mientras corre y, si el código cae, cae ArcMap
+    con lo que no esté guardado. Funciona, pero la respuesta lo avisa: si hay una
+    herramienta para lo que se quiere hacer, úsala; si no, `execute_arcpy`.
+
+    Se acepta el prefijo `arcpy.` (`arcpy.management.GetCount`). Un modelo o script de un
+    toolbox propio se llama por su RUTA: `C:\\tools\\mis.tbx\\MiModelo` (también `.pyt`).
+    Solo dentro de ArcMap. El add-in añade el toolbox y llama a `Herramienta_alias` (con la
+    firma comprobada como en las del sistema); un toolbox cuyo alias ya use otro (p. ej.
+    `management`) se rechaza, igual que uno sin alias con un nombre repetido, porque el
+    geoprocesador podría ejecutar la herramienta del otro. La respuesta avisa: un script tool
+    o un `.pyt` es código Python que se ejecuta en ArcMap con las mismas consecuencias que
+    `CalculateValue`. Llama solo a toolboxes de origen conocido.
     """
     if fuera_de_arcmap:
-        return _client.send("run_geoprocessing_fuera",
-                            {"tool": tool, "params": params or [],
-                             "resolver_capas": resolver_capas,
-                             "anadir_al_mapa": anadir_al_mapa,
-                             "sobrescribir": sobrescribir},
-                            timeout=FONDO_TIMEOUT)
-    return _client.send("run_geoprocessing",
-                        {"tool": tool, "params": params or [],
-                         "resolver_capas": resolver_capas},
-                        timeout=GP_TIMEOUT)
+        r = _client.send("run_geoprocessing_fuera",
+                         {"tool": tool, "params": params or [],
+                          "resolver_capas": resolver_capas,
+                          "anadir_al_mapa": anadir_al_mapa,
+                          "sobrescribir": sobrescribir},
+                         timeout=FONDO_TIMEOUT)
+    else:
+        r = _client.send("run_geoprocessing",
+                         {"tool": tool, "params": params or [],
+                          "resolver_capas": resolver_capas},
+                         timeout=GP_TIMEOUT)
+    if _es_calculate_value(tool):
+        _anadir_aviso(r, AVISO_CALCULATE_VALUE)
+    elif _es_tool_por_ruta(tool):
+        _anadir_aviso(r, AVISO_TOOL_POR_RUTA)
+    return r
+
+
+AVISO_CALCULATE_VALUE = (
+    "CalculateValue ejecuta Python dentro de ArcMap sin las guardas de execute_arcpy: "
+    "congela ArcMap mientras corre y, si el código cae, cae ArcMap con lo no guardado. "
+    "Si hay una herramienta para esto, úsala; si no, execute_arcpy.")
+
+AVISO_TOOL_POR_RUTA = (
+    "Herramienta llamada por ruta: si es un script tool o un .pyt, es código Python que "
+    "corre dentro de ArcMap sin las guardas de execute_arcpy. "
+    "Usa solo toolboxes de origen conocido.")
+
+
+def _es_calculate_value(tool) -> bool:
+    """`management.CalculateValue`, `CalculateValue_management` o `CalculateValue`, en
+    cualquier caja y con o sin el prefijo `arcpy.`: las formas que acepta el add-in.
+    Sin quitar el prefijo, `arcpy.management.CalculateValue` corría sin el aviso."""
+    t = (tool or "").strip().lower()
+    if t.startswith("arcpy."):
+        t = t[len("arcpy."):]
+    return t in ("management.calculatevalue", "calculatevalue_management", "calculatevalue")
+
+
+def _es_tool_por_ruta(tool) -> bool:
+    """Misma regla que `PareceRuta` del add-in: ningún nombre de tool del sistema ni alias
+    de toolbox lleva `\\`, `/` ni `:`."""
+    t = (tool or "").strip()
+    return any(c in t for c in "\\/:")
+
+
+def _anadir_aviso(respuesta, aviso: str) -> None:
+    """Añade `aviso` al `result` de una respuesta correcta, sin pisar otro que ya traiga."""
+    if not isinstance(respuesta, dict) or not respuesta.get("ok"):
+        return
+    res = respuesta.get("result")
+    if not isinstance(res, dict):
+        # Sin un `result` de objeto, el aviso va arriba: cambiarle la forma al resultado
+        # rompería a quien lo lea.
+        res = respuesta
+    previo = res.get("aviso")
+    res["aviso"] = aviso if not previo else previo + " " + aviso
 
 
 # --------------------------------------------------------------------------- #
@@ -2744,6 +2821,11 @@ def set_extent(coords: list = None, capa: str = None) -> dict:
     Encuadra el data frame activo a unas coordenadas `[xmin, ymin, xmax, ymax]` (en el
     CRS del data frame) o al extent de una `capa` (el de su selección si la hay; si no,
     el total de la capa). Indica UNO de los dos.
+
+    ArcMap encaja la extensión en la proporción del marco de datos estirando un eje, así que
+    `extent` (la obtenida) puede ser mayor que `extent_pedida`. Si algún eje difiere más de un
+    1 %, viene un `aviso` con las dos medidas: lo pedido queda dentro, pero el encuadre no es
+    exacto. Para que coincida, pide una extensión con la proporción del marco.
     """
     return _client.send("set_extent", {"coords": coords, "capa": capa})
 

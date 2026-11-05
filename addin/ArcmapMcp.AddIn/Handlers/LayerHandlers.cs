@@ -726,9 +726,8 @@ namespace ArcmapMcp.AddIn.Handlers
         /// apply_symbology_from_layer necesita un .lyr plantilla. Aquí se construye
         /// el IClassBreaksRenderer directamente y se aplica in-process.
         ///
-        /// El histograma se calcula sobre TODOS los valores del campo en la fuente
-        /// (BasicTableHistogram no honra definition query ni selección); si necesitas
-        /// clasificar un subconjunto, filtra antes con una definition query permanente.
+        /// El histograma sale de las entidades que pasan la definition query de la capa,
+        /// como clasifica ArcMap; la selección no cuenta (HistogramaVisible).
         /// </summary>
         public static JObject SetGraduatedSymbology(JObject parameters)
         {
@@ -769,14 +768,12 @@ namespace ArcmapMcp.AddIn.Handlers
                 throw new ArgumentException("El campo '" + campo + "' no es numérico (es "
                     + DataAccess.NombreTipoCampo(f.Type) + "); la simbología graduada necesita un campo numérico.");
 
-            // Histograma de los valores del campo → clasificación en cortes.
-            // Se tipa como la coclase (no ITableHistogram) para llamar a GetHistogram
-            // sin arrastrar el tipo IHistogram, que vive en otro ensamblado no referenciado.
-            BasicTableHistogramClass tableHist = new BasicTableHistogramClass();
-            tableHist.Field = campo;
-            tableHist.Table = QueryHandlers.TablaDeCapa(gfl);
+            // Histograma de los valores del campo → clasificación en cortes. Solo con las
+            // entidades que pasan la definition query, como clasifica ArcMap: BasicTableHistogram
+            // leía la tabla entera, y con una query que dejaba 11 de 24 los cortes llegaban a un
+            // máximo que no se dibuja y tres de cuatro clases salían vacías (2026-10-30).
             object dataValues, dataFreq;
-            tableHist.GetHistogram(out dataValues, out dataFreq);
+            HistogramaVisible(gfl, campo, out dataValues, out dataFreq);
 
             double[] cortes;
             double? maximoDatos = null;
@@ -936,6 +933,44 @@ namespace ArcmapMcp.AddIn.Handlers
                 || tipo == esriFieldType.esriFieldTypeInteger
                 || tipo == esriFieldType.esriFieldTypeSingle
                 || tipo == esriFieldType.esriFieldTypeDouble;
+        }
+
+        /// <summary>Valores distintos del campo, ordenados, con su frecuencia: la forma que
+        /// espera IClassifyGEN.Classify. Recorre la display table (vale con joins) filtrada por
+        /// la definition query de la capa; la selección no cuenta, igual que en ArcMap. Los nulos
+        /// no entran.</summary>
+        private static void HistogramaVisible(ILayer capa, string campo, out object valores, out object frecuencias)
+        {
+            ITable tabla = QueryHandlers.TablaDeCapa(capa);
+            IFeatureLayerDefinition def = capa as IFeatureLayerDefinition;
+            string query = def != null ? def.DefinitionExpression : null;
+            IQueryFilter filtro = new QueryFilterClass { SubFields = campo };
+            if (!string.IsNullOrEmpty(query))
+                filtro.WhereClause = query;
+            int idx = tabla.FindField(campo);
+
+            var cuenta = new SortedDictionary<double, int>();
+            ICursor cur = tabla.Search(filtro, true);
+            try
+            {
+                IRow fila;
+                while ((fila = cur.NextRow()) != null)
+                {
+                    object v = fila.get_Value(idx);
+                    if (v == null || v is DBNull)
+                        continue;
+                    double d = Convert.ToDouble(v, CultureInfo.InvariantCulture);
+                    int n;
+                    cuenta.TryGetValue(d, out n);
+                    cuenta[d] = n + 1;
+                }
+            }
+            finally
+            {
+                DataAccess.SoltarCom(cur);
+            }
+            valores = cuenta.Keys.ToArray();
+            frecuencias = cuenta.Values.ToArray();
         }
 
         /// <summary>Método de clasificación arcpy → coclase IClassifyGEN.</summary>

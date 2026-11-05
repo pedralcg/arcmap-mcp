@@ -256,6 +256,22 @@ t("set_graduated_symbology", {"capa": NOMBRE_VEC, "campo": "Superficie", "algori
 t("set_graduated_symbology", {"capa": NOMBRE_VEC, "campo": "Superficie", "color_desde": [255, 0]},
   espera_ok=False, nota="(color mal formado)")
 
+# La clasificacion respeta la definition query (2026-10-30). Con 2.17.0 el histograma leia la tabla
+# entera: con "Superficie < 5000000" el ultimo corte seguia en el maximo de la capa (86,6 millones)
+# y tres de las cuatro clases salian vacias. Debe FALLAR con 2.17.0.
+t("set_definition_query", {"capa": NOMBRE_VEC, "query": "\"Superficie\" < 5000000"})
+r = t("set_graduated_symbology", {"capa": NOMBRE_VEC, "campo": "Superficie", "metodo": "equal_interval",
+                                  "num_clases": 4}, nota="(con definition query)")
+cortes = res(r).get("cortes") or []
+comprobar("graduada: los cortes salen de lo que pasa la definition query",
+          len(cortes) >= 2 and cortes[-1] < 5000000, str(cortes)[:110])
+t("set_definition_query", {"capa": NOMBRE_VEC, "query": ""})
+r = t("set_graduated_symbology", {"capa": NOMBRE_VEC, "campo": "Superficie", "metodo": "equal_interval",
+                                  "num_clases": 4}, nota="(sin definition query, control)")
+cortes = res(r).get("cortes") or []
+comprobar("graduada: sin definition query llega al maximo de la capa",
+          len(cortes) >= 2 and cortes[-1] > 5000000, str(cortes)[:110])
+
 # El bug de la 2.4.3: un parametro invalido NO debe dejar el renderer cambiado.
 t("set_raster_symbology", {"capa": "real_NUEVO.tif", "num_clases": 3})
 t("set_raster_symbology", {"capa": "real_NUEVO.tif", "modo": "estirado", "transparencia": 150},
@@ -1067,7 +1083,16 @@ t("set_definition_query", {"capa": NOMBRE_VEC, "query": ""})
 t("select_by_attribute", {"capa": NOMBRE_VEC, "where": "FID < 3"})
 t("run_geoprocessing_fuera", {"tool": "management.GetCount", "params": [NOMBRE_VEC]},
   espera_ok=False, nota="(capa con seleccion)")
+# count_features con seleccion cuenta dentro de ella y tiene que decirlo (2026-10-30): con 2.17.0
+# la respuesta no trae sobre_seleccion y este bloque FALLA.
+r = (t("count_features", {"capa": NOMBRE_VEC}, nota="(3 seleccionadas)") or {}).get("result") or {}
+comprobar("count_features: con seleccion lo dice",
+          r.get("num") == 3 and r.get("sobre_seleccion") is True and r.get("seleccionadas") == 3, str(r))
 t("clear_selection", {"capa": NOMBRE_VEC})
+# Sin definition query (se quito arriba) la capa tiene sus 24 entidades.
+r = (t("count_features", {"capa": NOMBRE_VEC}, nota="(sin seleccion)") or {}).get("result") or {}
+comprobar("count_features: sin seleccion, el total y sobre_seleccion false",
+          r.get("num") == 24 and r.get("sobre_seleccion") is False and "seleccionadas" not in r, str(r))
 t("remove_layer", {"capa": "buf"})
 
 sys.stdout.write("--- request de mas de 1 MB (2.16.0) ---" + chr(10))
@@ -1741,7 +1766,121 @@ real = real.get("result") if isinstance(real.get("result"), dict) else real
 comprobar("edit_symbol: un color sobre el hueco se dibuja (Style solido leido por ArcObjects)",
           real.get("style") == 0 and real.get("null_color") is False and real.get("rgb") == [255, 0, 0],
           str(real))
+# set_extent avisa cuando ArcMap estira un eje a la proporcion del marco (issue #8: 724686 de
+# ancho pedidos, 1449372 obtenidos). Con 2.17.0 no hay aviso ni extent_pedida: debe FALLAR.
+ex = (resultado_de(t("set_extent", {"capa": "regresion_ext"})) or {}).get("extent") or {}
+if ex:
+    w, h = ex["xmax"] - ex["xmin"], ex["ymax"] - ex["ymin"]
+    misma = [ex["xmin"], ex["ymin"], ex["xmax"], ex["ymax"]]
+    r = resultado_de(t("set_extent", {"coords": misma}, nota="(con la proporcion del marco)")) or {}
+    # Solo el aviso de proporcion: el de escala pendiente (ArcMap aun dibujando) puede salir o no.
+    comprobar("set_extent: con la proporcion del marco no avisa",
+              r.get("extent_pedida") is not None and "proporci" not in (r.get("aviso") or ""), str(r))
+    # El doble de ancho con el mismo alto: ArcMap tiene que estirar el alto para encajarlo.
+    ancha = [ex["xmin"] - w / 2, ex["ymin"], ex["xmax"] + w / 2, ex["ymax"]]
+    r = resultado_de(t("set_extent", {"coords": ancha}, nota="(doble de ancho)")) or {}
+    comprobar("set_extent: estirada al marco avisa del eje",
+              "alto" in (r.get("aviso") or "") and r.get("extent_pedida", {}).get("xmin") == ancha[0],
+              str(r))
+else:
+    comprobar("set_extent: extension de partida", False, "set_extent(capa) sin extent")
 t("remove_layer", {"capa": "regresion_ext"})
+
+sys.stdout.write("--- PR #10: run_geoprocessing con prefijo arcpy. y toolbox por ruta ---" + chr(10))
+# Con 2.17.0 'arcpy.management.GetCount' se leia como modulo 'arcpy' y una ruta de .tbx se partia
+# por su primer punto: las tres llamadas con ok esperado FALLAN con 2.17.0 (control).
+r = resultado_de(t("run_geoprocessing", {"tool": "arcpy.management.GetCount", "params": [NOMBRE_VEC]},
+          nota="(prefijo arcpy.)"))
+comprobar("gp: prefijo arcpy. cuenta las 24", r.get("salidas") == ["24"], str(r)[:110])
+
+# La ruta del toolbox del sistema: el caso exacto del PR (con el punto de 'Desktop10.x').
+TBX_DM = None
+for base in (os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), r"C:\Program Files"):
+    for ver in ("10.8", "10.7", "10.6", "10.5"):
+        cand = os.path.join(base, "ArcGIS", "Desktop" + ver, "ArcToolbox", "Toolboxes",
+                            "Data Management Tools.tbx")
+        if TBX_DM is None and os.path.exists(cand):
+            TBX_DM = cand
+if TBX_DM:
+    r = resultado_de(t("run_geoprocessing", {"tool": TBX_DM + SEP + "GetCount", "params": [NOMBRE_VEC]},
+              nota="(.tbx del sistema por ruta)"))
+    comprobar("gp: GetCount por la ruta del .tbx", r.get("salidas") == ["24"], str(r)[:110])
+else:
+    comprobar("gp: encontrar Data Management Tools.tbx", False, "sin instalacion de ArcGIS Desktop")
+
+# .pyt propios (script tools: Python de verdad). Se escriben aqui para no depender de fixtures.
+# IGeoProcessor NO ejecuta por ruta (E_FAIL, medido 2026-11-05): el add-in añade el toolbox y
+# llama a 'Herramienta_alias'. Con el commit del PR tal cual, estos casos FALLAN (control).
+def escribir_pyt(ruta, alias, clase):
+    with open(ruta, "w", encoding="utf-8") as f:
+        f.write(
+            "# -*- coding: utf-8 -*-\nimport arcpy\n"
+            "class Toolbox(object):\n"
+            "    def __init__(self):\n"
+            "        self.label = 'Regresion PR10'\n        self.alias = '" + alias + "'\n"
+            "        self.tools = [" + clase + "]\n"
+            "class " + clase + "(object):\n"
+            "    def __init__(self):\n"
+            "        self.label = '" + clase + "'\n        self.canRunInBackground = False\n"
+            "    def getParameterInfo(self):\n"
+            "        a = arcpy.Parameter(displayName='Texto', name='texto', datatype='GPString',\n"
+            "                            parameterType='Required', direction='Input')\n"
+            "        b = arcpy.Parameter(displayName='Salida', name='salida', datatype='GPString',\n"
+            "                            parameterType='Derived', direction='Output')\n"
+            "        return [a, b]\n"
+            "    def execute(self, parameters, messages):\n"
+            "        parameters[1].value = parameters[0].valueAsText[::-1]\n")
+
+
+DIR_REG = "C:" + SEP + "temp" + SEP + "arcmap-mcp-regresion" + SEP
+PYT = DIR_REG + "regresion_pr10.pyt"
+escribir_pyt(PYT, "regresionpr10", "Eco")
+r = resultado_de(t("run_geoprocessing", {"tool": PYT + SEP + "Eco", "params": ["hola"], "resolver_capas": False},
+          nota="(.pyt propio por ruta)"))
+comprobar("gp: el script tool del .pyt se ejecuta", "aloh" in json.dumps(r), str(r)[:110])
+# Con la tool resuelta a 'Eco_regresionpr10', la firma se comprueba como en las del sistema.
+r = t("run_geoprocessing", {"tool": PYT + SEP + "Eco", "params": ["a", "b", "c"], "resolver_capas": False},
+      espera_ok=False, nota="(.pyt con parametros de mas)")
+comprobar("gp: el .pyt por ruta comprueba la firma", "admite" in str((r or {}).get("error", "")), str(r)[:110])
+r = t("run_geoprocessing", {"tool": PYT + SEP + "NoExiste", "params": ["a"], "resolver_capas": False},
+      espera_ok=False, nota="(tool que no esta en el .pyt)")
+comprobar("gp: tool inexistente en el .pyt lista las que hay",
+          "Tiene: Eco" in str((r or {}).get("error", "")), str(r)[:110])
+
+# Sin alias se llama por el nombre a secas, que aqui es unico.
+PYT_SIN = DIR_REG + "regresion_pr10_sin_alias.pyt"
+escribir_pyt(PYT_SIN, "", "EcoSinAliasPR10")
+r = resultado_de(t("run_geoprocessing", {"tool": PYT_SIN + SEP + "EcoSinAliasPR10", "params": ["abc"],
+                                         "resolver_capas": False}, nota="(.pyt sin alias)"))
+comprobar("gp: .pyt sin alias se ejecuta", "cba" in json.dumps(r), str(r)[:110])
+
+# Un toolbox propio con el alias de uno del sistema se rechaza ANTES de añadirlo: el GP aceptaria
+# los dos y desde ese momento 'management.GetCount' daria «not unique» en toda la sesion.
+PYT_CHOQUE = DIR_REG + "regresion_pr10_choque.pyt"
+escribir_pyt(PYT_CHOQUE, "management", "GetCount")
+r = t("run_geoprocessing", {"tool": PYT_CHOQUE + SEP + "GetCount", "params": ["x"], "resolver_capas": False},
+      espera_ok=False, nota="(alias 'management' propio: se niega)")
+comprobar("gp: alias del sistema en un toolbox propio se niega",
+          "alias 'management'" in str((r or {}).get("error", "")), str(r)[:110])
+r = resultado_de(t("run_geoprocessing", {"tool": "management.GetCount", "params": [NOMBRE_VEC]},
+          nota="(la sesion sigue sana tras el choque)"))
+comprobar("gp: management.GetCount sigue funcionando tras el choque", r.get("salidas") == ["24"], str(r)[:110])
+
+# Lo que ya funcionaba sigue igual: '3d.' resuelve el nombre (el PR original lo rompia). Con un
+# parametro de mas falla por FIRMA, no por 'No existe': prueba la resolucion sin licencia 3D.
+r = t("run_geoprocessing", {"tool": "3d.Slope", "params": ["a", "b", "c", "d", "e", "f", "g"],
+                            "resolver_capas": False}, espera_ok=False, nota="(3d. resuelve; firma)")
+comprobar("gp: 3d.Slope se reconoce", "admite" in str((r or {}).get("error", "")), str(r)[:110])
+
+# Fuera de ArcMap, una ruta se niega con error claro (sin firma, un parametro de mas tumba el
+# Python de fuera); el prefijo arcpy. si vale.
+r = t("run_geoprocessing_fuera", {"tool": PYT + SEP + "Eco", "params": ["hola"], "resolver_capas": False},
+      espera_ok=False, nota="(ruta fuera: se niega)")
+comprobar("gp fuera: la ruta se niega y dice como", "fuera_de_arcmap=False" in str((r or {}).get("error", "")),
+          str(r)[:110])
+r = resultado_de(t("run_geoprocessing_fuera", {"tool": "arcpy.management.GetCount", "params": [VEC]},
+          nota="(prefijo arcpy. fuera)"))
+comprobar("gp fuera: prefijo arcpy. cuenta las 24", r.get("salidas") == ["24"], str(r)[:110])
 
 sys.stdout.write("--- limpieza ---" + chr(10))
 t("remove_layer", {"capa": "real_NUEVO.tif"})

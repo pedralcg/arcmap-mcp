@@ -486,12 +486,14 @@ namespace ArcmapMcp.AddIn.Handlers
             // (0x8000000A): se activa el layout contra el escritorio, como para medir.
             if (!doc.EnVivo)
                 doc.PantallaLayout();
+            // Lo pedido se copia antes de asignarlo: lo que se compara después es contra esto.
+            double pXMin = ext.XMin, pYMin = ext.YMin, pXMax = ext.XMax, pYMax = ext.YMax;
             IActiveView mapView = (IActiveView)map;
             mapView.Extent = ext;
             doc.Refrescar();
 
             IEnvelope e = mapView.Extent;
-            return Protocol.Result(new JObject
+            var r = new JObject
             {
                 ["extent"] = new JObject
                 {
@@ -500,8 +502,58 @@ namespace ArcmapMcp.AddIn.Handlers
                     ["xmax"] = e.XMax,
                     ["ymax"] = e.YMax
                 },
-                ["escala"] = map.MapScale
-            });
+                ["extent_pedida"] = new JObject
+                {
+                    ["xmin"] = pXMin,
+                    ["ymin"] = pYMin,
+                    ["xmax"] = pXMax,
+                    ["ymax"] = pYMax
+                },
+                ["escala"] = null
+            };
+            var avisos = new List<string>();
+            // Con el mapa aún dibujando, MapScale da E_PENDING (0x8000000A) aunque la extensión
+            // ya esté puesta: antes eso devolvía error de algo que sí se había hecho (regresión
+            // con 12 capas y dos rásteres, 2026-10-30).
+            try { r["escala"] = map.MapScale; }
+            catch (Exception ex)
+            {
+                if (!ExportHandlers.EsPendiente(ex))
+                    throw;
+                // También sale con el data frame sin capas, que no tiene escala.
+                avisos.Add("La extensión está aplicada, pero ArcMap no dio la escala (sigue dibujando,"
+                    + " o el data frame aún no tiene capas): consúltala con get_arcmap_info.");
+            }
+            // ArcMap encaja la extensión en la proporción del marco estirando un eje (issue #8:
+            // 724686 de ancho pedidos, 1449372 obtenidos). No es un error, pero quien encuadra
+            // tiene que saberlo sin comparar a mano.
+            string ejes = EjesEstirados(pXMax - pXMin, pYMax - pYMin, e.Width, e.Height);
+            if (ejes != null)
+                avisos.Add("ArcMap ajusta la extensión a la proporción del marco de datos: " + ejes
+                    + ". Lo pedido queda dentro; para que coincida, cambia el tamaño del marco o pide"
+                    + " una extensión con su misma proporción.");
+            if (avisos.Count > 0)
+                r["aviso"] = string.Join(" ", avisos);
+            return Protocol.Result(r);
+        }
+
+        /// <summary>Qué eje (o ejes) de la extensión obtenida difiere más de un 1 % de la pedida,
+        /// con las dos medidas, o null si ninguno. Un eje pedido de tamaño 0 (una sola entidad
+        /// puntual) no se compara: cualquier encuadre lo estira y no hay nada que avisar.</summary>
+        internal static string EjesEstirados(double anchoPedido, double altoPedido, double ancho, double alto)
+        {
+            var partes = new List<string>();
+            if (anchoPedido > 0 && Math.Abs(ancho - anchoPedido) > 0.01 * anchoPedido)
+                partes.Add("ancho " + Medida(anchoPedido) + " → " + Medida(ancho));
+            if (altoPedido > 0 && Math.Abs(alto - altoPedido) > 0.01 * altoPedido)
+                partes.Add("alto " + Medida(altoPedido) + " → " + Medida(alto));
+            return partes.Count == 0 ? null : string.Join(", ", partes);
+        }
+
+        // Metros sin decimales de más y grados con los que hacen falta; sin notación científica.
+        private static string Medida(double v)
+        {
+            return v.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture);
         }
 
         /// <summary>Extent de la selección de la capa (unión de los envelopes de las

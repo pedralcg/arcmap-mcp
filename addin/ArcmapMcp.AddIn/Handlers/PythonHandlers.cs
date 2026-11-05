@@ -1156,6 +1156,13 @@ namespace ArcmapMcp.AddIn.Handlers
             if (string.IsNullOrEmpty(tool))
                 throw new ArgumentException(
                     "Indica 'tool' (ej. 'management.CopyFeatures' o 'Buffer_analysis').");
+            // Una tool por ruta (.tbx/.pyt propio) no tiene firma comprobable, y fuera de
+            // ArcMap un parámetro de más tumba el Python del runner (violación de acceso,
+            // 2026-09-26). Solo se admite dentro, donde el geoprocesador da su error.
+            if (GeoprocessingHandlers.PareceRuta(tool.Trim()))
+                throw new ArgumentException(
+                    "Una herramienta por ruta (modelo o script de un .tbx/.pyt propio) solo se "
+                    + "ejecuta dentro de ArcMap: repite la llamada con fuera_de_arcmap=False.");
 
             var traducidas = new JObject();
             JArray originales = args;
