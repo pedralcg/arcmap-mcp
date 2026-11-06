@@ -1,5 +1,7 @@
 # arcmap-mcp
 
+[Español](README.md) · [中文（简体）](README.zh-CN.md)
+
 Servidor MCP local para **ArcMap 10.5–10.8** (validado en 10.5). 100% abierto,
 libre y soberano. Permite a un agente IA (Claude Code, Claude Desktop, Gemini CLI,
 Antigravity, OpenCode…) conducir una **sesión viva de ArcMap** — listar capas,
