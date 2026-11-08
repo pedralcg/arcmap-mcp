@@ -1,5 +1,10 @@
 # arcmap-mcp
 
+[Español](README.md) · [中文（简体）](README.zh-CN.md)
+
+> 本文译自 **v2.18.0** 的[西班牙语 README](README.md)，此后的版本可能尚未同步。如有出入，以西班牙语版本为准。
+> *(Traducido de la v2.18.0; en caso de discrepancia, prevalece el README en español.)*
+
 **ArcMap 10.5–10.8** 的本地 MCP 服务器（已在 10.5 上验证）。完全开源、自由、自主可控。
 它让 AI agent（Claude Code、Claude Desktop、Gemini CLI、Antigravity、OpenCode……）能够
 驾驶一个**活着的 ArcMap 会话**——列出图层、执行 arcpy、缩放定位、设置符号系统、导出
