@@ -1,4 +1,4 @@
-<ESRI.Configuration xmlns="http://schemas.esri.com/Desktop/AddIns"
+﻿<ESRI.Configuration xmlns="http://schemas.esri.com/Desktop/AddIns"
                     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
 
   <Name>arcmap-mcp</Name>
@@ -23,23 +23,23 @@
                    autoLoad="true" />
       </Extensions>
 
+      <!-- Las cinco acciones son UN desplegable y no cinco botones: el texto de un
+           Button solo lo lee ArcMap al construir el control, asi que no se puede
+           retraducir sin reiniciar. ComboBox si se rehace con Clear+Add. -->
       <Commands>
-        <Button id="pedralcg_arcmap_mcp_Start"
-                class="StartMcpButton"
-                message="Arranca el puente MCP (socket 127.0.0.1:27179)."
-                caption="Iniciar MCP"
-                tip="Levantar el puente MCP (socket 127.0.0.1:27179)"
-                image="Images/start.png"
-                category="arcmap-mcp"
-                onDemand="false" />
-        <Button id="pedralcg_arcmap_mcp_Stop"
-                class="StopMcpButton"
-                message="Detiene el puente MCP."
-                caption="Detener MCP"
-                tip="Detener el puente MCP"
-                image="Images/stop.png"
-                category="arcmap-mcp"
-                onDemand="false" />
+        <ComboBox id="pedralcg_arcmap_mcp_Acciones"
+                  class="AccionComboBox"
+                  message="Elige la accion que quieres ejecutar sobre el puente MCP."
+                  caption="Acciones"
+                  tip="Acciones del puente MCP: iniciar, detener, estado, reportar, acerca de"
+                  image="Images/start.png"
+                  category="arcmap-mcp"
+                  sizeString="Acciones________"
+                  itemSizeString="Acciones________"
+                  hintText="Acciones"
+                  editable="false"
+                  rows="6"
+                  onDemand="false" />
         <ComboBox id="pedralcg_arcmap_mcp_AutoStart"
                   class="AutoStartComboBox"
                   message="Elige si el puente MCP debe iniciarse solo al abrir ArcMap."
@@ -53,41 +53,27 @@
                   editable="false"
                   rows="2"
                   onDemand="false" />
-        <Button id="pedralcg_arcmap_mcp_Status"
-                class="StatusMcpButton"
-                message="Muestra el estado del puente MCP."
-                caption="Estado MCP"
-                tip="Ver estado del puente (ACTIVO / PARADO) y host:puerto"
-                image="Images/status.png"
-                category="arcmap-mcp"
-                onDemand="false" />
-        <Button id="pedralcg_arcmap_mcp_Report"
-                class="ReportMcpButton"
-                message="Reporta un problema (issue de GitHub o email) con el diagnostico."
-                caption="Reportar"
-                tip="Reportar un problema: abre un issue de GitHub o un email con el diagnostico (sin datos de proyecto)"
-                image="Images/report.png"
-                category="arcmap-mcp"
-                onDemand="false" />
-        <Button id="pedralcg_arcmap_mcp_About"
-                class="AboutMcpButton"
-                message="Informacion del autor de arcmap-mcp."
-                caption="Acerca de"
-                tip="Ficha del autor: Pedro Alcoba Gómez - pedralcg.dev"
-                image="Images/about.png"
-                category="arcmap-mcp"
-                onDemand="false" />
+        <ComboBox id="pedralcg_arcmap_mcp_Language"
+                  class="CambioIdiomaComboBox"
+                  message="Elige el idioma de la interfaz del add-in."
+                  caption="Idioma"
+                  tip="Idioma de la interfaz del add-in (preferencia por usuario)"
+                  image="Images/lang.png"
+                  category="arcmap-mcp"
+                  sizeString="Idioma: Español____"
+                  itemSizeString="Idioma: Español____"
+                  hintText="Idioma"
+                  editable="false"
+                  rows="2"
+                  onDemand="false" />
       </Commands>
 
       <Toolbars>
         <Toolbar id="pedralcg_arcmap_mcp_Toolbar" caption="arcmap-mcp" showInitially="false">
           <Items>
-            <Button refID="pedralcg_arcmap_mcp_Start" separator="false" />
-            <Button refID="pedralcg_arcmap_mcp_Stop" separator="false" />
-            <Button refID="pedralcg_arcmap_mcp_Status" separator="true" />
-            <ComboBox refID="pedralcg_arcmap_mcp_AutoStart" separator="false" />
-            <Button refID="pedralcg_arcmap_mcp_Report" separator="true" />
-            <Button refID="pedralcg_arcmap_mcp_About" separator="false" />
+            <ComboBox refID="pedralcg_arcmap_mcp_Acciones" separator="false" />
+            <ComboBox refID="pedralcg_arcmap_mcp_AutoStart" separator="true" />
+            <ComboBox refID="pedralcg_arcmap_mcp_Language" separator="false" />
           </Items>
         </Toolbar>
       </Toolbars>

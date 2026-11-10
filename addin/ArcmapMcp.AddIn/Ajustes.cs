@@ -16,6 +16,72 @@ namespace ArcmapMcp.AddIn
         private const string ValorUltimaComprobacion = "UltimaComprobacion";
         private const string ValorUltimaVersionVista = "UltimaVersionVista";
         private const string ValorVersionAvisada = "VersionAvisada";
+        private const string ValorIdioma = "Idioma";
+
+        /// <summary>
+        /// Idioma guardado por el usuario ("es" / "zh"), o "" si nunca lo eligió.
+        /// </summary>
+        /// <remarks>
+        /// Devuelve cadena vacía —y no el idioma por defecto— para que el llamador pueda
+        /// distinguir "no hay preferencia" de "la preferencia es español": solo en el
+        /// primer caso tiene sentido deducir el idioma de Windows.
+        /// </remarks>
+        public static string IdiomaGuardado
+        {
+            get
+            {
+                try
+                {
+                    using (RegistryKey k = Registry.CurrentUser.OpenSubKey(Clave))
+                    {
+                        if (k == null) return "";
+                        string v = k.GetValue(ValorIdioma) as string;
+                        return string.IsNullOrEmpty(v) ? "" : IdiomaCfg.Normalizar(v);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log.Error("No se pudo leer la preferencia de idioma", ex);
+                    return "";
+                }
+            }
+        }
+
+        /// <summary>Idioma de la interfaz del add-in: "es" (por defecto) o "zh".</summary>
+        /// <remarks>
+        /// Se guarda por usuario en el registro, igual que el autoarranque: el add-in es
+        /// un proceso compartido por todos los usuarios de la máquina y cada uno debe
+        /// poder leer la barra en su idioma.
+        /// </remarks>
+        public static string Idioma
+        {
+            get
+            {
+                string v = IdiomaGuardado;
+                return string.IsNullOrEmpty(v) ? IdiomaCfg.PorDefecto : v;
+            }
+            set
+            {
+                try
+                {
+                    string norm = IdiomaCfg.Normalizar(value);
+                    using (RegistryKey k = Registry.CurrentUser.CreateSubKey(Clave))
+                        k.SetValue(ValorIdioma, norm, RegistryValueKind.String);
+
+                    // Misma cautela que con el autoarranque: se relee para confirmar que
+                    // quedó escrito de verdad.
+                    string comprobado = Idioma;
+                    Log.Info("Idioma guardado como '" + norm + "' en HKCU\\" + Clave
+                             + " (relectura: '" + comprobado + "')");
+                    if (comprobado != norm)
+                        Log.Error("La preferencia de idioma NO ha persistido en el registro.");
+                }
+                catch (Exception ex)
+                {
+                    Log.Error("No se pudo guardar la preferencia de idioma", ex);
+                }
+            }
+        }
 
         /// <summary>¿Debe levantarse el puente solo al abrir ArcMap? (por defecto, no)</summary>
         public static bool Autoarranque

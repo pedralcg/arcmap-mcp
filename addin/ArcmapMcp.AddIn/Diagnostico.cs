@@ -69,10 +69,10 @@ namespace ArcmapMcp.AddIn
         public static string DescribirActualizacion()
         {
             if (Actualizaciones.HayNueva)
-                return "hay v" + Actualizaciones.UltimaDisponible + " disponible";
+                return IdiomaCfg.T("actualizacion.nueva", Actualizaciones.UltimaDisponible);
             if (!string.IsNullOrEmpty(Actualizaciones.UltimaDisponible))
-                return "al día (última comprobada v" + Actualizaciones.UltimaDisponible + ")";
-            return "sin comprobar todavía";
+                return IdiomaCfg.T("actualizacion.aldia", Actualizaciones.UltimaDisponible);
+            return IdiomaCfg.T("actualizacion.sinComprobar");
         }
 
         /// <summary>Versión real de ArcGIS Desktop desde el registro (best-effort).
