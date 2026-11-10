@@ -1,156 +1,118 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Reflection;
 using System.Windows.Forms;
-using AddInButton = ESRI.ArcGIS.Desktop.AddIns.Button;
 using AddInComboBox = ESRI.ArcGIS.Desktop.AddIns.ComboBox;
 
 namespace ArcmapMcp.AddIn
 {
     /// <summary>
-    /// Botones de la barra "arcmap-mcp": Iniciar se muestra "pulsado" (checked)
-    /// mientras el puente está activo y Detener se deshabilita cuando está parado.
-    /// ArcMap re-consulta ese estado en OnUpdate al refrescar la barra.
+    /// Desplegable único con las cinco acciones del puente MCP.
     /// </summary>
-    public class StartMcpButton : AddInButton
+    /// <remarks>
+    /// <para>
+    /// <b>Por qué un desplegable y no cinco botones.</b> Los botones de add-in no se
+    /// pueden retraducir en caliente: <c>Button.set_Caption</c> solo escribe un campo
+    /// privado (<c>stfld</c>), ArcMap lee ese texto una vez al construir el control y
+    /// después dibuja con lo que guardó. Se comprobó asignando <c>Caption</c> en cada
+    /// <c>OnUpdate</c> sin comparar antes: la pantalla seguía en el idioma de arranque.
+    /// Un desplegable, en cambio, se rehace con <c>Clear</c> + <c>Add</c> y ArcMap sí
+    /// redibuja el ítem seleccionado, así que es la única forma de cumplir "cambiar de
+    /// idioma sin reiniciar ArcMap".
+    /// </para>
+    /// <para>
+    /// El primer ítem es siempre el rótulo ("Acciones" / "操作"): lo que se ve cerrado.
+    /// Al elegir una acción se ejecuta y la selección vuelve al rótulo, de modo que el
+    /// desplegable se comporta como un menú y nunca queda marcado en una acción.
+    /// </para>
+    /// </remarks>
+    public class AccionComboBox : DesplegableTraducible
     {
-        protected override void OnClick()
+        // Textos del add-in original para el rótulo, tomados de config.xml.
+        private readonly string _rotuloOriginal;
+
+        // Índices dentro de la lista: 0 = rótulo, 1..5 = las cinco acciones.
+        private const int IndiceRotulo = 0;
+
+        protected override string ClaveIdioma { get { return "combo.accion"; } }
+
+        public AccionComboBox()
         {
-            McpExtension ext = McpExtension.Instance;
-            if (ext == null)
-            {
-                MessageBox.Show("La extensión MCP no está cargada.", "arcmap-mcp · Error");
-                return;
-            }
-            string error = ext.StartServer();
-            if (error == null)
-            {
-                MessageBox.Show(
-                    "El puente MCP está activo y escuchando en 127.0.0.1:" + McpServer.Port + ".\n"
-                    + "Mantén ArcMap abierto mientras lo utilizas.\n\n"
-                    + "pedralcg.dev",
-                    "arcmap-mcp · Puente iniciado");
-            }
+            _rotuloOriginal = IdiomaCfg.TOriginal("combo.accion.rotulo");
+            Repoblar();
+        }
+
+        /// <summary>
+        /// Textos de la lista en el idioma pedido: rótulo + las cinco acciones.
+        /// </summary>
+        private string[] Textos(Idioma idioma)
+        {
+            List<string> textos = new List<string>(6);
+
+            if (idioma == Idioma.Espanol)
+                textos.Add(_rotuloOriginal);
             else
-            {
-                MessageBox.Show("No se ha podido iniciar el puente:\n" + error,
-                                "arcmap-mcp · Error");
-            }
+                textos.Add(IdiomaCfg.TEn(idioma, "combo.accion.caption"));
+
+            // Iniciar, detener y estado comparten el diccionario con los antiguos
+            // botones; reportar y acerca de tienen su propia clave porque aquí su
+            // rótulo es más corto (no caben en el ancho del desplegable).
+            textos.Add(IdiomaCfg.TEn(idioma, "btn.start.caption"));
+            textos.Add(IdiomaCfg.TEn(idioma, "btn.stop.caption"));
+            textos.Add(IdiomaCfg.TEn(idioma, "btn.status.caption"));
+            textos.Add(IdiomaCfg.TEn(idioma, "combo.accion.report"));
+            textos.Add(IdiomaCfg.TEn(idioma, "combo.accion.about"));
+
+            return textos.ToArray();
         }
 
-        protected override void OnUpdate()
+        protected override string[] TextosEsperados()
         {
-            McpExtension ext = McpExtension.Instance;
-            Enabled = true;
-            Checked = ext != null && ext.IsRunning;
+            return Textos(IdiomaCfg.Actual);
         }
-    }
 
-    public class StopMcpButton : AddInButton
-    {
-        protected override void OnClick()
+        protected override void Repoblar()
         {
-            McpExtension ext = McpExtension.Instance;
-            if (ext == null || !ext.IsRunning)
+            string[] textos = Textos(IdiomaCfg.Actual);
+
+            // Se conserva el índice seleccionado si era válido; el rótulo si no.
+            int indice = IndiceSeleccionado();
+            if (indice < 0 || indice >= textos.Length) indice = IndiceRotulo;
+
+            RepoblarCon(delegate
             {
-                MessageBox.Show("El puente MCP no está cargado; no hay nada que detener.",
-                                "arcmap-mcp · Estado del puente");
+                for (int i = 0; i < textos.Length; i++) AgregarItem(textos[i]);
+            }, indice);
+        }
+
+        protected override void OnSelChange(int cookie)
+        {
+            if (!EsEventoDeUsuario(cookie)) return;
+
+            int indice = IndiceDeCookie(cookie);
+            if (indice <= IndiceRotulo)
+            {
+                // Rótulo elegido a propósito (o eco): no hay nada que ejecutar.
                 return;
             }
-            ext.StopServer();
-            MessageBox.Show("El puente MCP se ha detenido correctamente.",
-                            "arcmap-mcp · Puente detenido");
+
+            AccionesMcp.Accion accion = (AccionesMcp.Accion)(indice - 1);
+
+            // Volver al rótulo ANTES de ejecutar: las acciones abren diálogos modales y,
+            // si la selección siguiera en la acción, al cerrar el diálogo ArcMap
+            // re-dispararía OnSelChange y la ejecutaría otra vez.
+            SeleccionarIndice(IndiceRotulo);
+
+            AccionesMcp.Ejecutar(accion);
         }
 
         protected override void OnUpdate()
         {
-            McpExtension ext = McpExtension.Instance;
-            Enabled = ext != null && ext.IsRunning; // gris hasta que el puente arranque
-        }
-    }
-
-    /// <summary>
-    /// Ficha de diagnóstico: lo que hace falta saber cuando el agente "no llega".
-    /// Ofrece abrir el log directamente, que es el paso siguiente casi siempre.
-    /// </summary>
-    public class StatusMcpButton : AddInButton
-    {
-        protected override void OnClick()
-        {
-            McpExtension ext = McpExtension.Instance;
-            bool run = ext != null && ext.IsRunning;
-            Version v = typeof(StatusMcpButton).Assembly.GetName().Version;
-
-            string texto =
-                "PUENTE\n"
-                + "  Estado:        " + (run ? "ACTIVO, escuchando" : "PARADO") + "\n"
-                + "  Dirección:     127.0.0.1:" + McpServer.Port + "\n"
-                + "  Add-in:        arcmap-mcp " + v.ToString(3) + " (.NET)\n"
-                + "  Actualización: " + Diagnostico.DescribirActualizacion() + "\n"
-                + "  Autoarranque:  " + (Ajustes.Autoarranque ? "SI (se inicia al abrir ArcMap)" : "NO (hay que pulsar Iniciar)") + "\n"
-                + "\nSESIÓN\n"
-                + "  Documento:     " + DescribirDocumento() + "\n"
-                + "  Desde:         " + Estadisticas.Inicio.ToString("HH:mm:ss") + "\n"
-                + "  Peticiones:    " + Estadisticas.Peticiones + "\n"
-                + "  Último:        " + Estadisticas.UltimoComando + "\n"
-                + "  Errores:       " + Estadisticas.Errores + "\n"
-                + "\nENTORNO\n"
-                + "  Python arcpy:  " + DescribirPython27() + "\n"
-                + "  Log:           " + Log.PathInfo + "\n"
-                + "\n¿Abrir el log ahora?";
-
-            if (MessageBox.Show(texto, "arcmap-mcp · Estado del puente",
-                                MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
-            {
-                AbrirLog();
-            }
-        }
-
-        private static string DescribirDocumento()
-        {
-            try
-            {
-                var app = Handlers.ArcSession.App();
-                var doc = app.Document as ESRI.ArcGIS.ArcMapUI.IMxDocument;
-                if (doc == null) return "(sin documento)";
-                string mapa = doc.FocusMap != null ? doc.FocusMap.Name : "?";
-                int capas = doc.FocusMap != null ? doc.FocusMap.LayerCount : 0;
-                return app.Document.Title + "  ·  mapa " + mapa + ", " + capas + " capas";
-            }
-            catch (Exception ex)
-            {
-                return "(no accesible: " + ex.Message + ")";
-            }
-        }
-
-        /// <summary>El MISMO buscador que usa el runner (Python27), no una copia del
-        /// criterio: aquí había otra ruta 10.5 escrita a mano —la tercera del proyecto—
-        /// que informaba de "NO encontrado" con el Python bien instalado en 10.6-10.8.
-        /// Sin enmascarar el perfil, a diferencia del reporte de problemas: esto se ve en
-        /// la propia máquina del usuario y la ruta real es justo lo accionable.
-        /// Sin él no hay execute_arcpy ni DDP.</summary>
-        private static string DescribirPython27()
-        {
-            return Python27.Describir();
-        }
-
-        private static void AbrirLog()
-        {
-            try
-            {
-                if (File.Exists(Log.PathInfo))
-                    Process.Start(new ProcessStartInfo { FileName = Log.PathInfo, UseShellExecute = true });
-                else
-                    MessageBox.Show("Todavía no hay fichero de log en " + Log.PathInfo,
-                                    "arcmap-mcp · Estado del puente");
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show("No se ha podido abrir el log:\n" + ex.Message,
-                                "arcmap-mcp · Estado del puente");
-            }
+            SincronizarIdioma();
+            Enabled = true;
         }
     }
 
@@ -161,38 +123,78 @@ namespace ArcmapMcp.AddIn
     /// Checked se lee mal en la barra. Un desplegable enseña el valor en texto,
     /// siempre visible y sin configurar nada.
     /// </summary>
-    public class AutoStartComboBox : AddInComboBox
+    public class AutoStartComboBox : DesplegableTraducible
     {
-        private const string TextoNo = "Autoarranque: No";
-        private const string TextoSi = "Autoarranque: Sí";
+        // Textos del add-in original en español. Se guardan una vez y se usan siempre
+        // que el idioma activo sea español, para no depender del diccionario.
+        private readonly string _textoNoOriginal;
+        private readonly string _textoSiOriginal;
 
-        private readonly int _cookieNo;
-        private readonly int _cookieSi;
-        private bool _sincronizando;
+        protected override string ClaveIdioma { get { return "combo.auto"; } }
 
         public AutoStartComboBox()
         {
             // La lista es cerrada (editable="false" en Config.xml): solo dos valores.
-            _cookieNo = Add(TextoNo);
-            _cookieSi = Add(TextoSi);
-            SincronizarConPreferencia();
+            _textoNoOriginal = IdiomaCfg.TOriginal("combo.auto.no");
+            _textoSiOriginal = IdiomaCfg.TOriginal("combo.auto.si");
+            Repoblar();
         }
 
-        /// <summary>Refleja en el desplegable lo que dice el registro, sin disparar
-        /// la lógica de OnSelChange (que volvería a escribir la preferencia).</summary>
+        /// <summary>
+        /// Los dos textos del idioma activo, en orden No / Sí. En español salen de
+        /// Config.xml (guardados al construir); en cualquier otro, del diccionario.
+        /// </summary>
+        private string[] Textos(Idioma idioma)
+        {
+            if (idioma == Idioma.Espanol)
+                return new[] { _textoNoOriginal, _textoSiOriginal };
+
+            return new[]
+            {
+                IdiomaCfg.TEn(idioma, "combo.auto.no"),
+                IdiomaCfg.TEn(idioma, "combo.auto.si"),
+            };
+        }
+
+        protected override string[] TextosEsperados()
+        {
+            return Textos(IdiomaCfg.Actual);
+        }
+
+        /// <summary>
+        /// Vacía y repuebla la lista con los textos del idioma activo, dejando seleccionado
+        /// el que dice la preferencia.
+        /// </summary>
+        /// <remarks>
+        /// ComboBox de los add-ins no tiene <c>Update</c>: la única forma de cambiar el
+        /// texto de un ítem es <c>Clear</c> + <c>Add</c>, y por eso las cookies se
+        /// recalculan aquí. El texto visible del control es el del ítem seleccionado.
+        /// </remarks>
+        protected override void Repoblar()
+        {
+            string[] textos = Textos(IdiomaCfg.Actual);
+            int indice = Ajustes.Autoarranque ? 1 : 0;
+            RepoblarCon(delegate
+            {
+                AgregarItem(textos[0]);
+                AgregarItem(textos[1]);
+            }, indice);
+        }
+
+        /// <summary>Refleja en el desplegable lo que dice el registro, sin que el cambio
+        /// de selección se confunda con una elección del usuario.</summary>
         private void SincronizarConPreferencia()
         {
-            _sincronizando = true;
-            try { Select(Ajustes.Autoarranque ? _cookieSi : _cookieNo); }
-            finally { _sincronizando = false; }
+            SeleccionarIndice(Ajustes.Autoarranque ? 1 : 0);
         }
 
         protected override void OnSelChange(int cookie)
         {
-            if (_sincronizando || cookie < 0) return;
+            if (!EsEventoDeUsuario(cookie)) return;
 
-            bool activar = (cookie == _cookieSi);
+            bool activar = IndiceDeCookie(cookie) == 1;
             Ajustes.Autoarranque = activar;
+            Log.Info("Autoarranque cambiado por el usuario a " + (activar ? "SI" : "NO"));
 
             string aviso;
             if (activar)
@@ -200,62 +202,163 @@ namespace ArcmapMcp.AddIn
                 // Coherencia inmediata: si se pide autoarranque, el puente debe estar
                 // ya escuchando en esta sesión, no solo en la siguiente.
                 string error = McpExtension.Instance != null ? McpExtension.Instance.StartServer() : null;
-                aviso =
-                    "Autoarranque ACTIVADO.\n\n"
-                    + "El puente MCP se levantará solo cada vez que abras ArcMap.\n"
-                    + (error == null
-                        ? "En esta sesión ya está escuchando en 127.0.0.1:" + McpServer.Port + "."
-                        : "Aviso: no se ha podido iniciar ahora mismo:\n" + error);
+                aviso = IdiomaCfg.T("auto.activado",
+                    error == null
+                        ? IdiomaCfg.T("auto.activado.ahora", McpServer.Port)
+                        : IdiomaCfg.T("auto.activado.aviso", error));
             }
             else
             {
-                aviso =
-                    "Autoarranque DESACTIVADO.\n\n"
-                    + "A partir de la próxima sesión tendrás que pulsar \"Iniciar MCP\".\n"
-                    + "El puente actual sigue activo hasta que lo detengas.";
+                aviso = IdiomaCfg.T("auto.desactivado", IdiomaCfg.T(ClaveIdioma + ".caption"));
             }
 
             // El MessageBox NO puede mostrarse aquí dentro: al cerrarse un diálogo
             // modal, el ComboBox de ArcMap revierte su selección al primer ítem y
             // vuelve a disparar OnSelChange (con "No"), pisando la preferencia recién
-            // guardada. Se pospone al message pump para que corra cuando el combo ya
-            // ha consolidado su selección, y se mantiene _sincronizando activo para
-            // ignorar cualquier re-disparo espurio que llegue entretanto.
-            _sincronizando = true;
+            // guardada. Se pospone al message pump, cuando el combo ya ha consolidado
+            // su selección, y la reafirmación posterior vuelve a poner el texto que
+            // dice el registro.
             StaDispatcher.Post(delegate
             {
-                try
-                {
-                    MessageBox.Show(aviso, "arcmap-mcp · Autoarranque");
-                    // Reafirma el texto visible acorde al registro, por si el ciclo del
-                    // diálogo intentó revertir la selección.
-                    Select(Ajustes.Autoarranque ? _cookieSi : _cookieNo);
-                }
-                finally { _sincronizando = false; }
+                try { MessageBox.Show(aviso, IdiomaCfg.T("auto.titulo")); }
+                finally { SincronizarConPreferencia(); }
             });
         }
 
         protected override void OnUpdate()
         {
+            SincronizarIdioma();
             Enabled = true;
         }
     }
 
-    public class AboutMcpButton : AddInButton
+    /// <summary>
+    /// Selector de idioma de la interfaz. Igual que el autoarranque, es un desplegable
+    /// y no un botón: el valor actual se ve siempre en texto, sin abrir nada.
+    /// </summary>
+    /// <remarks>
+    /// Al cambiar de idioma se persiste la preferencia y se retraduce toda la barra en
+    /// caliente, sin reiniciar ArcMap. El aviso se pospone al message pump por el mismo
+    /// motivo que en el autoarranque: un diálogo modal abierto desde OnSelChange hace
+    /// que ArcMap revierta la selección del combo y vuelva a disparar el evento.
+    /// </remarks>
+    public class CambioIdiomaComboBox : DesplegableTraducible
     {
-        protected override void OnClick()
+        protected override string ClaveIdioma { get { return "combo.lang"; } }
+
+        public CambioIdiomaComboBox()
         {
-            AboutFicha.Show();
+            Repoblar();
+        }
+
+        /// <summary>
+        /// Texto visible de cada opción: el rótulo sigue al idioma activo, pero el nombre
+        /// del idioma NO se traduce nunca. Un usuario que no entiende el idioma actual
+        /// tiene que poder reconocer el suyo en la lista, y "西班牙语" no le dice nada a
+        /// nadie que hable español: cada nombre va escrito en su propia lengua.
+        /// </summary>
+        /// <remarks>
+        /// Orden fijo: español primero, porque es el idioma original del add-in y el que
+        /// ve quien no ha elegido nada. El índice 1 es el chino, y de ahí que
+        /// <see cref="OnSelChange"/> traduzca índice a idioma en lugar de comparar cookies.
+        /// </remarks>
+        private static string[] Textos(Idioma idioma)
+        {
+            return new[]
+            {
+                IdiomaCfg.TEn(idioma, "combo.lang.es"),
+                IdiomaCfg.TEn(idioma, "combo.lang.zh"),
+            };
+        }
+
+        protected override string[] TextosEsperados()
+        {
+            return Textos(IdiomaCfg.Actual);
+        }
+
+        /// <summary>
+        /// Vacía y repuebla la lista con el rótulo del idioma activo. Los nombres de los
+        /// idiomas se muestran en su propia lengua, que es lo que busca quien no entiende
+        /// la actual; solo cambia el rótulo.
+        /// </summary>
+        protected override void Repoblar()
+        {
+            string[] textos = Textos(IdiomaCfg.Actual);
+            int indice = IdiomaCfg.Actual == Idioma.Chino ? 1 : 0;
+            RepoblarCon(delegate
+            {
+                AgregarItem(textos[0]);
+                AgregarItem(textos[1]);
+            }, indice);
+        }
+
+        protected override void OnSelChange(int cookie)
+        {
+            if (!EsEventoDeUsuario(cookie)) return;
+
+            Idioma nuevo = IndiceDeCookie(cookie) == 1 ? Idioma.Chino : Idioma.Espanol;
+            if (nuevo == IdiomaCfg.Actual)
+            {
+                // Nada que hacer, pero el texto visible debe seguir al idioma activo.
+                SeleccionarIndice(IdiomaCfg.Actual == Idioma.Chino ? 1 : 0);
+                return;
+            }
+
+            // 1. Persistir y activar. La barra se retraduce sola: cada control compara
+            //    en su OnUpdate lo que muestra con lo que debería mostrar y se actualiza.
+            //    Así no hace falta ningún registro de instancias que pueda quedar muerto.
+            Ajustes.Idioma = IdiomaCfg.Codigo(nuevo);
+            IdiomaCfg.Establecer(nuevo);
+            Log.Info("Idioma cambiado por el usuario a '" + IdiomaCfg.Codigo(nuevo) + "'");
+
+            // Fuerza un repintado inmediato para que el cambio se vea al instante:
+            // la API de add-ins no expone Refresh, pero IApplication sí, y es la vía
+            // documentada para que ArcMap vuelva a pedir OnUpdate a cada control.
+            BarraUi.Refrescar();
+
+            // El aviso va en el idioma de DESTINO, no en el que había: es lo que confirma
+            // al usuario que el cambio funcionó.
+            string aviso = IdiomaCfg.AvisoCambioIdioma(nuevo);
+
+            // Mismo aplazamiento que en el autoarranque: ver el comentario de allí.
+            StaDispatcher.Post(delegate
+            {
+                try { MessageBox.Show(aviso, IdiomaCfg.T("lang.titulo")); }
+                finally
+                {
+                    // Reafirma el rótulo en el idioma nuevo; sin esto, si ArcMap revierte
+                    // la selección tras el diálogo, el control mostraría el rótulo viejo
+                    // hasta el siguiente repintado.
+                    SeleccionarIndice(IdiomaCfg.Actual == Idioma.Chino ? 1 : 0);
+                }
+            });
+        }
+
+        protected override void OnUpdate()
+        {
+            SincronizarIdioma();
+            Enabled = true;
         }
     }
 
-    /// <summary>Reporte de problemas: abre el formulario con el diagnóstico y los
-    /// canales (issue de GitHub o email). No adjunta el log automáticamente.</summary>
-    public class ReportMcpButton : AddInButton
+    /// <summary>
+    /// Pide a ArcMap que repinte la interfaz, con lo que vuelve a llamar a OnUpdate de
+    /// cada control y los textos se actualizan sin esperar a que el usuario interactúe.
+    /// </summary>
+    internal static class BarraUi
     {
-        protected override void OnClick()
+        public static void Refrescar()
         {
-            ReportarProblema.Show();
+            try
+            {
+                var app = Handlers.ArcSession.App();
+                if (app != null) app.RefreshWindow();
+            }
+            catch (Exception ex)
+            {
+                // Sin ArcMap vivo no hay nada que repintar: no es un error.
+                Log.Warn("No se pudo refrescar la barra: " + ex.Message);
+            }
         }
     }
 }
