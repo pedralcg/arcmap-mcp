@@ -1,21 +1,35 @@
 ﻿# Construye ArcmapMcp.AddIn (sin Visual Studio) y empaqueta el .esriaddin.
-# Requisitos: dotnet CLI + ArcMap 10.5 instalado (rutas de DLL en el .csproj).
+# Requisitos: dotnet CLI + ArcMap instalado. Por defecto se compila contra 10.5, que es el
+# target declarado en Config.xml; para otra version instalada, sin editar el .csproj:
+#   .\build.ps1 -ArcGISVersion 10.8
 # Estructura del paquete (ZIP plano, el formato que carga el Add-In Manager de 10.x):
 #   config.xml + Images\*.png + Install\ArcmapMcp.AddIn.dll + Install\Newtonsoft.Json.dll
 #   + Install\arcmap-mcp-disco.exe(.config)
+param(
+    [string]$ArcGISVersion = '10.5',
+    [string]$ArcGISDesktopDir = ''
+)
+
 $ErrorActionPreference = 'Stop'
+
+# Las rutas de los ensamblados ESRI salen de estas dos propiedades (ver los .csproj).
+$buildArgs = @('-c', 'Release', ('-p:ArcGISVersion=' + $ArcGISVersion))
+if ($ArcGISDesktopDir) { $buildArgs += ('-p:ArcGISDesktopDir=' + $ArcGISDesktopDir) }
+if (-not $ArcGISDesktopDir) {
+    $ArcGISDesktopDir = "C:\Program Files (x86)\ArcGIS\Desktop$ArcGISVersion"
+}
 
 $root = $PSScriptRoot
 $proj = Join-Path $root 'ArcmapMcp.AddIn'
 $out  = Join-Path $proj 'bin\Release'
 
-dotnet build $proj -c Release
+dotnet build $proj @buildArgs
 if ($LASTEXITCODE -ne 0) { throw 'Build fallido' }
 # El ejecutable del modo disco (edit_mxd_lote, ADR-010) reutiliza los handlers de la DLL
 # y viaja en el mismo paquete, junto a ella: así nunca va desfasado del add-in.
 $disco    = Join-Path $root 'ArcmapMcp.Disco'
 $outDisco = Join-Path $disco 'bin\Release'
-dotnet build $disco -c Release
+dotnet build $disco @buildArgs
 if ($LASTEXITCODE -ne 0) { throw 'Build del modo disco fallido' }
 
 $dist  = Join-Path $root 'dist'
@@ -39,4 +53,4 @@ Rename-Item $zip $addin
 Remove-Item $stage -Recurse -Force
 
 Write-Host "OK -> $addin"
-Write-Host 'Instalar: copiar sobre %USERPROFILE%\Documents\ArcGIS\AddIns\Desktop10.5\{51f4ce63-...}\ con ArcMap CERRADO.'
+Write-Host ('Instalar: copiar sobre %USERPROFILE%\Documents\ArcGIS\AddIns\Desktop' + $ArcGISVersion + '\{51f4ce63-...}\ con ArcMap CERRADO.')

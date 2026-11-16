@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <!-- Modo disco (ADR-010): aplica operaciones a un .mxd con ArcMap sin tocar ese documento,
        con los MISMOS handlers del add-in. Mismo target que el add-in (net45, x86: ArcObjects
@@ -12,6 +12,11 @@
     <AssemblyName>arcmap-mcp-disco</AssemblyName>
     <Version>2.18.0</Version>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+
+    <!-- Version de ArcGIS contra la que se compila; igual que en el add-in. -->
+    <ArcGISVersion Condition="'$(ArcGISVersion)' == ''">10.5</ArcGISVersion>
+    <ArcGISGacVersion>$(ArcGISVersion).0.0</ArcGISGacVersion>
+    <ArcGISGacDir Condition="'$(ArcGISGacDir)' == ''">C:\Windows\Microsoft.NET\assembly\GAC_MSIL</ArcGISGacDir>
   </PropertyGroup>
 
   <ItemGroup>
@@ -25,27 +30,27 @@
 
   <ItemGroup>
     <Reference Include="ESRI.ArcGIS.Version">
-      <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.Version\v4.0_10.5.0.0__8fc3cc631e44ad86\ESRI.ArcGIS.Version.dll</HintPath>
+      <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.Version\v4.0_$(ArcGISGacVersion)__8fc3cc631e44ad86\ESRI.ArcGIS.Version.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="ESRI.ArcGIS.System">
-      <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.System\v4.0_10.5.0.0__8fc3cc631e44ad86\ESRI.ArcGIS.System.dll</HintPath>
+      <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.System\v4.0_$(ArcGISGacVersion)__8fc3cc631e44ad86\ESRI.ArcGIS.System.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="ESRI.ArcGIS.Carto">
-      <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.Carto\v4.0_10.5.0.0__8fc3cc631e44ad86\ESRI.ArcGIS.Carto.dll</HintPath>
+      <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.Carto\v4.0_$(ArcGISGacVersion)__8fc3cc631e44ad86\ESRI.ArcGIS.Carto.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="ESRI.ArcGIS.Geodatabase">
-      <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.Geodatabase\v4.0_10.5.0.0__8fc3cc631e44ad86\ESRI.ArcGIS.Geodatabase.dll</HintPath>
+      <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.Geodatabase\v4.0_$(ArcGISGacVersion)__8fc3cc631e44ad86\ESRI.ArcGIS.Geodatabase.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="ESRI.ArcGIS.Display">
-      <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.Display\v4.0_10.5.0.0__8fc3cc631e44ad86\ESRI.ArcGIS.Display.dll</HintPath>
+      <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.Display\v4.0_$(ArcGISGacVersion)__8fc3cc631e44ad86\ESRI.ArcGIS.Display.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="ESRI.ArcGIS.Geometry">
-      <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.Geometry\v4.0_10.5.0.0__8fc3cc631e44ad86\ESRI.ArcGIS.Geometry.dll</HintPath>
+      <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.Geometry\v4.0_$(ArcGISGacVersion)__8fc3cc631e44ad86\ESRI.ArcGIS.Geometry.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>
