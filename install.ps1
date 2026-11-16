@@ -392,6 +392,72 @@ function Install-Venv {
 <# ArcMap carga el add-in desde el FICHERO .esriaddin que hay en la carpeta del
    GUID, y ademas necesita su contenido extraido al lado. Dejar solo una de las
    dos cosas hace que el add-in no cargue en silencio: por eso se ponen ambas. #>
+<# El exe del modo disco pide los ensamblados ESRI de la version con la que se compilo
+   (10.5 en la release) y en un 10.8 no estan: sin bindingRedirect que apunte a la
+   version instalada, arranca con FileNotFoundException y edit_mxd_lote no abre nada.
+   El paquete trae los redirects de quien lo compilo (o ninguno), asi que aqui se
+   regeneran desde el ArcMap.exe.config de ESTE equipo. Es el respaldo; en runtime el
+   resolver de ArcmapMcp.Disco ya cubre el caso. #>
+function Set-ConfigModoDisco {
+    param([string]$Destino, $ArcMap)
+
+    if (-not (Test-Path (Join-Path $Destino 'arcmap-mcp-disco.exe'))) { return }   # add-in anterior al modo disco
+
+    $instalador = $ArcMap.InstallDir
+    if (-not $instalador) {
+        foreach ($k in @("HKLM:\SOFTWARE\WOW6432Node\ESRI\Desktop$($ArcMap.Version)",
+                         "HKLM:\SOFTWARE\ESRI\Desktop$($ArcMap.Version)")) {
+            if (Test-Path $k) {
+                $instalador = (Get-ItemProperty $k -ErrorAction SilentlyContinue).InstallDir
+                if ($instalador) { break }
+            }
+        }
+    }
+    if (-not $instalador) {
+        Write-Aviso 'No se localiza la carpeta de ArcMap: el modo disco usara los redirects del paquete.'
+        return
+    }
+
+    $arcmapConfig = Join-Path $instalador 'bin\ArcMap.exe.config'
+    if (-not (Test-Path $arcmapConfig)) {
+        Write-Aviso "No existe $arcmapConfig : el modo disco usara los redirects del paquete."
+        return
+    }
+
+    try {
+        $origen  = [xml](Get-Content $arcmapConfig -Raw)
+        $bloques = $origen.SelectNodes('//*[local-name()="dependentAssembly"]')
+        $lineas  = New-Object System.Collections.Generic.List[string]
+        $redirs  = 0
+        $lineas.Add('<?xml version="1.0" encoding="utf-8"?>')
+        $lineas.Add('<!-- Generado por install.ps1 a partir del ArcMap.exe.config de ESTE equipo:')
+        $lineas.Add('     son los bindingRedirect de ESRI que el exe del modo disco necesita. -->')
+        $lineas.Add('<configuration>')
+        $lineas.Add('  <startup>')
+        $lineas.Add('    <supportedRuntime version="v4.0" sku=".NETFramework,Version=v4.5" />')
+        $lineas.Add('  </startup>')
+        $lineas.Add('  <runtime>')
+        $lineas.Add('    <assemblyBinding xmlns="urn:schemas-microsoft-com:asm.v1">')
+        foreach ($b in $bloques) {
+            $identidad = $b.assemblyIdentity
+            $redirect  = $b.bindingRedirect
+            if ($null -eq $identidad -or $null -eq $redirect) { continue }
+            $lineas.Add('      <dependentAssembly>')
+            $lineas.Add(('        <assemblyIdentity name="{0}" publicKeyToken="{1}" culture="{2}" />' -f $identidad.name, $identidad.publicKeyToken, $identidad.culture))
+            $lineas.Add(('        <bindingRedirect oldVersion="{0}" newVersion="{1}" />' -f $redirect.oldVersion, $redirect.newVersion))
+            $lineas.Add('      </dependentAssembly>')
+            $redirs++
+        }
+        $lineas.Add('    </assemblyBinding>')
+        $lineas.Add('  </runtime>')
+        $lineas.Add('</configuration>')
+        Set-Content -Path (Join-Path $Destino 'arcmap-mcp-disco.exe.config') -Value $lineas -Encoding UTF8
+        Write-Ok "config del modo disco: $redirs bindingRedirect desde $arcmapConfig"
+    }
+    catch {
+        Write-Aviso "No se pudo generar el config del modo disco: $($_.Exception.Message)"
+    }
+}
 function Install-AddIn {
     param($ArcMap)
 
@@ -433,6 +499,9 @@ function Install-AddIn {
     Remove-Item $tmpZip -Force
     # Un add-in marcado como "procedente de internet" no carga y ArcMap no lo explica.
     Get-ChildItem $destino -Recurse -File | Unblock-File -ErrorAction SilentlyContinue
+
+    # El config del modo disco se regenera aqui, con los redirects de este equipo.
+    Set-ConfigModoDisco -Destino (Join-Path $destino 'Install') -ArcMap $ArcMap
 
     Write-Ok "Add-in $(Get-AddInVersion) instalado en $destino"
     # La barra NO se muestra sola: el add-in declara showInitially="false" desde la

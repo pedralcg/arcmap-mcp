@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Text;
 using ArcmapMcp.AddIn;
 using ArcmapMcp.AddIn.Handlers;
@@ -69,6 +70,23 @@ namespace ArcmapMcp.Disco
 
         [STAThread]
         private static int Main(string[] args)
+        {
+            // El exe se compila contra UNA version de ArcGIS, pero quien lo ejecuta puede
+            // tener otra: con el paquete compilado en 10.5 sobre un 10.8, la peticion de
+            // ESRI.ArcGIS.System, 10.5.0.0 no la resuelve nadie (el .exe.config lleva los
+            // redirects de quien compilo, no los del equipo). El gancho se registra AQUI,
+            // en un metodo que no toca tipos ESRI: si se registrara dentro de uno que ya
+            // los usa, el JIT pediria los ensamblados antes de que exista el gancho.
+            AppDomain.CurrentDomain.AssemblyResolve += ResolutorEsri.Resolver;
+            return Arrancar(args);
+        }
+
+        /// <summary>
+        /// Cuerpo real del programa, aparte para que el JIT no lo compile (ni pida los
+        /// ensamblados ESRI) antes de que Main haya puesto el gancho.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static int Arrancar(string[] args)
         {
             Console.OutputEncoding = new UTF8Encoding(false);
             JObject salida;
