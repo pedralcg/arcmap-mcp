@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 
@@ -129,47 +129,40 @@ namespace ArcmapMcp.AddIn
             // --- Barra de herramientas: botones ---
             { "btn.start.caption",     new[] { "Iniciar MCP",     "启动 MCP" } },
             { "btn.start.tip",         new[] { "Levantar el puente MCP (socket 127.0.0.1:27179)", "启动 MCP 桥（socket 127.0.0.1:27179）" } },
-            { "btn.start.msg",         new[] { "Arranca el puente MCP (socket 127.0.0.1:27179).", "启动 MCP 桥（socket 127.0.0.1:27179）。" } },
 
             { "btn.stop.caption",      new[] { "Detener MCP",     "停止 MCP" } },
             { "btn.stop.tip",          new[] { "Detener el puente MCP", "停止 MCP 桥" } },
-            { "btn.stop.msg",          new[] { "Detiene el puente MCP.", "停止 MCP 桥。" } },
 
             { "btn.status.caption",    new[] { "Estado MCP",      "MCP 状态" } },
             { "btn.status.tip",        new[] { "Ver estado del puente (ACTIVO / PARADO) y host:puerto", "查看桥状态（运行中 / 已停止）与 host:port" } },
-            { "btn.status.msg",        new[] { "Muestra el estado del puente MCP.", "显示 MCP 桥状态。" } },
 
             { "btn.report.caption",    new[] { "Reportar",        "反馈问题" } },
             { "btn.report.tip",        new[] { "Reportar un problema: abre un issue de GitHub o un email con el diagnostico (sin datos de proyecto)", "反馈问题：打开 GitHub issue 或邮件，附带诊断信息（不含项目数据）" } },
-            { "btn.report.msg",        new[] { "Reporta un problema (issue de GitHub o email) con el diagnostico.", "反馈问题（GitHub issue 或邮件），附带诊断信息。" } },
 
             { "btn.about.caption",     new[] { "Acerca de",       "关于" } },
             { "btn.about.tip",         new[] { "Ficha del autor: Pedro Alcoba Gómez - pedralcg.dev", "作者信息：Pedro Alcoba Gómez - pedralcg.dev" } },
-            { "btn.about.msg",         new[] { "Informacion del autor de arcmap-mcp.", "arcmap-mcp 作者信息。" } },
 
             // --- Barra de herramientas: desplegables ---
             // El desplegable de acciones sustituye a los cinco botones: es el único
             // control cuyo texto ArcMap vuelve a leer tras Clear+Add, y por tanto el
             // único que puede cambiar de idioma sin reiniciar.
-            { "combo.accion.caption",  new[] { "Acciones",        "操作" } },
-            // Rótulo original, tal cual lo trae config.xml. Se guarda aparte porque en
-            // español el desplegable debe mostrar EXACTAMENTE eso, no una copia.
-            { "combo.accion.rotulo",   new[] { "Acciones",        "操作" } },
+            { "combo.accion.activo",   new[] { "Acciones: puente activo", "操作：桥运行中" } },
+            // Rótulo cerrado con el estado del puente: es lo que se ve sin desplegar.
+            { "combo.accion.parado",   new[] { "Acciones: parado", "操作：已停止" } },
+
             { "combo.accion.tip",      new[] { "Acciones del puente MCP: iniciar, detener, estado, reportar, acerca de", "MCP 桥操作：启动、停止、状态、反馈、关于" } },
-            { "combo.accion.msg",      new[] { "Elige la acción que quieres ejecutar sobre el puente MCP.", "选择要对 MCP 桥执行的操作。" } },
+
             { "combo.accion.report",   new[] { "Reportar",        "反馈问题" } },
             { "combo.accion.about",    new[] { "Acerca de",       "关于" } },
 
             { "combo.auto.caption",    new[] { "Autoarranque",    "自动启动" } },
             { "combo.auto.tip",        new[] { "Iniciar el puente automaticamente al abrir ArcMap (preferencia por usuario)", "打开 ArcMap 时自动启动桥（按用户保存的偏好）" } },
-            { "combo.auto.msg",        new[] { "Elige si el puente MCP debe iniciarse solo al abrir ArcMap.", "选择是否在打开 ArcMap 时自动启动 MCP 桥。" } },
             { "combo.auto.no",         new[] { "Autoarranque: No", "自动启动：关" } },
             { "combo.auto.si",         new[] { "Autoarranque: Sí", "自动启动：开" } },
             { "combo.auto.hint",       new[] { "Autoarranque",    "自动启动" } },
 
             { "combo.lang.caption",    new[] { "Idioma",          "语言" } },
             { "combo.lang.tip",        new[] { "Idioma de la interfaz del add-in (preferencia por usuario)", "add-in 界面语言（按用户保存的偏好）" } },
-            { "combo.lang.msg",        new[] { "Elige el idioma de la interfaz del add-in.", "选择 add-in 界面语言。" } },
             // Los nombres de idioma NO se traducen entre sí: cada uno va en su propia
             // lengua, para que quien no entiende el idioma actual reconozca el suyo.
             { "combo.lang.es",         new[] { "Idioma: Español",  "语言：Español" } },

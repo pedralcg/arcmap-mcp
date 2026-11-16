@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
@@ -43,11 +43,6 @@ namespace ArcmapMcp.AddIn
             "btn.start", "btn.stop", "btn.status", "btn.report", "btn.about",
         };
 
-        /// <summary>¿Esta acción debe verse deshabilitada con el puente parado?</summary>
-        public static bool SoloConPuente(Accion accion)
-        {
-            return accion == Accion.Detener;
-        }
 
         /// <summary>¿El puente está escuchando ahora mismo?</summary>
         public static bool PuenteActivo()

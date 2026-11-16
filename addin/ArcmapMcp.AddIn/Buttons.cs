@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -10,7 +10,7 @@ using AddInComboBox = ESRI.ArcGIS.Desktop.AddIns.ComboBox;
 namespace ArcmapMcp.AddIn
 {
     /// <summary>
-    /// Desplegable único con las cinco acciones del puente MCP.
+    /// Desplegable único con las acciones del puente MCP.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -24,49 +24,70 @@ namespace ArcmapMcp.AddIn
     /// idioma sin reiniciar ArcMap".
     /// </para>
     /// <para>
-    /// El primer ítem es siempre el rótulo ("Acciones" / "操作"): lo que se ve cerrado.
+    /// El primer ítem es siempre el rótulo, y lleva el estado del puente ("Acciones:
+    /// puente activo" / "Acciones: parado"): es lo que se ve con el desplegable cerrado.
+    /// Detrás van solo las acciones que aplican — «Iniciar» con el puente parado,
+    /// «Detener» con el puente activo —, porque <c>ComboBox.Item</c> solo expone
+    /// <c>Caption</c>, <c>Cookie</c> y <c>Tag</c> (no <c>Enabled</c>): no se puede
+    /// grisar un ítem suelto, se quita.
+    /// </para>
+    /// <para>
     /// Al elegir una acción se ejecuta y la selección vuelve al rótulo, de modo que el
     /// desplegable se comporta como un menú y nunca queda marcado en una acción.
     /// </para>
     /// </remarks>
     public class AccionComboBox : DesplegableTraducible
     {
-        // Textos del add-in original para el rótulo, tomados de config.xml.
-        private readonly string _rotuloOriginal;
-
-        // Índices dentro de la lista: 0 = rótulo, 1..5 = las cinco acciones.
+        // Índice 0 = rótulo; detrás, las acciones vigentes según el estado del puente.
         private const int IndiceRotulo = 0;
+
+        private AccionesMcp.Accion[] _acciones = new AccionesMcp.Accion[0];
 
         protected override string ClaveIdioma { get { return "combo.accion"; } }
 
         public AccionComboBox()
         {
-            _rotuloOriginal = IdiomaCfg.TOriginal("combo.accion.rotulo");
             Repoblar();
         }
 
-        /// <summary>
-        /// Textos de la lista en el idioma pedido: rótulo + las cinco acciones.
-        /// </summary>
+        /// <summary>Acciones que se ofrecen con el puente en ese estado.</summary>
+        private static AccionesMcp.Accion[] Visibles(bool activo)
+        {
+            return activo
+                ? new[]
+                {
+                    AccionesMcp.Accion.Detener, AccionesMcp.Accion.Estado,
+                    AccionesMcp.Accion.Reportar, AccionesMcp.Accion.AcercaDe,
+                }
+                : new[]
+                {
+                    AccionesMcp.Accion.Iniciar, AccionesMcp.Accion.Estado,
+                    AccionesMcp.Accion.Reportar, AccionesMcp.Accion.AcercaDe,
+                };
+        }
+
+        private static string TextoAccion(Idioma idioma, AccionesMcp.Accion accion)
+        {
+            switch (accion)
+            {
+                case AccionesMcp.Accion.Iniciar: return IdiomaCfg.TEn(idioma, "btn.start.caption");
+                case AccionesMcp.Accion.Detener: return IdiomaCfg.TEn(idioma, "btn.stop.caption");
+                case AccionesMcp.Accion.Estado: return IdiomaCfg.TEn(idioma, "btn.status.caption");
+                case AccionesMcp.Accion.Reportar: return IdiomaCfg.TEn(idioma, "combo.accion.report");
+                default: return IdiomaCfg.TEn(idioma, "combo.accion.about");
+            }
+        }
+
+        /// <summary>Textos de la lista, en orden: rótulo con el estado + acciones.</summary>
         private string[] Textos(Idioma idioma)
         {
-            List<string> textos = new List<string>(6);
-
-            if (idioma == Idioma.Espanol)
-                textos.Add(_rotuloOriginal);
-            else
-                textos.Add(IdiomaCfg.TEn(idioma, "combo.accion.caption"));
-
-            // Iniciar, detener y estado comparten el diccionario con los antiguos
-            // botones; reportar y acerca de tienen su propia clave porque aquí su
-            // rótulo es más corto (no caben en el ancho del desplegable).
-            textos.Add(IdiomaCfg.TEn(idioma, "btn.start.caption"));
-            textos.Add(IdiomaCfg.TEn(idioma, "btn.stop.caption"));
-            textos.Add(IdiomaCfg.TEn(idioma, "btn.status.caption"));
-            textos.Add(IdiomaCfg.TEn(idioma, "combo.accion.report"));
-            textos.Add(IdiomaCfg.TEn(idioma, "combo.accion.about"));
-
-            return textos.ToArray();
+            bool activo = AccionesMcp.PuenteActivo();
+            AccionesMcp.Accion[] visibles = Visibles(activo);
+            string[] textos = new string[visibles.Length + 1];
+            textos[0] = IdiomaCfg.TEn(idioma, activo ? "combo.accion.activo" : "combo.accion.parado");
+            for (int i = 0; i < visibles.Length; i++)
+                textos[i + 1] = TextoAccion(idioma, visibles[i]);
+            return textos;
         }
 
         protected override string[] TextosEsperados()
@@ -76,6 +97,8 @@ namespace ArcmapMcp.AddIn
 
         protected override void Repoblar()
         {
+            bool activo = AccionesMcp.PuenteActivo();
+            _acciones = Visibles(activo);
             string[] textos = Textos(IdiomaCfg.Actual);
 
             // Se conserva el índice seleccionado si era válido; el rótulo si no.
@@ -93,13 +116,11 @@ namespace ArcmapMcp.AddIn
             if (!EsEventoDeUsuario(cookie)) return;
 
             int indice = IndiceDeCookie(cookie);
-            if (indice <= IndiceRotulo)
-            {
-                // Rótulo elegido a propósito (o eco): no hay nada que ejecutar.
-                return;
-            }
+            if (indice <= IndiceRotulo) return;          // rótulo elegido a propósito (o eco)
+            int posicion = indice - 1;
+            if (posicion >= _acciones.Length) return;    // lista de otro estado, ya repoblada
 
-            AccionesMcp.Accion accion = (AccionesMcp.Accion)(indice - 1);
+            AccionesMcp.Accion accion = _acciones[posicion];
 
             // Volver al rótulo ANTES de ejecutar: las acciones abren diálogos modales y,
             // si la selección siguiera en la acción, al cerrar el diálogo ArcMap
@@ -112,14 +133,17 @@ namespace ArcmapMcp.AddIn
         protected override void OnUpdate()
         {
             SincronizarIdioma();
+
+            // El tooltip NO se puede reescribir: ComboBox no expone Caption, Message ni
+            // Tooltip (solo Enabled, Value, items y Selected), así que el texto sale de
+            // config.xml y es el mismo en los dos idiomas. Por eso la autoría va ahí.
             Enabled = true;
         }
     }
-
     /// <summary>
     /// Autoarranque del puente, como DESPLEGABLE y no como botón: el icono de un
     /// botón no se puede repintar en caliente (la clase Button de los add-ins solo
-    /// expone Caption, Message, Tooltip, Enabled y Checked) y el "pulsado" de
+    /// expone Caption, Message, ToolTip, Enabled y Checked) y el "pulsado" de
     /// Checked se lee mal en la barra. Un desplegable enseña el valor en texto,
     /// siempre visible y sin configurar nada.
     /// </summary>
