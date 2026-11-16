@@ -1,4 +1,4 @@
-# arcmap-mcp
+﻿# arcmap-mcp
 
 [Español](README.md) · [中文（简体）](README.zh-CN.md)
 
@@ -227,10 +227,10 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 ![ArcMap 中的 arcmap-mcp 工具条](docs/img/barra-addin.png)
 
-从左到右：**Iniciar**（启动）和 **Detener**（停止）桥、**Estado**（状态）、
-**Autoarranque**（自动启动）下拉框、**Reportar**（报告问题）和 **Acerca de**（关于）。
-把下拉框设为 **「Autoarranque: Sí」**（自动启动：是），桥就会在本次及之后所有会话中
-自动拉起。然后：
+工具条有三个下拉框。第一个 **操作** 的标签上写着桥的状态——「操作：桥运行中」／
+「操作：已停止」——里面只有当前能用的 **启动** 或 **停止**，另有 **状态**、**反馈问题**
+和 **关于**。另外两个是 **自动启动** 和 **语言**。把 **自动启动** 设为「开」，桥就会在
+本次及之后所有会话中自动拉起。然后：
 
 ```powershell
 .\install.ps1 -SoloVerificar    # 检查安装并对桥做一次真实 ping
@@ -239,7 +239,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 完整重启你的 AI 客户端（MCP 服务器注册表在启动时读取），然后让它调用 `ping` 工具。
 要全部卸载：`.\install.ps1 -Desinstalar`。
 
-**如果有什么不对，Status（Estado）按钮**会告诉你桥是否活动、加载的是哪个 add-in 版本
+**如果有什么不对，操作 ▸ 状态**会告诉你桥是否活动、加载的是哪个 add-in 版本
 （ArcMap 里实际安装的那个，这才是算数的那个）、是否有更新的版本、本次会话已处理多少请求和
 错误，以及日志在哪里：
 
@@ -303,13 +303,12 @@ add-in 是针对 ArcMap **10.5** 编译的，并在该版本的真实使用中�
 静默失败），可手动安装：解压/复制 `.esriaddin` 的内容
 （它是个 ZIP）到
 `%USERPROFILE%\Documents\ArcGIS\AddIns\Desktop10.5\{51f4ce63-6bcf-49b2-ae3a-ba2c79ea3e1a}\`
-然后重新打开 ArcMap。工具条带 6 个按钮：**Iniciar / Detener / Estado / Autoarranque /
-Reportar / Acerca de**。**Reportar**（报告）会打开一个预填了会话诊断信息的
+然后重新打开 ArcMap。工具条有三个下拉框：**操作**、**自动启动** 和 **语言**。**Reportar**（报告）会打开一个预填了会话诊断信息的
 GitHub issue 或邮件（不含项目数据）；而日志可能包含图层名和路径，不会自动附加。
 打开 ArcMap 时，add-in 会在后台检查 GitHub 上是否有新版本，并在 **Estado** 和
 **Acerca de** 中提示（没有网络时静默）。
 
-点击 **Iniciar**（启动）→ 弹出「Puente iniciado」（桥已启动）消息框，add-in 开始监听
+在 **操作** 下拉框里选 **启动** → 弹出「Puente iniciado」（桥已启动）消息框，add-in 开始监听
 `127.0.0.1:27179`。add-in 把日志写到 `C:\MCP_Logs\arcmap-mcp.log`。
 
 ### 2. 拉起 / 监视隧道

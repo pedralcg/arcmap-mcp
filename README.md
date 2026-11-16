@@ -1,4 +1,4 @@
-# arcmap-mcp
+﻿# arcmap-mcp
 
 [Español](README.md) · [中文（简体）](README.zh-CN.md)
 
@@ -243,10 +243,11 @@ Abre ArcMap. La barra no aparece sola la primera vez: actívala en **Customize �
 
 ![Barra arcmap-mcp en ArcMap](docs/img/barra-addin.png)
 
-De izquierda a derecha: **Iniciar** y **Detener** el puente, **Estado**, el desplegable de
-**Autoarranque**, **Reportar** (un problema) y **Acerca de**. Pon el desplegable en
-**«Autoarranque: Sí»** y el puente se levantará solo en esta sesión y en todas las
-siguientes. Después:
+La barra trae tres desplegables. El primero, **Acciones**, lleva el estado del puente en su
+rótulo —«Acciones: puente activo» / «Acciones: parado»— y dentro ofrece **Iniciar** o
+**Detener** (solo el que toque), **Estado**, **Reportar** y **Acerca de**. Los otros dos son
+**Autoarranque** e **Idioma**. Pon **Autoarranque** en «Sí» y el puente se levantará solo en
+esta sesión y en todas las siguientes. Después:
 
 ```powershell
 .\install.ps1 -SoloVerificar    # comprueba la instalación y hace un ping real al puente
@@ -255,7 +256,7 @@ siguientes. Después:
 Reinicia por completo tu cliente IA (el registro de servidores MCP se lee al arrancar) y
 pídele la herramienta `ping`. Para desinstalarlo todo: `.\install.ps1 -Desinstalar`.
 
-**Si algo no va, el botón Estado** dice si el puente está activo, qué versión del add-in
+**Si algo no va, Acciones ▸ Estado** dice si el puente está activo, qué versión del add-in
 está cargada (la que ArcMap tiene instalada, que es la que cuenta), si hay una más nueva,
 cuántas peticiones y errores lleva la sesión y dónde está el log:
 
@@ -321,14 +322,13 @@ Si al abrir ArcMap no aparece la barra **arcmap-mcp** (el instalador de Esri a v
 falla en silencio), instalación manual: extrae/copia el contenido del `.esriaddin`
 (es un ZIP) a
 `%USERPROFILE%\Documents\ArcGIS\AddIns\Desktop10.5\{51f4ce63-6bcf-49b2-ae3a-ba2c79ea3e1a}\`
-y reabre ArcMap. La barra trae 6 botones: **Iniciar / Detener / Estado / Autoarranque /
-Reportar / Acerca de**. **Reportar** abre un issue de GitHub o un email pre-rellenados
+y reabre ArcMap. La barra trae tres desplegables: **Acciones**, **Autoarranque** e **Idioma**. **Reportar** abre un issue de GitHub o un email pre-rellenados
 con el diagnóstico de la sesión (sin datos de proyecto); el log, que sí puede contener
 nombres de capas y rutas, no se adjunta solo. Al abrir ArcMap, el add-in comprueba en
 segundo plano si hay una versión nueva en GitHub y lo indica en **Estado** y **Acerca de**
 (silencioso si no hay internet).
 
-Pulsa **Iniciar** → MessageBox «Puente iniciado» y el add-in escucha en
+Elige **Iniciar** en el desplegable **Acciones** → MessageBox «Puente iniciado» y el add-in escucha en
 `127.0.0.1:27179`. El add-in escribe su log en `C:\MCP_Logs\arcmap-mcp.log`.
 
 ### 2. Levantar / vigilar el túnel

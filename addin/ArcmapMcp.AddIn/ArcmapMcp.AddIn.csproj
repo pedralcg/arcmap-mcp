@@ -19,7 +19,31 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <!-- Newtonsoft.Json.dll debe caer en bin\ para empaquetarlo en Install\ -->
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+
+    <!-- ==================================================================
+         Versión de ArcGIS contra la que se compila.
+         Por defecto 10.5 (el target declarado en Config.xml), que es lo que
+         publica el mantenedor. Para compilar en un equipo con otra versión
+         instalada, se pasa por parámetro y no hay que editar rutas a mano:
+
+             dotnet build -p:ArcGISVersion=10.8
+
+         Las rutas de abajo se derivan de esta propiedad, así que el mismo
+         .csproj sirve para 10.4 a 10.8.
+         ================================================================== -->
+    <ArcGISVersion Condition="'$(ArcGISVersion)' == ''">10.5</ArcGISVersion>
+    <ArcGISDesktopDir Condition="'$(ArcGISDesktopDir)' == ''">C:\Program Files (x86)\ArcGIS\Desktop$(ArcGISVersion)</ArcGISDesktopDir>
+    <!-- Componente de versión que usa el nombre de carpeta del GAC: v4.0_10.5.0.0__… -->
+    <ArcGISGacVersion>$(ArcGISVersion).0.0</ArcGISGacVersion>
+    <ArcGISGacDir Condition="'$(ArcGISGacDir)' == ''">C:\Windows\Microsoft.NET\assembly\GAC_MSIL</ArcGISGacDir>
   </PropertyGroup>
+
+  <!-- Aviso temprano si la ruta de ArcGIS no existe: sin esto el error que sale es
+       una lista de referencias rotas que no dice cuál es el problema real. -->
+  <Target Name="ComprobarArcGIS" BeforeTargets="ResolveAssemblyReferences">
+    <Warning Condition="!Exists('$(ArcGISDesktopDir)\bin\ESRI.ArcGIS.Desktop.AddIns.dll')"
+             Text="No se encuentra $(ArcGISDesktopDir)\bin\ESRI.ArcGIS.Desktop.AddIns.dll. Compila con -p:ArcGISVersion=&lt;tu versión&gt; o -p:ArcGISDesktopDir=&lt;ruta&gt;." />
+  </Target>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
@@ -49,67 +73,67 @@
 
   <ItemGroup>
     <Reference Include="ESRI.ArcGIS.Desktop.AddIns">
-      <HintPath>C:\Program Files (x86)\ArcGIS\Desktop10.5\bin\ESRI.ArcGIS.Desktop.AddIns.dll</HintPath>
+      <HintPath>$(ArcGISDesktopDir)\bin\ESRI.ArcGIS.Desktop.AddIns.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="ESRI.ArcGIS.System">
-      <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.System\v4.0_10.5.0.0__8fc3cc631e44ad86\ESRI.ArcGIS.System.dll</HintPath>
+      <HintPath>$(ArcGISGacDir)\ESRI.ArcGIS.System\v4.0_$(ArcGISGacVersion)__8fc3cc631e44ad86\ESRI.ArcGIS.System.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="ESRI.ArcGIS.Framework">
-      <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.Framework\v4.0_10.5.0.0__8fc3cc631e44ad86\ESRI.ArcGIS.Framework.dll</HintPath>
+      <HintPath>$(ArcGISGacDir)\ESRI.ArcGIS.Framework\v4.0_$(ArcGISGacVersion)__8fc3cc631e44ad86\ESRI.ArcGIS.Framework.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="ESRI.ArcGIS.ArcMapUI">
-      <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.ArcMapUI\v4.0_10.5.0.0__8fc3cc631e44ad86\ESRI.ArcGIS.ArcMapUI.dll</HintPath>
+      <HintPath>$(ArcGISGacDir)\ESRI.ArcGIS.ArcMapUI\v4.0_$(ArcGISGacVersion)__8fc3cc631e44ad86\ESRI.ArcGIS.ArcMapUI.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="ESRI.ArcGIS.Carto">
-      <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.Carto\v4.0_10.5.0.0__8fc3cc631e44ad86\ESRI.ArcGIS.Carto.dll</HintPath>
+      <HintPath>$(ArcGISGacDir)\ESRI.ArcGIS.Carto\v4.0_$(ArcGISGacVersion)__8fc3cc631e44ad86\ESRI.ArcGIS.Carto.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="ESRI.ArcGIS.Geometry">
-      <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.Geometry\v4.0_10.5.0.0__8fc3cc631e44ad86\ESRI.ArcGIS.Geometry.dll</HintPath>
+      <HintPath>$(ArcGISGacDir)\ESRI.ArcGIS.Geometry\v4.0_$(ArcGISGacVersion)__8fc3cc631e44ad86\ESRI.ArcGIS.Geometry.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="ESRI.ArcGIS.Display">
-      <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.Display\v4.0_10.5.0.0__8fc3cc631e44ad86\ESRI.ArcGIS.Display.dll</HintPath>
+      <HintPath>$(ArcGISGacDir)\ESRI.ArcGIS.Display\v4.0_$(ArcGISGacVersion)__8fc3cc631e44ad86\ESRI.ArcGIS.Display.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="ESRI.ArcGIS.Geodatabase">
-      <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.Geodatabase\v4.0_10.5.0.0__8fc3cc631e44ad86\ESRI.ArcGIS.Geodatabase.dll</HintPath>
+      <HintPath>$(ArcGISGacDir)\ESRI.ArcGIS.Geodatabase\v4.0_$(ArcGISGacVersion)__8fc3cc631e44ad86\ESRI.ArcGIS.Geodatabase.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="ESRI.ArcGIS.Output">
-      <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.Output\v4.0_10.5.0.0__8fc3cc631e44ad86\ESRI.ArcGIS.Output.dll</HintPath>
+      <HintPath>$(ArcGISGacDir)\ESRI.ArcGIS.Output\v4.0_$(ArcGISGacVersion)__8fc3cc631e44ad86\ESRI.ArcGIS.Output.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <!-- run_geoprocessing nativo: IGeoProcessor2 -->
     <Reference Include="ESRI.ArcGIS.Geoprocessing">
-      <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.Geoprocessing\v4.0_10.5.0.0__8fc3cc631e44ad86\ESRI.ArcGIS.Geoprocessing.dll</HintPath>
+      <HintPath>$(ArcGISGacDir)\ESRI.ArcGIS.Geoprocessing\v4.0_$(ArcGISGacVersion)__8fc3cc631e44ad86\ESRI.ArcGIS.Geoprocessing.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <!-- Capas+datos: factories de workspace para shp/gdb/ráster -->
     <Reference Include="ESRI.ArcGIS.DataSourcesFile">
-      <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.DataSourcesFile\v4.0_10.5.0.0__8fc3cc631e44ad86\ESRI.ArcGIS.DataSourcesFile.dll</HintPath>
+      <HintPath>$(ArcGISGacDir)\ESRI.ArcGIS.DataSourcesFile\v4.0_$(ArcGISGacVersion)__8fc3cc631e44ad86\ESRI.ArcGIS.DataSourcesFile.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="ESRI.ArcGIS.DataSourcesGDB">
-      <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.DataSourcesGDB\v4.0_10.5.0.0__8fc3cc631e44ad86\ESRI.ArcGIS.DataSourcesGDB.dll</HintPath>
+      <HintPath>$(ArcGISGacDir)\ESRI.ArcGIS.DataSourcesGDB\v4.0_$(ArcGISGacVersion)__8fc3cc631e44ad86\ESRI.ArcGIS.DataSourcesGDB.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <!-- add_layer de servicios WMS: WMSConnectionName -->
     <Reference Include="ESRI.ArcGIS.GISClient">
-      <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.GISClient\v4.0_10.5.0.0__8fc3cc631e44ad86\ESRI.ArcGIS.GISClient.dll</HintPath>
+      <HintPath>$(ArcGISGacDir)\ESRI.ArcGIS.GISClient\v4.0_$(ArcGISGacVersion)__8fc3cc631e44ad86\ESRI.ArcGIS.GISClient.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="ESRI.ArcGIS.DataSourcesRaster">
-      <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.DataSourcesRaster\v4.0_10.5.0.0__8fc3cc631e44ad86\ESRI.ArcGIS.DataSourcesRaster.dll</HintPath>
+      <HintPath>$(ArcGISGacDir)\ESRI.ArcGIS.DataSourcesRaster\v4.0_$(ArcGISGacVersion)__8fc3cc631e44ad86\ESRI.ArcGIS.DataSourcesRaster.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <!-- open_mxd: saber si hay una sesión de edición abierta (IEditor.EditState) -->
     <Reference Include="ESRI.ArcGIS.Editor">
-      <HintPath>C:\Windows\Microsoft.NET\assembly\GAC_MSIL\ESRI.ArcGIS.Editor\v4.0_10.5.0.0__8fc3cc631e44ad86\ESRI.ArcGIS.Editor.dll</HintPath>
+      <HintPath>$(ArcGISGacDir)\ESRI.ArcGIS.Editor\v4.0_$(ArcGISGacVersion)__8fc3cc631e44ad86\ESRI.ArcGIS.Editor.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>

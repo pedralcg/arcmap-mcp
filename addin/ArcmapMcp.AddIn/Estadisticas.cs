@@ -36,14 +36,14 @@ namespace ArcmapMcp.AddIn
             Interlocked.Increment(ref _errores);
         }
 
-        /// <summary>"list_layers (14:32:07)", o "(ninguno todavía)".</summary>
+        /// <summary>"list_layers (14:32:07)", o el texto de "aún ninguna" del idioma activo.</summary>
         public static string UltimoComando
         {
             get
             {
                 lock (_lock)
                 {
-                    if (_ultimoComando == null) return "(ninguno todavía)";
+                    if (_ultimoComando == null) return IdiomaCfg.T("estado.sinComando");
                     return _ultimoComando + " (" + _ultimaHora.ToString("HH:mm:ss") + ")";
                 }
             }

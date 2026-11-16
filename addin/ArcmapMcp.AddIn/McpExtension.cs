@@ -1,3 +1,4 @@
+using System;
 using System.Diagnostics;
 using System.Threading;
 using System.Windows.Forms;
@@ -42,6 +43,14 @@ namespace ArcmapMcp.AddIn
         protected override void OnStartup()
         {
             _instance = this;
+
+            // 1. Idioma ANTES que nada: los constructores de los desplegables de la barra
+            //    (AccionComboBox, AutoStartComboBox, CambioIdiomaComboBox) ya piden sus
+            //    textos a IdiomaCfg, y ArcMap los instancia justo después de arrancar las
+            //    extensiones. Cargarlo aquí es lo que hace que la barra salga ya en el
+            //    idioma guardado, sin parpadeo ni reinicio.
+            CargarIdioma();
+
             // Capturar el dispatcher AQUÍ (hilo UI), jamás desde el thread del
             // listener: es la única vía segura hacia ArcObjects.
             StaDispatcher.CaptureCurrent();
@@ -53,6 +62,18 @@ namespace ArcmapMcp.AddIn
                      + "; dispatcher STA capturado (thread "
                      + Thread.CurrentThread.ManagedThreadId + ", "
                      + Thread.CurrentThread.GetApartmentState() + ")");
+            // De qué fichero se cargó ESTE código. Sin esto se acaba depurando el fuente
+            // mientras ArcMap ejecuta otra copia del add-in, que es exactamente el atasco
+            // de una tarde entera: el .dll instalado tenía el cambio, el log no lo veía.
+            try
+            {
+                System.Reflection.Assembly asm = typeof(McpExtension).Assembly;
+                Log.Info("Add-in cargado desde: " + asm.Location);
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("No se pudo leer la ubicación del add-in: " + ex.Message);
+            }
 
             // Guard de instancia única: si otra carga de la extensión ya levantó el
             // puente en este proceso, no hay nada que hacer y desde luego nada que
@@ -80,6 +101,43 @@ namespace ArcmapMcp.AddIn
             {
                 _actualizacionComprobada = true;
                 LanzarComprobacionActualizacion();
+            }
+        }
+
+        /// <summary>
+        /// Fija el idioma de la interfaz. La preferencia guardada manda; si el usuario
+        /// nunca la tocó, se deduce del idioma de Windows, de modo que un usuario con
+        /// ArcMap en chino ve la barra en chino desde la primera instalación.
+        /// </summary>
+        private static void CargarIdioma()
+        {
+            try
+            {
+                string guardado = Ajustes.IdiomaGuardado;
+                bool hayPreferencia = !string.IsNullOrEmpty(guardado);
+
+                if (hayPreferencia)
+                {
+                    IdiomaCfg.Establecer(IdiomaCfg.DesdeCodigo(guardado));
+                }
+                else
+                {
+                    Idioma detectado = IdiomaCfg.DetectarDelSistema();
+                    IdiomaCfg.Establecer(detectado);
+                    // Se persiste la deducción para que el desplegable muestre una
+                    // selección estable y no vuelva a deducir en cada arranque.
+                    Ajustes.Idioma = IdiomaCfg.Codigo(detectado);
+                    Log.Info("Idioma sin preferencia previa: deducido del sistema '"
+                             + IdiomaCfg.Codigo(detectado) + "'");
+                }
+
+                Log.Info("Idioma de la interfaz: " + IdiomaCfg.Codigo(IdiomaCfg.Actual));
+            }
+            catch (Exception ex)
+            {
+                // Nunca romper el arranque de ArcMap por el idioma: se cae al español.
+                IdiomaCfg.Establecer(Idioma.Espanol);
+                Log.Error("No se pudo cargar el idioma; se usa español", ex);
             }
         }
 
